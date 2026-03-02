@@ -51,6 +51,7 @@ export interface Settings {
   shortcutSaveInstantReplay: string;
   shortcutToggleRecording: string;
   shortcutTakeScreenshot: string;
+  captureInstantReplayEnabled: boolean;
   microphoneMode: MicrophoneMode;
   microphoneDeviceId: string;
   hideStreamButtons: boolean;
@@ -104,6 +105,24 @@ export interface ClipRecordInput {
   fileUrl?: string;
   durationSeconds?: number;
   source?: "server";
+}
+
+export interface CaptureAssetSaveRequest {
+  clipType: ClipType;
+  gameTitle: string;
+  timestampMs: number;
+  extension: "png" | "webm";
+  bytes: Uint8Array;
+}
+
+export interface CaptureAssetSaveResult {
+  filePath: string;
+  fileUrl: string;
+}
+
+export interface CaptureAssetReadResult {
+  bytes: Uint8Array;
+  mimeType: string;
 }
 
 export interface LoginProvider {
@@ -401,4 +420,6 @@ export interface OpenNowApi {
   pingRegions(regions: StreamRegion[]): Promise<PingResult[]>;
   getClips(): Promise<ClipRecord[]>;
   saveClip(input: ClipRecordInput): Promise<ClipRecord>;
+  saveCaptureAsset(input: CaptureAssetSaveRequest): Promise<CaptureAssetSaveResult>;
+  readCaptureAsset(filePath: string): Promise<CaptureAssetReadResult>;
 }

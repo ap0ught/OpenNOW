@@ -63,16 +63,17 @@ const STATIC_FPS_PRESETS: FpsPreset[] = [
 ];
 
 const isMac = navigator.platform.toLowerCase().includes("mac");
-const shortcutExamples = "Examples: F3, Ctrl+Shift+Q, Ctrl+Shift+K";
+const captureShortcutModifier = isMac ? "Meta" : "Ctrl";
+const shortcutExamples = isMac ? "Examples: F3, Cmd+Shift+Q, Cmd+Shift+K" : "Examples: F3, Ctrl+Shift+Q, Ctrl+Shift+K";
 const shortcutDefaults = {
   shortcutToggleStats: "F3",
   shortcutTogglePointerLock: "F8",
   shortcutStopStream: "Ctrl+Shift+Q",
   shortcutToggleAntiAfk: "Ctrl+Shift+K",
   shortcutToggleMicrophone: "Ctrl+Shift+M",
-  shortcutSaveInstantReplay: "Ctrl+Shift+F10",
-  shortcutToggleRecording: "Ctrl+Shift+F9",
-  shortcutTakeScreenshot: "Ctrl+Shift+F7",
+  shortcutSaveInstantReplay: `${captureShortcutModifier}+0`,
+  shortcutToggleRecording: `${captureShortcutModifier}+9`,
+  shortcutTakeScreenshot: `${captureShortcutModifier}+1`,
 } as const;
 
 const microphoneModeOptions: Array<{ value: MicrophoneMode; label: string }> = [
@@ -874,6 +875,21 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
     }
   };
 
+  const handleInstantReplayToggle = useCallback(
+    (nextEnabled: boolean) => {
+      if (nextEnabled && !settings.captureInstantReplayEnabled) {
+        const accepted = window.confirm(
+          "Instant Replay continuously buffers your stream and can increase latency or stutter on low-end devices. Enable Instant Replay anyway?",
+        );
+        if (!accepted) {
+          return;
+        }
+      }
+      handleChange("captureInstantReplayEnabled", nextEnabled);
+    },
+    [handleChange, settings.captureInstantReplayEnabled],
+  );
+
   const areShortcutsDefault = useMemo(
     () =>
       settings.shortcutToggleStats === shortcutDefaults.shortcutToggleStats
@@ -1551,6 +1567,21 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
                 </div>
               </div>
 
+              <div className="settings-row">
+                <label className="settings-label">
+                  Enable Instant Replay
+                  <span className="settings-hint">May increase stream latency or stutter on lower-end devices.</span>
+                </label>
+                <label className="settings-toggle">
+                  <input
+                    type="checkbox"
+                    checked={settings.captureInstantReplayEnabled}
+                    onChange={(e) => handleInstantReplayToggle(e.target.checked)}
+                  />
+                  <span className="settings-toggle-track" />
+                </label>
+              </div>
+
               <div className="settings-shortcut-grid">
                 <label className="settings-shortcut-row">
                   <span className="settings-shortcut-label">Toggle Stats</span>
@@ -1631,7 +1662,7 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
                     onChange={(e) => setSaveInstantReplayInput(e.target.value)}
                     onBlur={() => handleShortcutBlur("shortcutSaveInstantReplay", saveInstantReplayInput, setSaveInstantReplayInput, setSaveInstantReplayError)}
                     onKeyDown={handleShortcutKeyDown}
-                    placeholder="Ctrl+Shift+F10"
+                    placeholder={formatShortcutForDisplay(shortcutDefaults.shortcutSaveInstantReplay, isMac)}
                     spellCheck={false}
                   />
                 </label>
@@ -1645,7 +1676,7 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
                     onChange={(e) => setToggleRecordingInput(e.target.value)}
                     onBlur={() => handleShortcutBlur("shortcutToggleRecording", toggleRecordingInput, setToggleRecordingInput, setToggleRecordingError)}
                     onKeyDown={handleShortcutKeyDown}
-                    placeholder="Ctrl+Shift+F9"
+                    placeholder={formatShortcutForDisplay(shortcutDefaults.shortcutToggleRecording, isMac)}
                     spellCheck={false}
                   />
                 </label>
@@ -1659,7 +1690,7 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
                     onChange={(e) => setTakeScreenshotInput(e.target.value)}
                     onBlur={() => handleShortcutBlur("shortcutTakeScreenshot", takeScreenshotInput, setTakeScreenshotInput, setTakeScreenshotError)}
                     onKeyDown={handleShortcutKeyDown}
-                    placeholder="Ctrl+Shift+F7"
+                    placeholder={formatShortcutForDisplay(shortcutDefaults.shortcutTakeScreenshot, isMac)}
                     spellCheck={false}
                   />
                 </label>

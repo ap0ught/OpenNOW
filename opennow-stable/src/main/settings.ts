@@ -36,6 +36,8 @@ export interface Settings {
   shortcutToggleRecording: string;
   /** Take screenshot shortcut */
   shortcutTakeScreenshot: string;
+  /** Enable instant replay capture actions */
+  captureInstantReplayEnabled: boolean;
   /** How often to re-show the session timer while streaming (0 = off) */
   sessionClockShowEveryMinutes: number;
   /** How long the session timer stays visible when it appears */
@@ -57,8 +59,15 @@ export interface Settings {
 const defaultStopShortcut = "Ctrl+Shift+Q";
 const defaultAntiAfkShortcut = "Ctrl+Shift+K";
 const defaultMicShortcut = "Ctrl+Shift+M";
+const captureShortcutModifier = process.platform === "darwin" ? "Meta" : "Ctrl";
+const defaultSaveReplayShortcut = `${captureShortcutModifier}+0`;
+const defaultRecordShortcut = `${captureShortcutModifier}+9`;
+const defaultScreenshotShortcut = `${captureShortcutModifier}+1`;
 const LEGACY_STOP_SHORTCUTS = new Set(["META+SHIFT+Q", "CMD+SHIFT+Q"]);
 const LEGACY_ANTI_AFK_SHORTCUTS = new Set(["META+SHIFT+F10", "CMD+SHIFT+F10", "CTRL+SHIFT+F10"]);
+const LEGACY_SAVE_REPLAY_SHORTCUTS = new Set(["ALT+F10", "CTRL+SHIFT+F10", "META+SHIFT+F10", "CMD+SHIFT+F10"]);
+const LEGACY_RECORD_SHORTCUTS = new Set(["ALT+F9", "CTRL+SHIFT+F9", "META+SHIFT+F9", "CMD+SHIFT+F9"]);
+const LEGACY_SCREENSHOT_SHORTCUTS = new Set(["ALT+F1", "CTRL+SHIFT+F7", "META+SHIFT+F7", "CMD+SHIFT+F7"]);
 
 const DEFAULT_SETTINGS: Settings = {
   resolution: "1920x1080",
@@ -74,9 +83,10 @@ const DEFAULT_SETTINGS: Settings = {
   shortcutStopStream: defaultStopShortcut,
   shortcutToggleAntiAfk: defaultAntiAfkShortcut,
   shortcutToggleMicrophone: defaultMicShortcut,
-  shortcutSaveInstantReplay: "Ctrl+Shift+F10",
-  shortcutToggleRecording: "Ctrl+Shift+F9",
-  shortcutTakeScreenshot: "Ctrl+Shift+F7",
+  shortcutSaveInstantReplay: defaultSaveReplayShortcut,
+  shortcutToggleRecording: defaultRecordShortcut,
+  shortcutTakeScreenshot: defaultScreenshotShortcut,
+  captureInstantReplayEnabled: false,
   microphoneMode: "disabled",
   microphoneDeviceId: "",
   hideStreamButtons: false,
@@ -132,6 +142,9 @@ export class SettingsManager {
     const normalizeShortcut = (value: string): string => value.replace(/\s+/g, "").toUpperCase();
     const stopShortcut = normalizeShortcut(settings.shortcutStopStream);
     const antiAfkShortcut = normalizeShortcut(settings.shortcutToggleAntiAfk);
+    const saveReplayShortcut = normalizeShortcut(settings.shortcutSaveInstantReplay);
+    const recordShortcut = normalizeShortcut(settings.shortcutToggleRecording);
+    const screenshotShortcut = normalizeShortcut(settings.shortcutTakeScreenshot);
 
     if (LEGACY_STOP_SHORTCUTS.has(stopShortcut)) {
       settings.shortcutStopStream = defaultStopShortcut;
@@ -140,6 +153,21 @@ export class SettingsManager {
 
     if (LEGACY_ANTI_AFK_SHORTCUTS.has(antiAfkShortcut)) {
       settings.shortcutToggleAntiAfk = defaultAntiAfkShortcut;
+      migrated = true;
+    }
+
+    if (LEGACY_SAVE_REPLAY_SHORTCUTS.has(saveReplayShortcut)) {
+      settings.shortcutSaveInstantReplay = defaultSaveReplayShortcut;
+      migrated = true;
+    }
+
+    if (LEGACY_RECORD_SHORTCUTS.has(recordShortcut)) {
+      settings.shortcutToggleRecording = defaultRecordShortcut;
+      migrated = true;
+    }
+
+    if (LEGACY_SCREENSHOT_SHORTCUTS.has(screenshotShortcut)) {
+      settings.shortcutTakeScreenshot = defaultScreenshotShortcut;
       migrated = true;
     }
 

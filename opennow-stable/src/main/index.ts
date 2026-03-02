@@ -33,6 +33,9 @@ import type {
   StreamRegion,
   ClipRecord,
   ClipRecordInput,
+  CaptureAssetSaveRequest,
+  CaptureAssetSaveResult,
+  CaptureAssetReadResult,
 } from "@shared/gfn";
 
 import { getSettingsManager, type SettingsManager } from "./settings";
@@ -480,6 +483,20 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.CLIPS_SAVE, async (_event, payload: ClipRecordInput): Promise<ClipRecord> => {
     return clipStore.save(payload);
   });
+
+  ipcMain.handle(
+    IPC_CHANNELS.CAPTURE_SAVE_ASSET,
+    async (_event, payload: CaptureAssetSaveRequest): Promise<CaptureAssetSaveResult> => {
+      return clipStore.saveAsset(payload);
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.CAPTURE_READ_ASSET,
+    async (_event, filePath: string): Promise<CaptureAssetReadResult> => {
+      return clipStore.readAsset(filePath);
+    },
+  );
 
   // Logs export IPC handler
   ipcMain.handle(IPC_CHANNELS.LOGS_EXPORT, async (_event, format: "text" | "json" = "text"): Promise<string> => {

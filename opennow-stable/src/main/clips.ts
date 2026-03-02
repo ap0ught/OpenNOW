@@ -1,9 +1,16 @@
 import { app } from "electron";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { extname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 
-import type { ClipRecord, ClipRecordInput } from "@shared/gfn";
+import type {
+  ClipRecord,
+  ClipRecordInput,
+  CaptureAssetSaveRequest,
+  CaptureAssetSaveResult,
+  CaptureAssetReadResult,
+} from "@shared/gfn";
 
 interface ClipStoreFile {
   clips: ClipRecord[];
@@ -72,9 +79,40 @@ export class ClipStore {
     return clip;
   }
 
+  public saveAsset(input: CaptureAssetSaveRequest): CaptureAssetSaveResult {
+    const safeTitle = (input.gameTitle || "capture")
+      .replace(/[^\w.-]+/g, "_")
+      .slice(0, 48);
+    const stamp = new Date(input.timestampMs || Date.now())
+      .toISOString()
+      .replace(/[:.]/g, "-");
+    const extension = input.extension === "png" ? "png" : "webm";
+    const captureDir = join(app.getPath("videos"), "OpenNOW", "Captures");
+    if (!existsSync(captureDir)) {
+      mkdirSync(captureDir, { recursive: true });
+    }
+    const fileName = `${safeTitle}_${input.clipType}_${stamp}.${extension}`;
+    const filePath = join(captureDir, fileName);
+    writeFileSync(filePath, Buffer.from(input.bytes));
+    return {
+      filePath,
+      fileUrl: pathToFileURL(filePath).toString(),
+    };
+  }
+
+  public readAsset(filePath: string): CaptureAssetReadResult {
+    const bytes = new Uint8Array(readFileSync(filePath));
+    const ext = extname(filePath).toLowerCase();
+    const mimeType =
+      ext === ".png" ? "image/png"
+      : ext === ".webm" ? "video/webm"
+      : ext === ".mp4" ? "video/mp4"
+      : "application/octet-stream";
+    return { bytes, mimeType };
+  }
+
   public resetForTests(): void {
     this.clips = [...EMPTY_STORE.clips];
     this.persist();
   }
 }
-

@@ -20,6 +20,7 @@ import type {
   SubscriptionFetchRequest,
   StreamRegion,
   ClipRecordInput,
+  CaptureAssetSaveRequest,
 } from "@shared/gfn";
 
 // Extend the OpenNowApi interface for internal preload use
@@ -79,6 +80,8 @@ const api: PreloadApi = {
   pingRegions: (regions: StreamRegion[]) => ipcRenderer.invoke(IPC_CHANNELS.PING_REGIONS, regions),
   getClips: () => ipcRenderer.invoke(IPC_CHANNELS.CLIPS_GET),
   saveClip: (input: ClipRecordInput) => ipcRenderer.invoke(IPC_CHANNELS.CLIPS_SAVE, input),
+  saveCaptureAsset: (input: CaptureAssetSaveRequest) => ipcRenderer.invoke(IPC_CHANNELS.CAPTURE_SAVE_ASSET, input),
+  readCaptureAsset: (filePath: string) => ipcRenderer.invoke(IPC_CHANNELS.CAPTURE_READ_ASSET, filePath),
 };
 
 contextBridge.exposeInMainWorld("openNow", api);

@@ -178,6 +178,20 @@ export interface StreamTimeWarning {
   secondsLeft?: number;
 }
 
+interface ShortcutKeySpec {
+  vk: number;
+  scancode: number;
+}
+
+interface ShortcutModifierSpec extends ShortcutKeySpec {
+  flag: number;
+}
+
+interface CaptureCommandOptions {
+  recordingActive: boolean;
+  fallbackShortcut?: string;
+}
+
 interface ClientOptions {
   videoElement: HTMLVideoElement;
   audioElement: HTMLAudioElement;
@@ -435,6 +449,7 @@ export class GfnWebRtcClient {
   private reliableInputChannel: RTCDataChannel | null = null;
   private mouseInputChannel: RTCDataChannel | null = null;
   private controlChannel: RTCDataChannel | null = null;
+  private remoteTraceChannel: RTCDataChannel | null = null;
   private audioContext: AudioContext | null = null;
 
   private inputReady = false;
@@ -461,7 +476,7 @@ export class GfnWebRtcClient {
   // How long to wait after last gamepad activity before allowing switch to mkb (seconds)
   // Prevents accidental key/mouse events from disrupting controller gameplay
   private static readonly GAMEPAD_MODE_LOCKOUT_MS = 3000;
-  private static readonly MOUSE_FLUSH_FAST_MS = 4;
+  private static readonly MOUSE_FLUSH_FAST_MS = 8;
   private static readonly MOUSE_FLUSH_NORMAL_MS = 8;
   private static readonly MOUSE_FLUSH_SAFE_MS = 16;
   private static readonly DEFAULT_PARTIAL_RELIABLE_THRESHOLD_MS = 300;
@@ -515,6 +530,10 @@ export class GfnWebRtcClient {
   private inputQueueMaxSchedulingDelayMsWindow = 0;
   private inputQueuePressureLoggedAtMs = 0;
   private inputQueueDropCount = 0;
+  private captureFallbackTimers = new Map<CaptureAction, number>();
+  private captureActionLastSentAtMs = new Map<CaptureAction, number>();
+  private static readonly CAPTURE_FALLBACK_DELAY_MS = 900;
+  private static readonly CAPTURE_ACTION_DEBOUNCE_MS = 250;
 
   // Microphone
   private micManager: MicrophoneManager | null = null;
@@ -620,21 +639,15 @@ export class GfnWebRtcClient {
   }
 
   /**
-   * Configure an RTCRtpReceiver for minimum jitter buffer delay.
+   * Configure an RTCRtpReceiver for low-latency playback with stutter-safe defaults.
    *
    * jitterBufferTarget controls how long Chrome holds decoded frames before
-   * displaying them. Setting to 0 tells the browser to use the absolute
-   * minimum buffer — effectively "display as soon as decoded". This is
-   * aggressive but correct for cloud gaming where we prioritize latency
-   * over smoothness.
-   *
-   * The official GFN browser client doesn't set this at all (defaulting to
-   * ~100-200ms). As an Electron app we can be more aggressive.
-   *
+   * displaying them. Extremely low targets can cause visible stutter on
+   * decode-constrained machines, so we use moderate values here.
    */
   private configureReceiverForLowLatency(receiver: RTCRtpReceiver, kind: string): void {
     try {
-      const targetMs = kind === "video" ? 12 : 20;
+      const targetMs = kind === "video" ? 36 : 28;
       const rawReceiver = receiver as unknown as Record<string, unknown>;
 
       if ("jitterBufferTarget" in receiver) {
@@ -643,7 +656,7 @@ export class GfnWebRtcClient {
       }
 
       if ("playoutDelayHint" in receiver) {
-        const playoutDelaySeconds = kind === "video" ? 0.012 : 0.02;
+        const playoutDelaySeconds = kind === "video" ? 0.036 : 0.028;
         rawReceiver.playoutDelayHint = playoutDelaySeconds;
         this.log(`${kind} receiver: playoutDelayHint set to ${playoutDelaySeconds}s`);
       }
@@ -719,12 +732,19 @@ export class GfnWebRtcClient {
       this.controlChannel.onclose = null;
       this.controlChannel.onerror = null;
     }
+    if (this.remoteTraceChannel) {
+      this.remoteTraceChannel.onmessage = null;
+      this.remoteTraceChannel.onclose = null;
+      this.remoteTraceChannel.onerror = null;
+    }
     this.reliableInputChannel?.close();
     this.mouseInputChannel?.close();
     this.controlChannel?.close();
+    this.remoteTraceChannel?.close();
     this.reliableInputChannel = null;
     this.mouseInputChannel = null;
     this.controlChannel = null;
+    this.remoteTraceChannel = null;
   }
 
   private clearTimers(): void {
@@ -744,6 +764,7 @@ export class GfnWebRtcClient {
       window.clearInterval(this.gamepadPollTimer);
       this.gamepadPollTimer = null;
     }
+    this.clearCaptureFallbackTimers();
   }
 
   private setupStatsPolling(): void {
@@ -1188,17 +1209,16 @@ export class GfnWebRtcClient {
       window.clearInterval(this.gamepadPollTimer);
     }
 
-    this.log("Gamepad polling started (250Hz)");
+    this.log("Gamepad polling started (125Hz)");
 
-    // Poll at 250Hz (4ms interval) — the practical minimum for setInterval in browsers.
-    // The Rust reference polls at 1000Hz; browser timers can't go below ~4ms reliably.
-    // Previous 60Hz (16.6ms) added up to 1-2 frames of input lag at 120fps.
+    // Poll at 125Hz (8ms interval) to reduce CPU pressure and main-thread jitter spikes
+    // that can contribute to stream stutter on weaker client machines.
     this.gamepadPollTimer = window.setInterval(() => {
       if (!this.inputReady) {
         return;
       }
       this.pollGamepads();
-    }, 4);
+    }, 8);
   }
 
   private gamepadSendCount = 0;
@@ -1502,6 +1522,52 @@ export class GfnWebRtcClient {
       };
     }
 
+    const commandName = String(
+      (parsed as { name?: unknown }).name
+      ?? (parsed as { commandName?: unknown }).commandName
+      ?? "",
+    ).toLowerCase();
+    if (commandName.startsWith("rise_")) {
+      const status = String((parsed as { status?: unknown }).status ?? "").toLowerCase();
+      const success =
+        (parsed as { success?: unknown }).success === true
+        || status === "success"
+        || status === "ok";
+      const message = String((parsed as { message?: unknown }).message ?? "").trim();
+
+      if (commandName.includes("screenshot")) {
+        return {
+          kind: success ? "screenshot-saved" : "capture-error",
+          success,
+          message: message || (success ? "Screenshot saved" : "Screenshot failed"),
+          timestampMs: now,
+          rawPayload: parsed,
+        };
+      }
+      if (commandName.includes("instant_replay")) {
+        return {
+          kind: success ? "instant-replay-saved" : "capture-error",
+          success,
+          message: message || (success ? "Instant replay saved" : "Instant replay failed"),
+          timestampMs: now,
+          rawPayload: parsed,
+        };
+      }
+      if (commandName.includes("record")) {
+        const indicatesStop =
+          /\bstop|stopped|ended|saved\b/i.test(message)
+          || status === "stopped"
+          || status === "stop";
+        return {
+          kind: success ? (indicatesStop ? "recording-stopped" : "recording-started") : "capture-error",
+          success,
+          message: message || (success ? "Recording updated" : "Recording action failed"),
+          timestampMs: now,
+          rawPayload: parsed,
+        };
+      }
+    }
+
     return null;
   }
 
@@ -1549,6 +1615,8 @@ export class GfnWebRtcClient {
     try {
       parsed = JSON.parse(payloadText);
     } catch {
+      const preview = payloadText.slice(0, 120).replace(/\s+/g, " ").trim();
+      this.log(`Control message ignored (non-JSON): ${preview || "<binary/empty>"}`);
       return;
     }
 
@@ -1561,6 +1629,7 @@ export class GfnWebRtcClient {
 
     const captureEvent = this.parseCaptureEvent(parsedObject);
     if (captureEvent) {
+      this.clearCaptureFallbackTimers();
       this.log(`Control capture event: kind=${captureEvent.kind} success=${captureEvent.success}`);
       this.options.onCaptureEvent?.(captureEvent);
     }
@@ -1851,43 +1920,161 @@ export class GfnWebRtcClient {
     return sent;
   }
 
-  public sendCaptureCommand(
-    action: CaptureAction,
-    recordingActive: boolean,
-  ): { accepted: boolean; reason?: string } {
-    if (!this.inputReady || !this.ensureKeyboardInputMode()) {
-      return { accepted: false, reason: "Input channel is not ready" };
+  private clearCaptureFallbackTimers(action?: CaptureAction): void {
+    if (action) {
+      const timer = this.captureFallbackTimers.get(action);
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+        this.captureFallbackTimers.delete(action);
+      }
+      return;
+    }
+    for (const timer of this.captureFallbackTimers.values()) {
+      window.clearTimeout(timer);
+    }
+    this.captureFallbackTimers.clear();
+  }
+
+  private scheduleCaptureShortcutFallback(action: CaptureAction, shortcut: string): void {
+    this.clearCaptureFallbackTimers(action);
+    const timer = window.setTimeout(() => {
+      this.captureFallbackTimers.delete(action);
+      const sent = this.sendShortcutCombination(shortcut);
+      this.log(`Capture fallback shortcut ${sent ? "sent" : "failed"}: ${shortcut}`);
+    }, GfnWebRtcClient.CAPTURE_FALLBACK_DELAY_MS);
+    this.captureFallbackTimers.set(action, timer);
+  }
+
+  private parseShortcutKeyToken(token: string): ShortcutKeySpec | null {
+    const normalized = token.trim().toUpperCase();
+    if (!normalized) return null;
+
+    const functionMatch = normalized.match(/^F(\d{1,2})$/);
+    if (functionMatch?.[1]) {
+      const fNum = Number.parseInt(functionMatch[1], 10);
+      if (fNum >= 1 && fNum <= 24) {
+        const vk = 0x70 + (fNum - 1);
+        const scancode = fNum <= 12 ? (0x39 + fNum) : (0x63 + (fNum - 13));
+        return { vk, scancode };
+      }
     }
 
-    const combo = action === "save-instant-replay"
-      ? { label: "Alt+F10", keyVk: 0x79, keyScancode: 0x43 } // Instant Replay save
-      : action === "take-screenshot"
-        ? { label: "Alt+F1", keyVk: 0x70, keyScancode: 0x3a } // Screenshot
-        : { label: "Alt+F9", keyVk: 0x78, keyScancode: 0x42 }; // Record toggle
+    if (/^[A-Z]$/.test(normalized)) {
+      const code = normalized.charCodeAt(0);
+      return { vk: code, scancode: 0x04 + (code - 65) };
+    }
 
-    // Mirrors the official hotkey-driven capture workflow (DVRSave/DVRToggle/Screenshot).
-    const alt = { vk: 0xa4, scancode: 0xe2, flag: 0x04 };
+    if (/^[0-9]$/.test(normalized)) {
+      const code = normalized.charCodeAt(0);
+      const digit = normalized === "0" ? 10 : Number.parseInt(normalized, 10);
+      return { vk: code, scancode: 0x1d + digit };
+    }
+
+    return null;
+  }
+
+  private parseShortcutModifierToken(token: string): ShortcutModifierSpec | null {
+    const normalized = token.trim().toUpperCase();
+    if (normalized === "CTRL" || normalized === "CONTROL") {
+      return { vk: 0xa2, scancode: 0xe0, flag: 0x02 };
+    }
+    if (normalized === "SHIFT") {
+      return { vk: 0xa0, scancode: 0xe1, flag: 0x01 };
+    }
+    if (normalized === "ALT" || normalized === "OPTION") {
+      return { vk: 0xa4, scancode: 0xe2, flag: 0x04 };
+    }
+    if (normalized === "META" || normalized === "CMD" || normalized === "COMMAND" || normalized === "WIN") {
+      return { vk: 0x5b, scancode: 0xe3, flag: 0x08 };
+    }
+    return null;
+  }
+
+  private sendShortcutCombination(shortcut: string): boolean {
+    if (!this.inputReady || !this.ensureKeyboardInputMode()) {
+      return false;
+    }
+
+    const tokens = shortcut.split("+").map((token) => token.trim()).filter(Boolean);
+    if (tokens.length === 0) {
+      return false;
+    }
+
+    const modifiers: ShortcutModifierSpec[] = [];
+    let keySpec: ShortcutKeySpec | null = null;
+
+    for (const token of tokens) {
+      const modifier = this.parseShortcutModifierToken(token);
+      if (modifier) {
+        modifiers.push(modifier);
+        continue;
+      }
+      if (!keySpec) {
+        keySpec = this.parseShortcutKeyToken(token);
+      }
+    }
+
+    if (!keySpec) {
+      return false;
+    }
+
+    let activeModifiers = 0;
+    for (const modifier of modifiers) {
+      activeModifiers |= modifier.flag;
+      this.sendKeyPacket(modifier.vk, modifier.scancode, activeModifiers, true);
+    }
+
+    this.sendKeyPacket(keySpec.vk, keySpec.scancode, activeModifiers, true);
+    this.sendKeyPacket(keySpec.vk, keySpec.scancode, activeModifiers, false);
+
+    for (let idx = modifiers.length - 1; idx >= 0; idx -= 1) {
+      const modifier = modifiers[idx]!;
+      activeModifiers &= ~modifier.flag;
+      this.sendKeyPacket(modifier.vk, modifier.scancode, activeModifiers, false);
+    }
+
+    return true;
+  }
+
+  public sendCaptureCommand(
+    action: CaptureAction,
+    options: CaptureCommandOptions,
+  ): { accepted: boolean; reason?: string } {
+    const hasControlChannel = !!this.controlChannel && this.controlChannel.readyState === "open";
+    const fallback = options.fallbackShortcut?.trim() ?? "";
+    const now = performance.now();
+    const lastSentAt = this.captureActionLastSentAtMs.get(action);
+    if (lastSentAt !== undefined && now - lastSentAt < GfnWebRtcClient.CAPTURE_ACTION_DEBOUNCE_MS) {
+      return { accepted: false, reason: "Capture action already in progress." };
+    }
+    this.captureActionLastSentAtMs.set(action, now);
 
     try {
-      this.sendKeyPacket(alt.vk, alt.scancode, alt.flag, true);
-      this.sendKeyPacket(combo.keyVk, combo.keyScancode, alt.flag, true);
-      this.sendKeyPacket(combo.keyVk, combo.keyScancode, alt.flag, false);
-      this.sendKeyPacket(alt.vk, alt.scancode, 0, false);
+      const command = action === "save-instant-replay"
+        ? { name: "rise_save_instant_replay" }
+        : action === "take-screenshot"
+          ? { name: "rise_save_screenshot" }
+          : { name: "rise_start_recording", enable: options.recordingActive ? 0 : 1 };
 
-      if (this.controlChannel && this.controlChannel.readyState === "open") {
-        const legacyPayload = action === "save-instant-replay"
-          ? { name: "rise_save_instant_replay" }
-          : action === "take-screenshot"
-            ? { name: "rise_save_screenshot" }
-            : { name: "rise_start_recording", enable: recordingActive ? 0 : 1 };
-        this.controlChannel.send(JSON.stringify({ type: "capture-command", command: legacyPayload, sentAtMs: Date.now() }));
+      if (hasControlChannel) {
+        this.controlChannel!.send(JSON.stringify(command));
+        this.log(`Capture command sent: ${command.name}`);
+        return { accepted: true };
       }
 
-      this.log(`Capture hotkey sent: ${combo.label}`);
-      return { accepted: true };
+      if (fallback && this.sendShortcutCombination(fallback)) {
+        this.log(`Capture shortcut sent: ${fallback}`);
+        return { accepted: true };
+      }
+
+      return { accepted: false, reason: "Capture control channel and configured fallback shortcut are unavailable." };
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      this.log(`Capture hotkey failed: ${reason}`);
+      this.log(`Capture command failed: ${reason}`);
+      if (fallback && this.sendShortcutCombination(fallback)) {
+        this.log(`Capture shortcut sent after command failure: ${fallback}`);
+        return { accepted: true };
+      }
       return { accepted: false, reason };
     }
   }
@@ -2411,6 +2598,121 @@ export class GfnWebRtcClient {
     }
   }
 
+  private async probeDecoderCapability(
+    codec: VideoCodec,
+    width: number,
+    height: number,
+    fps: number,
+    bitrateKbps: number,
+  ): Promise<{ supported: boolean; smooth: boolean; powerEfficient: boolean } | null> {
+    const mediaCapabilities = navigator.mediaCapabilities;
+    if (!mediaCapabilities?.decodingInfo) {
+      return null;
+    }
+
+    const bitrate = Math.max(1, Math.floor(bitrateKbps * 1000));
+    const webrtcContentTypeByCodec: Record<VideoCodec, string> = {
+      H264: "video/h264",
+      H265: "video/h265",
+      AV1: "video/av1",
+    };
+    const fileContentTypeByCodec: Record<VideoCodec, string> = {
+      H264: "video/mp4; codecs=\"avc1.42E01E\"",
+      H265: "video/mp4; codecs=\"hev1.1.6.L93.B0\"",
+      AV1: "video/mp4; codecs=\"av01.0.08M.08\"",
+    };
+
+    const tryDecodeInfo = async (type: "webrtc" | "file", contentType: string) => {
+      const result = await mediaCapabilities.decodingInfo({
+        type,
+        video: {
+          contentType,
+          width,
+          height,
+          framerate: fps,
+          bitrate,
+        },
+      });
+      return {
+        supported: result.supported,
+        smooth: result.smooth,
+        powerEfficient: result.powerEfficient,
+      };
+    };
+
+    try {
+      return await tryDecodeInfo("webrtc", webrtcContentTypeByCodec[codec]);
+    } catch {
+      // Fall through to file profile probe.
+    }
+
+    try {
+      return await tryDecodeInfo("file", fileContentTypeByCodec[codec]);
+    } catch {
+      return null;
+    }
+  }
+
+  private async chooseStableCodec(settings: OfferSettings, supported: string[]): Promise<VideoCodec> {
+    const requested = settings.codec;
+    if (requested === "H264") {
+      return requested;
+    }
+
+    const orderedCandidates: VideoCodec[] = requested === "AV1"
+      ? ["AV1", "H265", "H264"]
+      : ["H265", "H264"];
+    const candidates = orderedCandidates.filter((codec) => supported.length === 0 || supported.includes(codec));
+    if (candidates.length === 0) {
+      return requested;
+    }
+
+    const { width, height } = parseResolution(settings.resolution);
+    const probeResults = new Map<VideoCodec, { supported: boolean; smooth: boolean; powerEfficient: boolean }>();
+    let hasProbeData = false;
+
+    for (const codec of candidates) {
+      const probe = await this.probeDecoderCapability(codec, width, height, settings.fps, settings.maxBitrateKbps);
+      if (!probe) {
+        continue;
+      }
+      hasProbeData = true;
+      probeResults.set(codec, probe);
+      this.log(
+        `Decoder probe ${codec}: supported=${probe.supported} smooth=${probe.smooth} powerEfficient=${probe.powerEfficient}`,
+      );
+    }
+
+    if (!hasProbeData) {
+      return requested;
+    }
+
+    const requestedProbe = probeResults.get(requested);
+    if (requestedProbe?.supported && requestedProbe.smooth) {
+      return requested;
+    }
+
+    const smoothFallback = candidates.find((codec) => {
+      if (codec === requested) return false;
+      const probe = probeResults.get(codec);
+      return !!probe?.supported && !!probe.smooth;
+    });
+    if (smoothFallback) {
+      return smoothFallback;
+    }
+
+    const supportedFallback = candidates.find((codec) => {
+      if (codec === requested) return false;
+      const probe = probeResults.get(codec);
+      return !!probe?.supported;
+    });
+    if (supportedFallback) {
+      return supportedFallback;
+    }
+
+    return requested;
+  }
+
   /** Get supported HEVC profile-id values from RTCRtpReceiver capabilities (e.g. "1", "2"). */
   private getSupportedHevcProfiles(): Set<string> {
     const profiles = new Set<string>();
@@ -2669,23 +2971,34 @@ export class GfnWebRtcClient {
     pc.ondatachannel = (event) => {
       const channel = event.channel;
       this.log(`Remote data channel received: label=${channel.label}, ordered=${channel.ordered}`);
-      if (channel.label !== "control_channel") {
+      const isControl = channel.label === "control_channel";
+      const isRemoteTrace = channel.label === "remote_trace_channel";
+      if (!isControl && !isRemoteTrace) {
         return;
       }
 
-      this.controlChannel = channel;
-      this.controlChannel.binaryType = "arraybuffer";
-      this.controlChannel.onmessage = (msgEvent) => {
+      const channelLabel = channel.label;
+      if (isControl) {
+        this.controlChannel = channel;
+      } else {
+        this.remoteTraceChannel = channel;
+      }
+
+      channel.binaryType = "arraybuffer";
+      channel.onmessage = (msgEvent) => {
         void this.onControlChannelMessage(msgEvent.data as string | Blob | ArrayBuffer);
       };
-      this.controlChannel.onclose = () => {
-        this.log("Control channel closed");
-        if (this.controlChannel === channel) {
+      channel.onclose = () => {
+        this.log(`${channelLabel} closed`);
+        if (isControl && this.controlChannel === channel) {
           this.controlChannel = null;
         }
+        if (isRemoteTrace && this.remoteTraceChannel === channel) {
+          this.remoteTraceChannel = null;
+        }
       };
-      this.controlChannel.onerror = () => {
-        this.log("Control channel error");
+      channel.onerror = () => {
+        this.log(`${channelLabel} error`);
       };
     };
 
@@ -2743,8 +3056,13 @@ export class GfnWebRtcClient {
     let effectiveCodec = settings.codec;
     const supported = this.getSupportedVideoCodecs();
     this.log(`Browser supported video codecs: ${supported.join(", ") || "unknown"}`);
+    const stableCodec = await this.chooseStableCodec(settings, supported);
+    if (stableCodec !== settings.codec) {
+      this.log(`Codec fallback: ${settings.codec} -> ${stableCodec} (decoder smoothness/capability)`);
+    }
+    effectiveCodec = stableCodec;
 
-    if (settings.codec === "H265") {
+    if (effectiveCodec === "H265") {
       const hevcProfiles = this.getSupportedHevcProfiles();
       if (hevcProfiles.size > 0) {
         this.log(`Browser HEVC profile-id support: ${Array.from(hevcProfiles).join(", ")}`);
@@ -2782,8 +3100,8 @@ export class GfnWebRtcClient {
       }
     }
 
-    if (supported.length > 0 && !supported.includes(settings.codec)) {
-      this.log(`Warning: ${settings.codec} not reported in browser codec list; forcing requested codec anyway`);
+    if (supported.length > 0 && !supported.includes(effectiveCodec)) {
+      this.log(`Warning: ${effectiveCodec} not reported in browser codec list; forcing requested codec anyway`);
     }
     this.log(`Effective codec: ${effectiveCodec} (preferred HEVC profile-id=${preferredHevcProfileId})`);
     const filteredOffer = preferCodec(processedOffer, effectiveCodec, {

@@ -65,6 +65,7 @@ type LaunchErrorState = {
 const APP_PAGE_ORDER: AppPage[] = ["home", "library", "clips", "settings"];
 
 const isMac = navigator.platform.toLowerCase().includes("mac");
+const captureShortcutModifier = isMac ? "Meta" : "Ctrl";
 
 const DEFAULT_SHORTCUTS = {
   shortcutToggleStats: "F3",
@@ -72,10 +73,29 @@ const DEFAULT_SHORTCUTS = {
   shortcutStopStream: "Ctrl+Shift+Q",
   shortcutToggleAntiAfk: "Ctrl+Shift+K",
   shortcutToggleMicrophone: "Ctrl+Shift+M",
-  shortcutSaveInstantReplay: "Ctrl+Shift+F10",
-  shortcutToggleRecording: "Ctrl+Shift+F9",
-  shortcutTakeScreenshot: "Ctrl+Shift+F7",
+  shortcutSaveInstantReplay: `${captureShortcutModifier}+0`,
+  shortcutToggleRecording: `${captureShortcutModifier}+9`,
+  shortcutTakeScreenshot: `${captureShortcutModifier}+1`,
 } as const;
+
+const LOCAL_CAPTURE_MAX_FPS = 30;
+const LOCAL_REPLAY_BUFFER_MS = 45_000;
+const LOCAL_RECORDING_TIMESLICE_MS = 1_000;
+const LOCAL_REPLAY_TIMESLICE_MS = 1_000;
+const LOCAL_RECORDING_BITRATE = 5_000_000;
+const LOCAL_REPLAY_BITRATE = 3_000_000;
+
+function preferredCaptureMimeType(): string {
+  if (typeof MediaRecorder === "undefined" || typeof MediaRecorder.isTypeSupported !== "function") {
+    return "";
+  }
+  const preferred = [
+    "video/webm;codecs=vp9,opus",
+    "video/webm;codecs=vp8,opus",
+    "video/webm",
+  ];
+  return preferred.find((mime) => MediaRecorder.isTypeSupported(mime)) ?? "";
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
@@ -339,6 +359,7 @@ export function App(): JSX.Element {
     shortcutSaveInstantReplay: DEFAULT_SHORTCUTS.shortcutSaveInstantReplay,
     shortcutToggleRecording: DEFAULT_SHORTCUTS.shortcutToggleRecording,
     shortcutTakeScreenshot: DEFAULT_SHORTCUTS.shortcutTakeScreenshot,
+    captureInstantReplayEnabled: false,
     microphoneMode: "disabled",
     microphoneDeviceId: "",
     hideStreamButtons: false,
@@ -410,6 +431,12 @@ export function App(): JSX.Element {
   const sessionRef = useRef<SessionInfo | null>(null);
   const streamingGameRef = useRef<GameInfo | null>(null);
   const diagnosticsRef = useRef<StreamDiagnostics>(defaultDiagnostics());
+  const localRecordingRecorderRef = useRef<MediaRecorder | null>(null);
+  const localRecordingChunksRef = useRef<Blob[]>([]);
+  const localRecordingStartedAtRef = useRef<number>(0);
+  const localReplayRecorderRef = useRef<MediaRecorder | null>(null);
+  const localReplayChunksRef = useRef<Array<{ blob: Blob; atMs: number }>>([]);
+  const captureMimeTypeRef = useRef<string>(preferredCaptureMimeType());
   const hasInitializedRef = useRef(false);
   const regionsRequestRef = useRef(0);
   const launchInFlightRef = useRef(false);
@@ -1426,39 +1453,309 @@ export function App(): JSX.Element {
     await handleStopStream();
   }, [handleStopStream, releasePointerLockIfNeeded, requestExitPrompt, streamStatus, streamingGame?.title]);
 
+  const createLocalCaptureStream = useCallback((): MediaStream | null => {
+    const videoElement = videoRef.current as (HTMLVideoElement & {
+      captureStream?: (frameRate?: number) => MediaStream;
+      mozCaptureStream?: (frameRate?: number) => MediaStream;
+    }) | null;
+    if (!videoElement) {
+      return null;
+    }
+
+    const captureFn = videoElement.captureStream ?? videoElement.mozCaptureStream;
+    if (typeof captureFn !== "function") {
+      return null;
+    }
+
+    let videoStream: MediaStream;
+    try {
+      videoStream = captureFn.call(videoElement, Math.min(settings.fps, LOCAL_CAPTURE_MAX_FPS));
+    } catch {
+      return null;
+    }
+
+    const tracks = videoStream.getVideoTracks().map((track) => track.clone());
+    const audioElement = audioRef.current as (HTMLAudioElement & {
+      captureStream?: () => MediaStream;
+      mozCaptureStream?: () => MediaStream;
+    }) | null;
+    if (audioElement) {
+      const audioCaptureFn = audioElement.captureStream ?? audioElement.mozCaptureStream;
+      if (typeof audioCaptureFn === "function") {
+        try {
+          const audioStream = audioCaptureFn.call(audioElement);
+          tracks.push(...audioStream.getAudioTracks().map((track) => track.clone()));
+        } catch {
+          // Ignore audio capture failures, video capture is enough.
+        }
+      }
+    }
+
+    if (tracks.length === 0) {
+      return null;
+    }
+    return new MediaStream(tracks);
+  }, [settings.fps]);
+
+  const persistLocalCaptureClip = useCallback(
+    async (clipType: ClipRecordInput["clipType"], blob: Blob, durationSeconds?: number): Promise<void> => {
+      const timestampMs = Date.now();
+      const extension = clipType === "screenshot" ? "png" : "webm";
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      const currentGame = streamingGameRef.current;
+      const currentSession = sessionRef.current;
+      const currentDiagnostics = diagnosticsRef.current;
+      const asset = await window.openNow.saveCaptureAsset({
+        clipType,
+        gameTitle: currentGame?.title ?? "Unknown Game",
+        timestampMs,
+        extension,
+        bytes,
+      });
+
+      const clipInput: ClipRecordInput = {
+        clipType,
+        status: "saved",
+        timestampMs,
+        gameTitle: currentGame?.title ?? "Unknown Game",
+        gameBannerUrl: currentGame?.imageUrl,
+        machineLabel: currentDiagnostics.gpuType || currentSession?.gpuType || currentSession?.serverIp,
+        codec: currentDiagnostics.codec || chooseCaptureCodec(settings.codec),
+        filePath: asset.filePath,
+        fileUrl: asset.fileUrl,
+        durationSeconds,
+        source: "server",
+      };
+      const saved = await window.openNow.saveClip(clipInput);
+      setClips((prev) => [saved, ...prev.filter((item) => item.id !== saved.id)]);
+    },
+    [settings.codec],
+  );
+
+  const saveLocalScreenshot = useCallback(async (): Promise<boolean> => {
+    const videoElement = videoRef.current;
+    if (!videoElement || videoElement.videoWidth <= 0 || videoElement.videoHeight <= 0) {
+      return false;
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = videoElement.videoWidth;
+    canvas.height = videoElement.videoHeight;
+    const context = canvas.getContext("2d");
+    if (!context) {
+      return false;
+    }
+    context.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+    if (!blob) {
+      return false;
+    }
+    await persistLocalCaptureClip("screenshot", blob);
+    return true;
+  }, [persistLocalCaptureClip]);
+
+  const startLocalRecording = useCallback((): boolean => {
+    if (localRecordingRecorderRef.current) {
+      return true;
+    }
+    const stream = createLocalCaptureStream();
+    if (!stream) {
+      return false;
+    }
+
+    const options = captureMimeTypeRef.current
+      ? { mimeType: captureMimeTypeRef.current, videoBitsPerSecond: LOCAL_RECORDING_BITRATE }
+      : { videoBitsPerSecond: LOCAL_RECORDING_BITRATE };
+    let recorder: MediaRecorder;
+    try {
+      recorder = new MediaRecorder(stream, options);
+    } catch {
+      stream.getTracks().forEach((track) => track.stop());
+      return false;
+    }
+
+    localRecordingChunksRef.current = [];
+    localRecordingStartedAtRef.current = Date.now();
+    recorder.ondataavailable = (event) => {
+      if (event.data && event.data.size > 0) {
+        localRecordingChunksRef.current.push(event.data);
+      }
+    };
+    recorder.onstop = () => {
+      const chunks = localRecordingChunksRef.current;
+      localRecordingChunksRef.current = [];
+      localRecordingRecorderRef.current = null;
+      setCaptureRecordingActive(false);
+      stream.getTracks().forEach((track) => track.stop());
+      if (chunks.length === 0) {
+        return;
+      }
+      const durationSeconds = Math.max(1, Math.round((Date.now() - localRecordingStartedAtRef.current) / 1000));
+      const blob = new Blob(chunks, { type: chunks[0]?.type || captureMimeTypeRef.current || "video/webm" });
+      void persistLocalCaptureClip("manual-recording", blob, durationSeconds).catch((error) => {
+        console.warn("Failed to persist local recording:", error);
+        setCaptureNotice({ tone: "warn", message: "Recording ended, but saving failed." });
+      });
+    };
+    recorder.onerror = () => {
+      setCaptureNotice({ tone: "warn", message: "Recording failed to start." });
+    };
+
+    recorder.start(LOCAL_RECORDING_TIMESLICE_MS);
+    localRecordingRecorderRef.current = recorder;
+    setCaptureRecordingActive(true);
+    return true;
+  }, [createLocalCaptureStream, persistLocalCaptureClip]);
+
+  const stopLocalRecording = useCallback((): void => {
+    const recorder = localRecordingRecorderRef.current;
+    if (!recorder || recorder.state === "inactive") {
+      return;
+    }
+    recorder.stop();
+  }, []);
+
+  const startReplayBuffer = useCallback((): boolean => {
+    if (localReplayRecorderRef.current) {
+      return true;
+    }
+    const stream = createLocalCaptureStream();
+    if (!stream) {
+      return false;
+    }
+    const options = captureMimeTypeRef.current
+      ? { mimeType: captureMimeTypeRef.current, videoBitsPerSecond: LOCAL_REPLAY_BITRATE }
+      : { videoBitsPerSecond: LOCAL_REPLAY_BITRATE };
+    let recorder: MediaRecorder;
+    try {
+      recorder = new MediaRecorder(stream, options);
+    } catch {
+      stream.getTracks().forEach((track) => track.stop());
+      return false;
+    }
+
+    localReplayChunksRef.current = [];
+    recorder.ondataavailable = (event) => {
+      if (!event.data || event.data.size <= 0) {
+        return;
+      }
+      const atMs = Date.now();
+      localReplayChunksRef.current.push({ blob: event.data, atMs });
+      const minAt = atMs - LOCAL_REPLAY_BUFFER_MS;
+      localReplayChunksRef.current = localReplayChunksRef.current.filter((item) => item.atMs >= minAt);
+    };
+    recorder.onstop = () => {
+      if (localReplayRecorderRef.current === recorder) {
+        localReplayRecorderRef.current = null;
+      }
+      stream.getTracks().forEach((track) => track.stop());
+    };
+    recorder.start(LOCAL_REPLAY_TIMESLICE_MS);
+    localReplayRecorderRef.current = recorder;
+    return true;
+  }, [createLocalCaptureStream]);
+
+  const stopReplayBuffer = useCallback((clearBuffer: boolean): void => {
+    const recorder = localReplayRecorderRef.current;
+    if (recorder && recorder.state !== "inactive") {
+      recorder.stop();
+    }
+    if (clearBuffer) {
+      localReplayChunksRef.current = [];
+    }
+  }, []);
+
+  const saveLocalInstantReplay = useCallback(async (): Promise<boolean> => {
+    const chunks = localReplayChunksRef.current;
+    if (chunks.length === 0) {
+      return false;
+    }
+    const blob = new Blob(chunks.map((item) => item.blob), {
+      type: chunks[0]?.blob.type || captureMimeTypeRef.current || "video/webm",
+    });
+    const firstAt = chunks[0]?.atMs ?? Date.now();
+    const lastAt = chunks[chunks.length - 1]?.atMs ?? firstAt;
+    const durationSeconds = Math.max(1, Math.round((lastAt - firstAt) / 1000));
+    await persistLocalCaptureClip("instant-replay", blob, durationSeconds);
+    return true;
+  }, [persistLocalCaptureClip]);
+
+  useEffect(() => {
+    if (streamStatus === "streaming" && settings.captureInstantReplayEnabled) {
+      startReplayBuffer();
+      return () => {
+        stopReplayBuffer(true);
+      };
+    }
+    stopReplayBuffer(true);
+  }, [settings.captureInstantReplayEnabled, startReplayBuffer, stopReplayBuffer, streamStatus]);
+
+  useEffect(() => {
+    if (streamStatus === "streaming") {
+      return;
+    }
+    stopLocalRecording();
+  }, [stopLocalRecording, streamStatus]);
+
   const handleCaptureAction = useCallback((action: CaptureAction) => {
     if (streamStatus !== "streaming") {
       setCaptureNotice({ tone: "warn", message: "Start a stream before using capture actions." });
       return;
     }
 
-    const client = clientRef.current;
-    if (!client) {
-      setCaptureNotice({ tone: "warn", message: "Capture is unavailable until stream input is ready." });
-      return;
-    }
-
-    const result = client.sendCaptureCommand(action, captureRecordingActive);
-    if (!result.accepted) {
-      setCaptureNotice({ tone: "warn", message: result.reason ?? "Capture command could not be sent." });
-      return;
-    }
-
-    const codec = chooseCaptureCodec(settings.codec);
     if (action === "save-instant-replay") {
-      setCaptureNotice({ tone: "success", message: `Saving instant replay (${codec})...` });
+      if (!settings.captureInstantReplayEnabled) {
+        setCaptureNotice({ tone: "warn", message: "Enable Instant Replay in Settings before saving replays." });
+        return;
+      }
+      setCaptureNotice({ tone: "success", message: "Saving instant replay..." });
+      void saveLocalInstantReplay()
+        .then((saved) => {
+          if (!saved) {
+            setCaptureNotice({ tone: "warn", message: "Instant replay buffer is empty. Wait a few seconds and try again." });
+          }
+        })
+        .catch((error) => {
+          console.warn("Failed to save instant replay:", error);
+          setCaptureNotice({ tone: "warn", message: "Failed to save instant replay." });
+        });
       return;
     }
+
     if (action === "take-screenshot") {
       setCaptureNotice({ tone: "success", message: "Saving screenshot..." });
+      void saveLocalScreenshot()
+        .then((saved) => {
+          if (!saved) {
+            setCaptureNotice({ tone: "warn", message: "Screenshot capture failed." });
+          }
+        })
+        .catch((error) => {
+          console.warn("Failed to save screenshot:", error);
+          setCaptureNotice({ tone: "warn", message: "Failed to save screenshot." });
+        });
       return;
     }
-    setCaptureRecordingActive((prev) => !prev);
-    setCaptureNotice({
-      tone: "success",
-      message: captureRecordingActive ? "Stopping recording..." : `Starting recording (${codec})...`,
-    });
-  }, [captureRecordingActive, settings.codec, streamStatus]);
+
+    if (captureRecordingActive) {
+      setCaptureNotice({ tone: "success", message: "Stopping recording..." });
+      stopLocalRecording();
+      return;
+    }
+
+    if (startLocalRecording()) {
+      setCaptureNotice({ tone: "success", message: "Starting recording..." });
+    } else {
+      setCaptureNotice({ tone: "warn", message: "Recording is unavailable on this device." });
+    }
+  }, [
+    captureRecordingActive,
+    saveLocalInstantReplay,
+    saveLocalScreenshot,
+    settings.captureInstantReplayEnabled,
+    startLocalRecording,
+    stopLocalRecording,
+    streamStatus,
+  ]);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -1699,7 +1996,9 @@ export function App(): JSX.Element {
               togglePointerLock: formatShortcutForDisplay(settings.shortcutTogglePointerLock, isMac),
               stopStream: formatShortcutForDisplay(settings.shortcutStopStream, isMac),
               toggleMicrophone: formatShortcutForDisplay(settings.shortcutToggleMicrophone, isMac),
-              saveInstantReplay: formatShortcutForDisplay(settings.shortcutSaveInstantReplay, isMac),
+              saveInstantReplay: settings.captureInstantReplayEnabled
+                ? formatShortcutForDisplay(settings.shortcutSaveInstantReplay, isMac)
+                : undefined,
               toggleRecording: formatShortcutForDisplay(settings.shortcutToggleRecording, isMac),
               takeScreenshot: formatShortcutForDisplay(settings.shortcutTakeScreenshot, isMac),
             }}
