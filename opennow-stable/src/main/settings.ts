@@ -30,6 +30,12 @@ export interface Settings {
   shortcutToggleAntiAfk: string;
   /** Toggle microphone shortcut */
   shortcutToggleMicrophone: string;
+  /** Save instant replay shortcut */
+  shortcutSaveInstantReplay: string;
+  /** Start/stop full recording shortcut */
+  shortcutToggleRecording: string;
+  /** Take screenshot shortcut */
+  shortcutTakeScreenshot: string;
   /** How often to re-show the session timer while streaming (0 = off) */
   sessionClockShowEveryMinutes: number;
   /** How long the session timer stays visible when it appears */
@@ -68,6 +74,9 @@ const DEFAULT_SETTINGS: Settings = {
   shortcutStopStream: defaultStopShortcut,
   shortcutToggleAntiAfk: defaultAntiAfkShortcut,
   shortcutToggleMicrophone: defaultMicShortcut,
+  shortcutSaveInstantReplay: "Ctrl+Shift+F10",
+  shortcutToggleRecording: "Ctrl+Shift+F9",
+  shortcutTakeScreenshot: "Ctrl+Shift+F7",
   microphoneMode: "disabled",
   microphoneDeviceId: "",
   hideStreamButtons: false,

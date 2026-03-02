@@ -14,6 +14,9 @@ interface StreamViewProps {
     togglePointerLock: string;
     stopStream: string;
     toggleMicrophone?: string;
+    saveInstantReplay?: string;
+    toggleRecording?: string;
+    takeScreenshot?: string;
   };
   hideStreamButtons?: boolean;
   serverRegion?: string;
@@ -35,6 +38,10 @@ interface StreamViewProps {
     message: string;
     tone: "warn" | "critical";
     secondsLeft?: number;
+  } | null;
+  captureNotice: {
+    tone: "success" | "warn";
+    message: string;
   } | null;
   isConnecting: boolean;
   gameTitle: string;
@@ -111,6 +118,7 @@ export function StreamView({
   sessionClockShowEveryMinutes,
   sessionClockShowDurationSeconds,
   streamWarning,
+  captureNotice,
   isConnecting,
   gameTitle,
   platformStore,
@@ -309,6 +317,12 @@ export function StreamView({
         </div>
       )}
 
+      {captureNotice && !isConnecting && !exitPrompt.open && (
+        <div className={`sv-capture-notice sv-capture-notice--${captureNotice.tone}`}>
+          <span>{captureNotice.message}</span>
+        </div>
+      )}
+
       {/* Stats HUD (top-right) */}
       {showStats && !isConnecting && (
         <div className="sv-stats">
@@ -473,6 +487,9 @@ export function StreamView({
           <div className="sv-hint"><kbd>{shortcuts.togglePointerLock}</kbd><span>Mouse lock</span></div>
           <div className="sv-hint"><kbd>{shortcuts.stopStream}</kbd><span>Stop</span></div>
           {shortcuts.toggleMicrophone && <div className="sv-hint"><kbd>{shortcuts.toggleMicrophone}</kbd><span>Mic</span></div>}
+          {shortcuts.saveInstantReplay && <div className="sv-hint"><kbd>{shortcuts.saveInstantReplay}</kbd><span>Replay</span></div>}
+          {shortcuts.toggleRecording && <div className="sv-hint"><kbd>{shortcuts.toggleRecording}</kbd><span>Record</span></div>}
+          {shortcuts.takeScreenshot && <div className="sv-hint"><kbd>{shortcuts.takeScreenshot}</kbd><span>Shot</span></div>}
         </div>
       )}
 

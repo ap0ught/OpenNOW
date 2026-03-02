@@ -5,6 +5,8 @@ import type {
   SessionInfo,
   VideoCodec,
   MicrophoneMode,
+  CaptureAction,
+  CaptureEvent,
 } from "@shared/gfn";
 
 import {
@@ -190,6 +192,7 @@ interface ClientOptions {
   onEscHoldProgress?: (visible: boolean, progress: number) => void;
   onTimeWarning?: (warning: StreamTimeWarning) => void;
   onMicStateChange?: (state: MicStateChange) => void;
+  onCaptureEvent?: (event: CaptureEvent) => void;
 }
 
 function timestampUs(sourceTimestampMs?: number): bigint {
@@ -1422,26 +1425,84 @@ export class GfnWebRtcClient {
     return null;
   }
 
-  private async onControlChannelMessage(data: string | Blob | ArrayBuffer): Promise<void> {
-    let payloadText: string;
-    if (typeof data === "string") {
-      payloadText = data;
-    } else if (data instanceof Blob) {
-      payloadText = await data.text();
-    } else if (data instanceof ArrayBuffer) {
-      payloadText = new TextDecoder().decode(data);
-    } else {
-      return;
+  private parseCaptureEvent(parsed: Record<string, unknown>): CaptureEvent | null {
+    const now = Date.now();
+
+    if ("manualRecordRunning" in parsed) {
+      const manual = parsed.manualRecordRunning;
+      if (manual && typeof manual === "object") {
+        const rawRunning =
+          (manual as { running?: unknown }).running
+          ?? (manual as { isRunning?: unknown }).isRunning;
+        const running = rawRunning === undefined ? true : Boolean(rawRunning);
+        return {
+          kind: running ? "recording-started" : "recording-stopped",
+          success: true,
+          message: running ? "Recording started" : "Recording stopped",
+          timestampMs: now,
+          rawPayload: parsed,
+        };
+      }
     }
 
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(payloadText);
-    } catch {
-      return;
+    if ("actionStatus" in parsed) {
+      const actionStatus = parsed.actionStatus;
+      if (actionStatus && typeof actionStatus === "object") {
+        const statusObj = actionStatus as Record<string, unknown>;
+        const action = String(statusObj.action ?? statusObj.name ?? "").toLowerCase();
+        const status = String(statusObj.status ?? statusObj.result ?? "").toLowerCase();
+        const success =
+          statusObj.success === true
+          || statusObj.ok === true
+          || status === "success"
+          || status === "ok";
+
+        const message = String(statusObj.message ?? statusObj.description ?? "");
+        if (action.includes("screenshot")) {
+          return {
+            kind: success ? "screenshot-saved" : "capture-error",
+            success,
+            message: message || (success ? "Screenshot saved" : "Screenshot failed"),
+            timestampMs: now,
+            rawPayload: parsed,
+          };
+        }
+        if (action.includes("instant") || action.includes("replay")) {
+          return {
+            kind: success ? "instant-replay-saved" : "capture-error",
+            success,
+            message: message || (success ? "Instant replay saved" : "Instant replay failed"),
+            timestampMs: now,
+            rawPayload: parsed,
+          };
+        }
+        if (action.includes("record")) {
+          return {
+            kind: success ? "recording-started" : "capture-error",
+            success,
+            message: message || (success ? "Recording updated" : "Recording action failed"),
+            timestampMs: now,
+            rawPayload: parsed,
+          };
+        }
+      }
     }
 
-    if (!parsed || typeof parsed !== "object" || !("timerNotification" in parsed)) {
+    if ("highlightCompleted" in parsed) {
+      return {
+        kind: "instant-replay-saved",
+        success: true,
+        message: "Instant replay saved",
+        timestampMs: now,
+        rawPayload: parsed,
+      };
+    }
+
+    return null;
+  }
+
+  private handleTimerNotificationPayload(parsed: Record<string, unknown>): void {
+    if (!("timerNotification" in parsed)) {
       return;
     }
 
@@ -1466,6 +1527,39 @@ export class GfnWebRtcClient {
       `Control timer warning: rawCode=${rawCode} mappedCode=${mappedCode} secondsLeft=${secondsLeft ?? "n/a"}`,
     );
     this.options.onTimeWarning?.({ code: mappedCode, secondsLeft });
+  }
+
+  private async onControlChannelMessage(data: string | Blob | ArrayBuffer): Promise<void> {
+    let payloadText: string;
+    if (typeof data === "string") {
+      payloadText = data;
+    } else if (data instanceof Blob) {
+      payloadText = await data.text();
+    } else if (data instanceof ArrayBuffer) {
+      payloadText = new TextDecoder().decode(data);
+    } else {
+      return;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(payloadText);
+    } catch {
+      return;
+    }
+
+    if (!parsed || typeof parsed !== "object") {
+      return;
+    }
+
+    const parsedObject = parsed as Record<string, unknown>;
+    this.handleTimerNotificationPayload(parsedObject);
+
+    const captureEvent = this.parseCaptureEvent(parsedObject);
+    if (captureEvent) {
+      this.log(`Control capture event: kind=${captureEvent.kind} success=${captureEvent.success}`);
+      this.options.onCaptureEvent?.(captureEvent);
+    }
   }
 
   private async flushQueuedCandidates(): Promise<void> {
@@ -1751,6 +1845,37 @@ export class GfnWebRtcClient {
     }
 
     return sent;
+  }
+
+  public sendCaptureCommand(
+    action: CaptureAction,
+    recordingActive: boolean,
+  ): { accepted: boolean; reason?: string } {
+    if (!this.controlChannel || this.controlChannel.readyState !== "open") {
+      return { accepted: false, reason: "Control channel is not open" };
+    }
+
+    const command = action === "save-instant-replay"
+      ? { name: "rise_save_instant_replay" }
+      : action === "take-screenshot"
+        ? { name: "rise_save_screenshot" }
+        : { name: "rise_start_recording", enable: recordingActive ? 0 : 1 };
+
+    const payload = {
+      type: "capture-command",
+      command,
+      sentAtMs: Date.now(),
+    };
+
+    try {
+      this.controlChannel.send(JSON.stringify(payload));
+      this.log(`Capture command sent: ${command.name}`);
+      return { accepted: true };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.log(`Capture command failed: ${reason}`);
+      return { accepted: false, reason };
+    }
   }
 
   /** Send gamepad data on the partially reliable channel (unordered, maxPacketLifeTime).

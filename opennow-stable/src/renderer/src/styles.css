@@ -1361,6 +1361,164 @@ button.game-card-store-chip.active:hover {
 .library-empty-icon { color: var(--panel-border-solid); opacity: 0.5; }
 .library-spinner { animation: spin 1s linear infinite; color: var(--accent); }
 
+/* ======================================================
+   CLIPS PAGE
+   ====================================================== */
+.clips-page {
+  display: flex; flex-direction: column;
+  height: 100%; max-width: 1600px;
+  margin: 0 auto; gap: 16px; overflow: hidden;
+}
+
+.clips-toolbar {
+  display: flex; align-items: center; gap: 12px;
+  flex-shrink: 0;
+}
+
+.clips-title {
+  display: flex; align-items: center; gap: 8px;
+}
+
+.clips-title-icon { color: var(--accent); flex-shrink: 0; }
+.clips-title h1 { font-size: 1.1rem; font-weight: 700; margin: 0; white-space: nowrap; }
+
+.clips-search {
+  flex: 1; position: relative; max-width: 360px;
+}
+.clips-search-icon {
+  position: absolute; left: 11px; top: 50%; transform: translateY(-50%);
+  color: var(--ink-muted); pointer-events: none;
+}
+.clips-search-input {
+  width: 100%;
+  padding: 7px 12px 7px 34px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--panel-border);
+  background: var(--card);
+  color: var(--ink);
+  font-size: 0.82rem; font-family: inherit; outline: none;
+  transition: border-color var(--t-fast), box-shadow var(--t-fast);
+}
+.clips-search-input::placeholder { color: var(--ink-muted); }
+.clips-search-input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-surface); }
+
+.clips-refresh-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 7px 11px;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--r-sm);
+  background: var(--card);
+  color: var(--ink-soft);
+  font-size: 0.78rem; font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color var(--t-fast), background var(--t-fast), color var(--t-fast);
+}
+.clips-refresh-btn:hover { border-color: var(--accent); color: var(--ink); }
+
+.clips-grid-area {
+  flex: 1; overflow-y: auto; min-height: 0; padding-right: 2px;
+}
+
+.clips-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+  padding-bottom: 16px;
+}
+
+.clip-card {
+  display: flex; flex-direction: column;
+  border-radius: var(--r-md);
+  border: 1px solid var(--panel-border);
+  background: var(--card);
+  overflow: hidden;
+}
+
+.clip-card-banner {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  background: var(--bg-c);
+}
+
+.clip-card-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.clip-card-fallback {
+  width: 100%;
+  height: 100%;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--ink-muted);
+}
+
+.clip-card-status {
+  position: absolute; top: 8px; right: 8px;
+  padding: 3px 7px;
+  border-radius: var(--r-full);
+  font-size: 0.64rem; font-weight: 700;
+  text-transform: uppercase;
+  border: 1px solid var(--panel-border-solid);
+  background: rgba(10, 10, 12, 0.86);
+}
+.clip-card-status--saved { color: #baf7cf; border-color: rgba(88, 217, 138, 0.45); }
+.clip-card-status--pending { color: #ffe5ad; border-color: rgba(234, 179, 8, 0.45); }
+.clip-card-status--failed { color: #ffd0d0; border-color: rgba(239, 68, 68, 0.45); }
+
+.clip-card-body {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px 11px 12px;
+}
+
+.clip-card-title {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.clip-card-meta {
+  display: flex; flex-wrap: wrap; gap: 6px;
+}
+.clip-card-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 7px;
+  border-radius: var(--r-full);
+  font-size: 0.67rem; font-weight: 600;
+  color: var(--ink-soft);
+  border: 1px solid var(--panel-border);
+  background: var(--chip);
+}
+
+.clip-card-row {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 0.74rem; color: var(--ink-muted);
+}
+
+.clip-card-link {
+  margin-top: 4px;
+  color: var(--accent);
+  font-size: 0.74rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+.clip-card-link:hover { text-decoration: underline; }
+
+.clips-empty-state {
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  height: 100%; min-height: 260px;
+  gap: 12px; color: var(--ink-soft); text-align: center;
+}
+.clips-empty-state h3 { font-size: 1.05rem; color: var(--ink); margin: 0; }
+.clips-empty-state p { font-size: 0.82rem; margin: 0; max-width: 420px; }
+.clips-empty-icon { color: var(--panel-border-solid); opacity: 0.5; }
+
 
 /* ======================================================
    SETTINGS PAGE
@@ -2332,6 +2490,35 @@ button.game-card-store-chip.active:hover {
   color: var(--error);
 }
 
+.sv-capture-notice {
+  position: fixed;
+  top: 94px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1002;
+  display: inline-flex;
+  align-items: center;
+  max-width: min(86vw, 540px);
+  padding: 8px 12px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--panel-border);
+  background: rgba(10, 10, 12, 0.93);
+  color: var(--ink);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  animation: fade-in 140ms var(--ease);
+  backdrop-filter: blur(5px);
+}
+.sv-capture-notice--success {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--panel-border));
+  color: #c8f2d9;
+}
+.sv-capture-notice--warn {
+  border-color: color-mix(in srgb, var(--warning) 55%, var(--panel-border));
+  color: #ffe3ad;
+}
+
 /* Stats HUD (StreamView inline stats) */
 .sv-stats {
   position: fixed; top: 14px; right: 14px; z-index: 1001;
@@ -2751,6 +2938,12 @@ button.game-card-store-chip.active:hover {
   }
   .sv-time-warning {
     top: 46px;
+    max-width: calc(100vw - 24px);
+    padding: 7px 10px;
+    font-size: 0.68rem;
+  }
+  .sv-capture-notice {
+    top: 80px;
     max-width: calc(100vw - 24px);
     padding: 7px 10px;
     font-size: 0.68rem;

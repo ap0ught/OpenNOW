@@ -48,6 +48,9 @@ export interface Settings {
   shortcutStopStream: string;
   shortcutToggleAntiAfk: string;
   shortcutToggleMicrophone: string;
+  shortcutSaveInstantReplay: string;
+  shortcutToggleRecording: string;
+  shortcutTakeScreenshot: string;
   microphoneMode: MicrophoneMode;
   microphoneDeviceId: string;
   hideStreamButtons: boolean;
@@ -57,6 +60,50 @@ export interface Settings {
   windowHeight: number;
   /** In-game language setting (sent to GFN servers via languageCode parameter) */
   gameLanguage: GameLanguage;
+}
+
+export type CaptureAction = "save-instant-replay" | "toggle-recording" | "take-screenshot";
+export type ClipType = "instant-replay" | "manual-recording" | "screenshot";
+export type ClipStatus = "saved" | "pending" | "failed";
+
+export interface CaptureEvent {
+  kind: "instant-replay-saved" | "recording-started" | "recording-stopped" | "screenshot-saved" | "capture-error";
+  success: boolean;
+  message: string;
+  timestampMs: number;
+  filePath?: string;
+  fileUrl?: string;
+  durationSeconds?: number;
+  rawPayload?: unknown;
+}
+
+export interface ClipRecord {
+  id: string;
+  clipType: ClipType;
+  status: ClipStatus;
+  timestampMs: number;
+  gameTitle: string;
+  gameBannerUrl?: string;
+  machineLabel?: string;
+  codec?: string;
+  filePath?: string;
+  fileUrl?: string;
+  durationSeconds?: number;
+  source: "server";
+}
+
+export interface ClipRecordInput {
+  clipType: ClipType;
+  status: ClipStatus;
+  timestampMs: number;
+  gameTitle: string;
+  gameBannerUrl?: string;
+  machineLabel?: string;
+  codec?: string;
+  filePath?: string;
+  fileUrl?: string;
+  durationSeconds?: number;
+  source?: "server";
 }
 
 export interface LoginProvider {
@@ -352,4 +399,6 @@ export interface OpenNowApi {
   exportLogs(format?: "text" | "json"): Promise<string>;
   /** Ping all regions and return latency results */
   pingRegions(regions: StreamRegion[]): Promise<PingResult[]>;
+  getClips(): Promise<ClipRecord[]>;
+  saveClip(input: ClipRecordInput): Promise<ClipRecord>;
 }

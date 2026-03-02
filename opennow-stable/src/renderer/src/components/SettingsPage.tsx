@@ -70,6 +70,9 @@ const shortcutDefaults = {
   shortcutStopStream: "Ctrl+Shift+Q",
   shortcutToggleAntiAfk: "Ctrl+Shift+K",
   shortcutToggleMicrophone: "Ctrl+Shift+M",
+  shortcutSaveInstantReplay: "Ctrl+Shift+F10",
+  shortcutToggleRecording: "Ctrl+Shift+F9",
+  shortcutTakeScreenshot: "Ctrl+Shift+F7",
 } as const;
 
 const microphoneModeOptions: Array<{ value: MicrophoneMode; label: string }> = [
@@ -605,11 +608,17 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
   const [stopStreamInput, setStopStreamInput] = useState(settings.shortcutStopStream);
   const [toggleAntiAfkInput, setToggleAntiAfkInput] = useState(settings.shortcutToggleAntiAfk);
   const [toggleMicrophoneInput, setToggleMicrophoneInput] = useState(settings.shortcutToggleMicrophone);
+  const [saveInstantReplayInput, setSaveInstantReplayInput] = useState(settings.shortcutSaveInstantReplay);
+  const [toggleRecordingInput, setToggleRecordingInput] = useState(settings.shortcutToggleRecording);
+  const [takeScreenshotInput, setTakeScreenshotInput] = useState(settings.shortcutTakeScreenshot);
   const [toggleStatsError, setToggleStatsError] = useState(false);
   const [togglePointerLockError, setTogglePointerLockError] = useState(false);
   const [stopStreamError, setStopStreamError] = useState(false);
   const [toggleAntiAfkError, setToggleAntiAfkError] = useState(false);
   const [toggleMicrophoneError, setToggleMicrophoneError] = useState(false);
+  const [saveInstantReplayError, setSaveInstantReplayError] = useState(false);
+  const [toggleRecordingError, setToggleRecordingError] = useState(false);
+  const [takeScreenshotError, setTakeScreenshotError] = useState(false);
 
   // Game language dropdown state
   const [gameLanguageDropdownOpen, setGameLanguageDropdownOpen] = useState(false);
@@ -638,6 +647,18 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
   useEffect(() => {
     setToggleMicrophoneInput(settings.shortcutToggleMicrophone);
   }, [settings.shortcutToggleMicrophone]);
+
+  useEffect(() => {
+    setSaveInstantReplayInput(settings.shortcutSaveInstantReplay);
+  }, [settings.shortcutSaveInstantReplay]);
+
+  useEffect(() => {
+    setToggleRecordingInput(settings.shortcutToggleRecording);
+  }, [settings.shortcutToggleRecording]);
+
+  useEffect(() => {
+    setTakeScreenshotInput(settings.shortcutTakeScreenshot);
+  }, [settings.shortcutTakeScreenshot]);
 
   // Fetch subscription data (cached per account; reload only when account changes)
   useEffect(() => {
@@ -859,13 +880,19 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
       && settings.shortcutTogglePointerLock === shortcutDefaults.shortcutTogglePointerLock
       && settings.shortcutStopStream === shortcutDefaults.shortcutStopStream
       && settings.shortcutToggleAntiAfk === shortcutDefaults.shortcutToggleAntiAfk
-      && settings.shortcutToggleMicrophone === shortcutDefaults.shortcutToggleMicrophone,
+      && settings.shortcutToggleMicrophone === shortcutDefaults.shortcutToggleMicrophone
+      && settings.shortcutSaveInstantReplay === shortcutDefaults.shortcutSaveInstantReplay
+      && settings.shortcutToggleRecording === shortcutDefaults.shortcutToggleRecording
+      && settings.shortcutTakeScreenshot === shortcutDefaults.shortcutTakeScreenshot,
     [
       settings.shortcutToggleStats,
       settings.shortcutTogglePointerLock,
       settings.shortcutStopStream,
       settings.shortcutToggleAntiAfk,
       settings.shortcutToggleMicrophone,
+      settings.shortcutSaveInstantReplay,
+      settings.shortcutToggleRecording,
+      settings.shortcutTakeScreenshot,
     ]
   );
 
@@ -875,11 +902,17 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
     setStopStreamInput(shortcutDefaults.shortcutStopStream);
     setToggleAntiAfkInput(shortcutDefaults.shortcutToggleAntiAfk);
     setToggleMicrophoneInput(shortcutDefaults.shortcutToggleMicrophone);
+    setSaveInstantReplayInput(shortcutDefaults.shortcutSaveInstantReplay);
+    setToggleRecordingInput(shortcutDefaults.shortcutToggleRecording);
+    setTakeScreenshotInput(shortcutDefaults.shortcutTakeScreenshot);
     setToggleStatsError(false);
     setTogglePointerLockError(false);
     setStopStreamError(false);
     setToggleAntiAfkError(false);
     setToggleMicrophoneError(false);
+    setSaveInstantReplayError(false);
+    setToggleRecordingError(false);
+    setTakeScreenshotError(false);
 
     const shortcutKeys = [
       "shortcutToggleStats",
@@ -887,6 +920,9 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
       "shortcutStopStream",
       "shortcutToggleAntiAfk",
       "shortcutToggleMicrophone",
+      "shortcutSaveInstantReplay",
+      "shortcutToggleRecording",
+      "shortcutTakeScreenshot",
     ] as const;
 
     for (const key of shortcutKeys) {
@@ -1585,17 +1621,73 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
                     spellCheck={false}
                   />
                 </label>
+
+                <label className="settings-shortcut-row">
+                  <span className="settings-shortcut-label">Save Instant Replay</span>
+                  <input
+                    type="text"
+                    className={`settings-text-input settings-shortcut-input ${saveInstantReplayError ? "error" : ""}`}
+                    value={saveInstantReplayInput}
+                    onChange={(e) => setSaveInstantReplayInput(e.target.value)}
+                    onBlur={() => handleShortcutBlur("shortcutSaveInstantReplay", saveInstantReplayInput, setSaveInstantReplayInput, setSaveInstantReplayError)}
+                    onKeyDown={handleShortcutKeyDown}
+                    placeholder="Ctrl+Shift+F10"
+                    spellCheck={false}
+                  />
+                </label>
+
+                <label className="settings-shortcut-row">
+                  <span className="settings-shortcut-label">Toggle Recording</span>
+                  <input
+                    type="text"
+                    className={`settings-text-input settings-shortcut-input ${toggleRecordingError ? "error" : ""}`}
+                    value={toggleRecordingInput}
+                    onChange={(e) => setToggleRecordingInput(e.target.value)}
+                    onBlur={() => handleShortcutBlur("shortcutToggleRecording", toggleRecordingInput, setToggleRecordingInput, setToggleRecordingError)}
+                    onKeyDown={handleShortcutKeyDown}
+                    placeholder="Ctrl+Shift+F9"
+                    spellCheck={false}
+                  />
+                </label>
+
+                <label className="settings-shortcut-row">
+                  <span className="settings-shortcut-label">Take Screenshot</span>
+                  <input
+                    type="text"
+                    className={`settings-text-input settings-shortcut-input ${takeScreenshotError ? "error" : ""}`}
+                    value={takeScreenshotInput}
+                    onChange={(e) => setTakeScreenshotInput(e.target.value)}
+                    onBlur={() => handleShortcutBlur("shortcutTakeScreenshot", takeScreenshotInput, setTakeScreenshotInput, setTakeScreenshotError)}
+                    onKeyDown={handleShortcutKeyDown}
+                    placeholder="Ctrl+Shift+F7"
+                    spellCheck={false}
+                  />
+                </label>
               </div>
 
-              {(toggleStatsError || togglePointerLockError || stopStreamError || toggleAntiAfkError || toggleMicrophoneError) && (
+              {(toggleStatsError
+                || togglePointerLockError
+                || stopStreamError
+                || toggleAntiAfkError
+                || toggleMicrophoneError
+                || saveInstantReplayError
+                || toggleRecordingError
+                || takeScreenshotError) && (
                 <span className="settings-input-hint">
                   Invalid shortcut. Use {shortcutExamples}
                 </span>
               )}
 
-              {!toggleStatsError && !togglePointerLockError && !stopStreamError && !toggleAntiAfkError && !toggleMicrophoneError && (
+              {!toggleStatsError
+                && !togglePointerLockError
+                && !stopStreamError
+                && !toggleAntiAfkError
+                && !toggleMicrophoneError
+                && !saveInstantReplayError
+                && !toggleRecordingError
+                && !takeScreenshotError && (
                 <span className="settings-shortcut-hint">
-                  {shortcutExamples}. Stop: {formatShortcutForDisplay(settings.shortcutStopStream, isMac)}. Mic: {formatShortcutForDisplay(settings.shortcutToggleMicrophone, isMac)}.
+                  {shortcutExamples}. Replay: {formatShortcutForDisplay(settings.shortcutSaveInstantReplay, isMac)}. Record: {formatShortcutForDisplay(settings.shortcutToggleRecording, isMac)}. Screenshot: {formatShortcutForDisplay(settings.shortcutTakeScreenshot, isMac)}.
                 </span>
               )}
             </div>

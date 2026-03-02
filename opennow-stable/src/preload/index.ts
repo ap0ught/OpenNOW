@@ -19,6 +19,7 @@ import type {
   Settings,
   SubscriptionFetchRequest,
   StreamRegion,
+  ClipRecordInput,
 } from "@shared/gfn";
 
 // Extend the OpenNowApi interface for internal preload use
@@ -76,6 +77,8 @@ const api: PreloadApi = {
   resetSettings: () => ipcRenderer.invoke(IPC_CHANNELS.SETTINGS_RESET),
   exportLogs: (format?: "text" | "json") => ipcRenderer.invoke(IPC_CHANNELS.LOGS_EXPORT, format),
   pingRegions: (regions: StreamRegion[]) => ipcRenderer.invoke(IPC_CHANNELS.PING_REGIONS, regions),
+  getClips: () => ipcRenderer.invoke(IPC_CHANNELS.CLIPS_GET),
+  saveClip: (input: ClipRecordInput) => ipcRenderer.invoke(IPC_CHANNELS.CLIPS_SAVE, input),
 };
 
 contextBridge.exposeInMainWorld("openNow", api);

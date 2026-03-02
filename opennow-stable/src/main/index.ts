@@ -31,9 +31,12 @@ import type {
   SessionConflictChoice,
   PingResult,
   StreamRegion,
+  ClipRecord,
+  ClipRecordInput,
 } from "@shared/gfn";
 
 import { getSettingsManager, type SettingsManager } from "./settings";
+import { ClipStore } from "./clips";
 
 import { createSession, pollSession, stopSession, getActiveSessions, claimSession } from "./gfn/cloudmatch";
 import { AuthService } from "./gfn/auth";
@@ -157,6 +160,7 @@ let signalingClient: GfnSignalingClient | null = null;
 let signalingClientKey: string | null = null;
 let authService: AuthService;
 let settingsManager: SettingsManager;
+let clipStore: ClipStore;
 
 function emitToRenderer(event: MainToRendererSignalingEvent): void {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -469,6 +473,14 @@ function registerIpcHandlers(): void {
     return settingsManager.reset();
   });
 
+  ipcMain.handle(IPC_CHANNELS.CLIPS_GET, async (): Promise<ClipRecord[]> => {
+    return clipStore.list();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.CLIPS_SAVE, async (_event, payload: ClipRecordInput): Promise<ClipRecord> => {
+    return clipStore.save(payload);
+  });
+
   // Logs export IPC handler
   ipcMain.handle(IPC_CHANNELS.LOGS_EXPORT, async (_event, format: "text" | "json" = "text"): Promise<string> => {
     return exportLogs(format);
@@ -562,6 +574,7 @@ app.whenReady().then(async () => {
   await authService.initialize();
 
   settingsManager = getSettingsManager();
+  clipStore = new ClipStore();
 
   // Request microphone permission on macOS at startup
   if (process.platform === "darwin") {

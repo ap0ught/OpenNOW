@@ -5,6 +5,10 @@ import type {
   ActiveSessionInfo,
   AuthSession,
   AuthUser,
+  CaptureAction,
+  CaptureEvent,
+  ClipRecord,
+  ClipRecordInput,
   GameInfo,
   GameVariant,
   LoginProvider,
@@ -29,6 +33,7 @@ import { LoginScreen } from "./components/LoginScreen";
 import { Navbar } from "./components/Navbar";
 import { HomePage } from "./components/HomePage";
 import { LibraryPage } from "./components/LibraryPage";
+import { ClipsPage } from "./components/ClipsPage";
 import { SettingsPage } from "./components/SettingsPage";
 import { StreamLoading } from "./components/StreamLoading";
 import { StreamView } from "./components/StreamView";
@@ -40,7 +45,7 @@ const SESSION_READY_POLL_INTERVAL_MS = 2000;
 const SESSION_READY_TIMEOUT_MS = 180000;
 
 type GameSource = "main" | "library" | "public";
-type AppPage = "home" | "library" | "settings";
+type AppPage = "home" | "library" | "clips" | "settings";
 type StreamStatus = "idle" | "queue" | "setup" | "starting" | "connecting" | "streaming";
 type StreamLoadingStatus = "queue" | "setup" | "starting" | "connecting";
 type ExitPromptState = { open: boolean; gameTitle: string };
@@ -57,7 +62,7 @@ type LaunchErrorState = {
   codeLabel?: string;
 };
 
-const APP_PAGE_ORDER: AppPage[] = ["home", "library", "settings"];
+const APP_PAGE_ORDER: AppPage[] = ["home", "library", "clips", "settings"];
 
 const isMac = navigator.platform.toLowerCase().includes("mac");
 
@@ -67,6 +72,9 @@ const DEFAULT_SHORTCUTS = {
   shortcutStopStream: "Ctrl+Shift+Q",
   shortcutToggleAntiAfk: "Ctrl+Shift+K",
   shortcutToggleMicrophone: "Ctrl+Shift+M",
+  shortcutSaveInstantReplay: "Ctrl+Shift+F10",
+  shortcutToggleRecording: "Ctrl+Shift+F9",
+  shortcutTakeScreenshot: "Ctrl+Shift+F7",
 } as const;
 
 function sleep(ms: number): Promise<void> {
@@ -182,6 +190,26 @@ function warningMessage(code: StreamTimeWarning["code"]): string {
   if (code === 1) return "Session time limit approaching";
   if (code === 2) return "Idle timeout approaching";
   return "Maximum session time approaching";
+}
+
+function chooseCaptureCodec(settingsCodec: VideoCodec): VideoCodec {
+  try {
+    const caps = RTCRtpReceiver.getCapabilities?.("video");
+    const mimes = new Set((caps?.codecs ?? []).map((codec) => codec.mimeType.toUpperCase()));
+    if (mimes.has("VIDEO/AV1")) return "AV1";
+    if (mimes.has("VIDEO/H265") || mimes.has("VIDEO/HEVC")) return "H265";
+    if (mimes.has("VIDEO/H264")) return "H264";
+  } catch {
+    // Ignore capability probe failures and keep the stream-selected codec.
+  }
+  return settingsCodec;
+}
+
+function clipTypeFromCaptureEvent(event: CaptureEvent): ClipRecordInput["clipType"] | null {
+  if (event.kind === "instant-replay-saved") return "instant-replay";
+  if (event.kind === "screenshot-saved") return "screenshot";
+  if (event.kind === "recording-stopped" || event.kind === "recording-started") return "manual-recording";
+  return null;
 }
 
 function toLoadingStatus(status: StreamStatus): StreamLoadingStatus {
@@ -308,6 +336,9 @@ export function App(): JSX.Element {
     shortcutStopStream: DEFAULT_SHORTCUTS.shortcutStopStream,
     shortcutToggleAntiAfk: DEFAULT_SHORTCUTS.shortcutToggleAntiAfk,
     shortcutToggleMicrophone: DEFAULT_SHORTCUTS.shortcutToggleMicrophone,
+    shortcutSaveInstantReplay: DEFAULT_SHORTCUTS.shortcutSaveInstantReplay,
+    shortcutToggleRecording: DEFAULT_SHORTCUTS.shortcutToggleRecording,
+    shortcutTakeScreenshot: DEFAULT_SHORTCUTS.shortcutTakeScreenshot,
     microphoneMode: "disabled",
     microphoneDeviceId: "",
     hideStreamButtons: false,
@@ -315,10 +346,12 @@ export function App(): JSX.Element {
     sessionClockShowDurationSeconds: 30,
     windowWidth: 1400,
     windowHeight: 900,
+    gameLanguage: "en_US",
   });
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [regions, setRegions] = useState<StreamRegion[]>([]);
   const [subscriptionInfo, setSubscriptionInfo] = useState<SubscriptionInfo | null>(null);
+  const [clips, setClips] = useState<ClipRecord[]>([]);
 
   // Stream State
   const [session, setSession] = useState<SessionInfo | null>(null);
@@ -340,6 +373,8 @@ export function App(): JSX.Element {
   const [sessionStartedAtMs, setSessionStartedAtMs] = useState<number | null>(null);
   const [sessionElapsedSeconds, setSessionElapsedSeconds] = useState(0);
   const [streamWarning, setStreamWarning] = useState<StreamWarningState | null>(null);
+  const [captureNotice, setCaptureNotice] = useState<{ tone: "success" | "warn"; message: string } | null>(null);
+  const [captureRecordingActive, setCaptureRecordingActive] = useState(false);
 
   const handleControllerPageNavigate = useCallback((direction: "prev" | "next"): void => {
     if (!authSession || streamStatus !== "idle") {
@@ -373,6 +408,8 @@ export function App(): JSX.Element {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const clientRef = useRef<GfnWebRtcClient | null>(null);
   const sessionRef = useRef<SessionInfo | null>(null);
+  const streamingGameRef = useRef<GameInfo | null>(null);
+  const diagnosticsRef = useRef<StreamDiagnostics>(defaultDiagnostics());
   const hasInitializedRef = useRef(false);
   const regionsRequestRef = useRef(0);
   const launchInFlightRef = useRef(false);
@@ -392,6 +429,8 @@ export function App(): JSX.Element {
     setSessionStartedAtMs(null);
     setSessionElapsedSeconds(0);
     setStreamWarning(null);
+    setCaptureNotice(null);
+    setCaptureRecordingActive(false);
     setEscHoldReleaseIndicator({ visible: false, progress: 0 });
     setDiagnostics(defaultDiagnostics());
 
@@ -409,6 +448,14 @@ export function App(): JSX.Element {
   useEffect(() => {
     sessionRef.current = session;
   }, [session]);
+
+  useEffect(() => {
+    streamingGameRef.current = streamingGame;
+  }, [streamingGame]);
+
+  useEffect(() => {
+    diagnosticsRef.current = diagnostics;
+  }, [diagnostics]);
 
   useEffect(() => {
     document.body.classList.toggle("controller-mode", controllerConnected);
@@ -438,6 +485,19 @@ export function App(): JSX.Element {
     },
     [],
   );
+
+  const loadClips = useCallback(async (): Promise<void> => {
+    try {
+      const records = await window.openNow.getClips();
+      setClips(records);
+    } catch (error) {
+      console.warn("Failed to load clips:", error);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadClips();
+  }, [loadClips]);
 
   const refreshNavbarActiveSession = useCallback(async (): Promise<void> => {
     if (!authSession) {
@@ -590,13 +650,28 @@ export function App(): JSX.Element {
     const stopStream = parseWithFallback(settings.shortcutStopStream, DEFAULT_SHORTCUTS.shortcutStopStream);
     const toggleAntiAfk = parseWithFallback(settings.shortcutToggleAntiAfk, DEFAULT_SHORTCUTS.shortcutToggleAntiAfk);
     const toggleMicrophone = parseWithFallback(settings.shortcutToggleMicrophone, DEFAULT_SHORTCUTS.shortcutToggleMicrophone);
-    return { toggleStats, togglePointerLock, stopStream, toggleAntiAfk, toggleMicrophone };
+    const saveInstantReplay = parseWithFallback(settings.shortcutSaveInstantReplay, DEFAULT_SHORTCUTS.shortcutSaveInstantReplay);
+    const toggleRecording = parseWithFallback(settings.shortcutToggleRecording, DEFAULT_SHORTCUTS.shortcutToggleRecording);
+    const takeScreenshot = parseWithFallback(settings.shortcutTakeScreenshot, DEFAULT_SHORTCUTS.shortcutTakeScreenshot);
+    return {
+      toggleStats,
+      togglePointerLock,
+      stopStream,
+      toggleAntiAfk,
+      toggleMicrophone,
+      saveInstantReplay,
+      toggleRecording,
+      takeScreenshot,
+    };
   }, [
     settings.shortcutToggleStats,
     settings.shortcutTogglePointerLock,
     settings.shortcutStopStream,
     settings.shortcutToggleAntiAfk,
     settings.shortcutToggleMicrophone,
+    settings.shortcutSaveInstantReplay,
+    settings.shortcutToggleRecording,
+    settings.shortcutTakeScreenshot,
   ]);
 
   const requestEscLockedPointerCapture = useCallback(async (target: HTMLVideoElement) => {
@@ -751,6 +826,15 @@ export function App(): JSX.Element {
     return () => window.clearTimeout(timer);
   }, [streamWarning]);
 
+  useEffect(() => {
+    if (!captureNotice) return;
+    const notice = captureNotice;
+    const timer = window.setTimeout(() => {
+      setCaptureNotice((current) => (current === notice ? null : current));
+    }, 6000);
+    return () => window.clearTimeout(timer);
+  }, [captureNotice]);
+
   // Signaling events
   useEffect(() => {
     const unsubscribe = window.openNow.onSignalingEvent(async (event: MainToRendererSignalingEvent) => {
@@ -792,6 +876,52 @@ export function App(): JSX.Element {
               },
               onMicStateChange: (state) => {
                 console.log(`[App] Mic state: ${state.state}${state.deviceLabel ? ` (${state.deviceLabel})` : ""}`);
+              },
+              onCaptureEvent: (event) => {
+                if (event.kind === "recording-started") {
+                  setCaptureRecordingActive(true);
+                } else if (event.kind === "recording-stopped") {
+                  setCaptureRecordingActive(false);
+                }
+
+                setCaptureNotice({
+                  tone: event.success ? "success" : "warn",
+                  message: event.message,
+                });
+
+                const clipType = clipTypeFromCaptureEvent(event);
+                if (!clipType || !event.success) {
+                  return;
+                }
+
+                if (clipType === "manual-recording" && event.kind !== "recording-stopped") {
+                  return;
+                }
+
+                const currentSession = sessionRef.current;
+                const currentGame = streamingGameRef.current;
+                const currentDiagnostics = diagnosticsRef.current;
+                const clipInput: ClipRecordInput = {
+                  clipType,
+                  status: "saved",
+                  timestampMs: event.timestampMs,
+                  gameTitle: currentGame?.title ?? "Unknown Game",
+                  gameBannerUrl: currentGame?.imageUrl,
+                  machineLabel: currentDiagnostics.gpuType || currentSession?.gpuType || currentSession?.serverIp,
+                  codec: currentDiagnostics.codec || chooseCaptureCodec(settings.codec),
+                  filePath: event.filePath,
+                  fileUrl: event.fileUrl,
+                  durationSeconds: event.durationSeconds,
+                  source: "server",
+                };
+
+                void window.openNow.saveClip(clipInput)
+                  .then((saved) => {
+                    setClips((prev) => [saved, ...prev.filter((item) => item.id !== saved.id)]);
+                  })
+                  .catch((error) => {
+                    console.warn("Failed to persist capture metadata:", error);
+                  });
               },
             });
             // Auto-start microphone if mode is enabled
@@ -1296,6 +1426,39 @@ export function App(): JSX.Element {
     await handleStopStream();
   }, [handleStopStream, releasePointerLockIfNeeded, requestExitPrompt, streamStatus, streamingGame?.title]);
 
+  const handleCaptureAction = useCallback((action: CaptureAction) => {
+    if (streamStatus !== "streaming") {
+      setCaptureNotice({ tone: "warn", message: "Start a stream before using capture actions." });
+      return;
+    }
+
+    const client = clientRef.current;
+    if (!client) {
+      setCaptureNotice({ tone: "warn", message: "Capture is unavailable until stream input is ready." });
+      return;
+    }
+
+    const result = client.sendCaptureCommand(action, captureRecordingActive);
+    if (!result.accepted) {
+      setCaptureNotice({ tone: "warn", message: result.reason ?? "Capture command could not be sent." });
+      return;
+    }
+
+    const codec = chooseCaptureCodec(settings.codec);
+    if (action === "save-instant-replay") {
+      setCaptureNotice({ tone: "success", message: `Saving instant replay (${codec})...` });
+      return;
+    }
+    if (action === "take-screenshot") {
+      setCaptureNotice({ tone: "success", message: "Saving screenshot..." });
+      return;
+    }
+    setCaptureNotice({
+      tone: "success",
+      message: captureRecordingActive ? "Stopping recording..." : `Starting recording (${codec})...`,
+    });
+  }, [captureRecordingActive, settings.codec, streamStatus]);
+
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -1392,6 +1555,30 @@ export function App(): JSX.Element {
         return;
       }
 
+      if (isShortcutMatch(e, shortcuts.saveInstantReplay)) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        handleCaptureAction("save-instant-replay");
+        return;
+      }
+
+      if (isShortcutMatch(e, shortcuts.toggleRecording)) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        handleCaptureAction("toggle-recording");
+        return;
+      }
+
+      if (isShortcutMatch(e, shortcuts.takeScreenshot)) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        handleCaptureAction("take-screenshot");
+        return;
+      }
+
       if (isShortcutMatch(e, shortcuts.toggleMicrophone)) {
         e.preventDefault();
         e.stopPropagation();
@@ -1409,6 +1596,7 @@ export function App(): JSX.Element {
     exitPrompt.open,
     handleExitPromptCancel,
     handleExitPromptConfirm,
+    handleCaptureAction,
     handlePromptedStopStream,
     requestEscLockedPointerCapture,
     settings.clipboardPaste,
@@ -1510,6 +1698,9 @@ export function App(): JSX.Element {
               togglePointerLock: formatShortcutForDisplay(settings.shortcutTogglePointerLock, isMac),
               stopStream: formatShortcutForDisplay(settings.shortcutStopStream, isMac),
               toggleMicrophone: formatShortcutForDisplay(settings.shortcutToggleMicrophone, isMac),
+              saveInstantReplay: formatShortcutForDisplay(settings.shortcutSaveInstantReplay, isMac),
+              toggleRecording: formatShortcutForDisplay(settings.shortcutToggleRecording, isMac),
+              takeScreenshot: formatShortcutForDisplay(settings.shortcutTakeScreenshot, isMac),
             }}
             hideStreamButtons={settings.hideStreamButtons}
             serverRegion={session?.serverIp}
@@ -1521,6 +1712,7 @@ export function App(): JSX.Element {
             sessionClockShowEveryMinutes={settings.sessionClockShowEveryMinutes}
             sessionClockShowDurationSeconds={settings.sessionClockShowDurationSeconds}
             streamWarning={streamWarning}
+            captureNotice={captureNotice}
             isConnecting={streamStatus === "connecting"}
             gameTitle={streamingGame?.title ?? "Game"}
             platformStore={streamingStore ?? undefined}
@@ -1627,6 +1819,17 @@ export function App(): JSX.Element {
             onSelectGame={setSelectedGameId}
             selectedVariantByGameId={variantByGameId}
             onSelectGameVariant={handleSelectGameVariant}
+          />
+        )}
+
+        {currentPage === "clips" && (
+          <ClipsPage
+            clips={clips}
+            searchQuery={searchQuery}
+            onSearchChange={setSearchQuery}
+            onRefresh={() => {
+              void loadClips();
+            }}
           />
         )}
 
