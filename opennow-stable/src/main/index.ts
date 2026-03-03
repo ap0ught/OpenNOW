@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, systemPreferences, session, powerSaveBlocker } from "electron";
+import { app, BrowserWindow, ipcMain, dialog, systemPreferences, session } from "electron";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
@@ -157,7 +157,6 @@ let signalingClient: GfnSignalingClient | null = null;
 let signalingClientKey: string | null = null;
 let authService: AuthService;
 let settingsManager: SettingsManager;
-let powerSaveBlockerId: number | null = null;
 
 function emitToRenderer(event: MainToRendererSignalingEvent): void {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -444,20 +443,15 @@ function registerIpcHandlers(): void {
     return signalingClient.sendIceCandidate(payload);
   });
 
-  // Power save blocker handlers - prevent display sleep during streaming
+  // Power save blocker handlers - DISABLED to fix Windows stream start issues
   ipcMain.handle(IPC_CHANNELS.POWER_SAVE_BLOCKER_START, async (): Promise<void> => {
-    if (powerSaveBlockerId === null) {
-      powerSaveBlockerId = powerSaveBlocker.start("prevent-display-sleep");
-      console.log("[Main] Power save blocker started, id:", powerSaveBlockerId);
-    }
+    // Disabled: power save blocker was causing stream start issues on Windows after sleep
+    console.log("[Main] Power save blocker start requested (disabled)");
   });
 
   ipcMain.handle(IPC_CHANNELS.POWER_SAVE_BLOCKER_STOP, async (): Promise<void> => {
-    if (powerSaveBlockerId !== null) {
-      powerSaveBlocker.stop(powerSaveBlockerId);
-      console.log("[Main] Power save blocker stopped, id:", powerSaveBlockerId);
-      powerSaveBlockerId = null;
-    }
+    // Disabled: power save blocker was causing stream start issues on Windows after sleep
+    console.log("[Main] Power save blocker stop requested (disabled)");
   });
 
   // Toggle fullscreen via IPC (for completeness)

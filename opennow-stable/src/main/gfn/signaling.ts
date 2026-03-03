@@ -30,8 +30,14 @@ export class GfnSignalingClient {
   private peerId = 2;
   private peerName = `peer-${Math.floor(Math.random() * 10_000_000_000)}`;
   private ackCounter = 0;
+  private maxReceivedAckId = 0;
   private heartbeatTimer: NodeJS.Timeout | null = null;
+  private reconnectTimer: NodeJS.Timeout | null = null;
+  private reconnectAttempts = 0;
+  private manualDisconnect = false;
   private listeners = new Set<(event: MainToRendererSignalingEvent) => void>();
+  private static readonly MAX_RECONNECT_ATTEMPTS = 6;
+  private static readonly RECONNECT_BASE_DELAY_MS = 750;
 
   constructor(
     private readonly signalingServer: string,
@@ -39,7 +45,7 @@ export class GfnSignalingClient {
     private readonly signalingUrl?: string,
   ) {}
 
-  private buildSignInUrl(): string {
+  private buildSignInUrl(reconnect = false): string {
     // Match Rust behavior: extract host:port from signalingUrl if available,
     // since the signalingUrl contains the real server address (which may differ
     // from signalingServer when the resource path was an rtsps:// URL)
@@ -58,7 +64,7 @@ export class GfnSignalingClient {
         : `${this.signalingServer}:443`;
     }
 
-    const url = `wss://${serverWithPort}/nvst/sign_in?peer_id=${this.peerName}&version=2`;
+    const url = `wss://${serverWithPort}/nvst/sign_in?peer_id=${this.peerName}&version=2&peer_role=1${reconnect ? "&reconnect=1" : ""}`;
     console.log("[Signaling] URL:", url, "(server:", this.signalingServer, ", signalingUrl:", this.signalingUrl, ")");
     return url;
   }
@@ -88,9 +94,7 @@ export class GfnSignalingClient {
 
   private setupHeartbeat(): void {
     this.clearHeartbeat();
-    this.heartbeatTimer = setInterval(() => {
-      this.sendJson({ hb: 1 });
-    }, 5000);
+    // Official client does not proactively send signaling hb packets.
   }
 
   private clearHeartbeat(): void {
@@ -98,6 +102,47 @@ export class GfnSignalingClient {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
     }
+  }
+
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+  }
+
+  private scheduleReconnect(closeReason: string): void {
+    if (this.manualDisconnect) {
+      return;
+    }
+    if (this.reconnectAttempts >= GfnSignalingClient.MAX_RECONNECT_ATTEMPTS) {
+      this.emit({ type: "disconnected", reason: `${closeReason} (reconnect exhausted)` });
+      return;
+    }
+    if (this.reconnectTimer) {
+      return;
+    }
+
+    this.reconnectAttempts += 1;
+    const attempt = this.reconnectAttempts;
+    const delayMs = Math.min(
+      5000,
+      GfnSignalingClient.RECONNECT_BASE_DELAY_MS * Math.pow(2, attempt - 1),
+    );
+    this.emit({
+      type: "log",
+      message: `Signaling reconnect attempt ${attempt}/${GfnSignalingClient.MAX_RECONNECT_ATTEMPTS} in ${delayMs}ms`,
+    });
+
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      void this.connectSocket(true).catch((error) => {
+        const errorMsg = `Signaling reconnect failed: ${String(error)}`;
+        console.error("[Signaling]", errorMsg);
+        this.emit({ type: "error", message: errorMsg });
+        this.scheduleReconnect(errorMsg);
+      });
+    }, delayMs);
   }
 
   private sendPeerInfo(): void {
@@ -117,20 +162,27 @@ export class GfnSignalingClient {
   }
 
   async connect(): Promise<void> {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
       return;
     }
+    this.manualDisconnect = false;
+    this.clearReconnectTimer();
+    this.reconnectAttempts = 0;
+    this.maxReceivedAckId = 0;
+    await this.connectSocket(false);
+  }
 
-    const url = this.buildSignInUrl();
+  private async connectSocket(reconnect: boolean): Promise<void> {
+    const url = this.buildSignInUrl(reconnect);
     const protocol = `x-nv-sessionid.${this.sessionId}`;
 
-    console.log("[Signaling] Connecting to:", url);
+    console.log("[Signaling] Connecting to:", url, reconnect ? "(reconnect)" : "");
     console.log("[Signaling] Session ID:", this.sessionId);
     console.log("[Signaling] Protocol:", protocol);
 
     await new Promise<void>((resolve, reject) => {
-      // Extract host:port for the Host header (matching Rust behavior)
       const urlHost = url.replace(/^wss?:\/\//, "").split("/")[0];
+      let reconnectStabilized = !reconnect;
 
       const ws = new WebSocket(url, protocol, {
         rejectUnauthorized: false,
@@ -143,28 +195,66 @@ export class GfnSignalingClient {
       });
 
       this.ws = ws;
+      let opened = false;
 
       ws.once("error", (error) => {
-        this.emit({ type: "error", message: `Signaling connect failed: ${String(error)}` });
-        reject(error);
+        if (!opened) {
+          this.emit({ type: "error", message: `Signaling connect failed: ${String(error)}` });
+          reject(error);
+          return;
+        }
+        const errorMsg = String(error);
+        console.error("[Signaling] WebSocket error during session:", errorMsg);
+        this.emit({ type: "error", message: `Signaling session error: ${errorMsg}` });
       });
 
       ws.once("open", () => {
-        this.sendPeerInfo();
-        this.setupHeartbeat();
+        opened = true;
+        this.manualDisconnect = false;
+        this.clearReconnectTimer();
+        if (!reconnect) {
+          this.sendPeerInfo();
+          this.setupHeartbeat();
+        }
         this.emit({ type: "connected" });
         resolve();
       });
 
       ws.on("message", (raw) => {
+        if (!reconnectStabilized && this.reconnectAttempts > 0) {
+          reconnectStabilized = true;
+          this.reconnectAttempts = 0;
+          this.emit({ type: "log", message: "Signaling reconnect stabilized" });
+        }
         const text = typeof raw === "string" ? raw : raw.toString("utf8");
         this.handleMessage(text);
       });
 
-      ws.on("close", (_code, reason) => {
+      ws.on("close", (code, reason) => {
+        if (this.ws === ws) {
+          this.ws = null;
+        }
         this.clearHeartbeat();
         const reasonText = typeof reason === "string" ? reason : reason.toString("utf8");
-        this.emit({ type: "disconnected", reason: reasonText || "socket closed" });
+        const closeReason = reasonText || "socket closed";
+        console.log(`[Signaling] WebSocket closed - code: ${code}, reason: "${closeReason}"`);
+
+        if (!opened) {
+          reject(new Error(`Signaling socket closed before open: ${closeReason} (code: ${code})`));
+          return;
+        }
+
+        if (this.manualDisconnect) {
+          this.emit({ type: "disconnected", reason: `${closeReason} (code: ${code})` });
+          return;
+        }
+
+        if (code === 1006 || code === 1011 || code === 1001) {
+          this.scheduleReconnect(`${closeReason} (code: ${code})`);
+          return;
+        }
+
+        this.emit({ type: "disconnected", reason: `${closeReason} (code: ${code})` });
       });
     });
   }
@@ -178,15 +268,22 @@ export class GfnSignalingClient {
       return;
     }
 
-    if (typeof parsed.ackid === "number") {
-      const shouldAck = parsed.peer_info?.id !== this.peerId;
-      if (shouldAck) {
-        this.sendJson({ ack: parsed.ackid });
-      }
+    if (parsed.hb) {
+      // Official client ignores signaling hb payloads.
+      return;
     }
 
-    if (parsed.hb) {
-      this.sendJson({ hb: 1 });
+    let shouldProcessPayload = true;
+    if (typeof parsed.ackid === "number") {
+      if (parsed.ackid <= this.maxReceivedAckId) {
+        shouldProcessPayload = false;
+      } else {
+        this.maxReceivedAckId = parsed.ackid;
+      }
+      this.sendJson({ ack: this.maxReceivedAckId });
+    }
+
+    if (!shouldProcessPayload) {
       return;
     }
 
@@ -272,7 +369,10 @@ export class GfnSignalingClient {
   }
 
   disconnect(): void {
+    this.manualDisconnect = true;
     this.clearHeartbeat();
+    this.clearReconnectTimer();
+    this.reconnectAttempts = 0;
     if (this.ws) {
       this.ws.close();
       this.ws = null;

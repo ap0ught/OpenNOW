@@ -2210,10 +2210,9 @@ button.game-card-store-chip.active:hover {
   object-fit: contain; display: block;
   position: relative; z-index: 1;
   outline: none;
-  cursor: default !important; /* Always show Windows cursor - never hide it */
+  cursor: default;
 }
 
-/* Never hide cursor - user always wants to see their Windows cursor */
 .sv-video:active,
 .sv-video:focus:active,
 .sv-video:focus,

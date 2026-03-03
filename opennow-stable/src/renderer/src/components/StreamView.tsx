@@ -235,17 +235,42 @@ export function StreamView({
     const videoRect = videoEl.getBoundingClientRect();
     const videoWidth = videoEl.videoWidth || videoRect.width || 1920;
     const videoHeight = videoEl.videoHeight || videoRect.height || 1200;
-    
-    const scaleX = videoRect.width / videoWidth;
-    const scaleY = videoRect.height / videoHeight;
+
+    // Match object-fit: contain placement so cursor stays aligned in fullscreen letterbox/pillarbox.
+    const streamAspect = videoWidth / videoHeight;
+    const boxAspect = videoRect.width / videoRect.height;
+
+    let renderWidth = videoRect.width;
+    let renderHeight = videoRect.height;
+    let offsetX = 0;
+    let offsetY = 0;
+
+    if (streamAspect > boxAspect) {
+      renderHeight = videoRect.width / streamAspect;
+      offsetY = (videoRect.height - renderHeight) / 2;
+    } else {
+      renderWidth = videoRect.height * streamAspect;
+      offsetX = (videoRect.width - renderWidth) / 2;
+    }
+
+    const scaleX = renderWidth / videoWidth;
+    const scaleY = renderHeight / videoHeight;
     
     return {
-      x: stats.cursorX * scaleX - (stats.cursorHotspotX || 0),
-      y: stats.cursorY * scaleY - (stats.cursorHotspotY || 0)
+      x: offsetX + stats.cursorX * scaleX - (stats.cursorHotspotX || 0) * scaleX,
+      y: offsetY + stats.cursorY * scaleY - (stats.cursorHotspotY || 0) * scaleY,
     };
   };
   
   const cursorPos = getCursorPosition();
+
+  useEffect(() => {
+    if (stats.cursorVisible && stats.cursorImageUrl) {
+      console.log(
+        `[StreamView] Custom cursor applied (hotspot=${stats.cursorHotspotX || 0},${stats.cursorHotspotY || 0})`,
+      );
+    }
+  }, [stats.cursorVisible, stats.cursorImageUrl, stats.cursorHotspotX, stats.cursorHotspotY]);
 
   // Focus video element when stream is ready (not connecting anymore)
   useEffect(() => {

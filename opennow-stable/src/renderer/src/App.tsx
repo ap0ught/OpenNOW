@@ -381,6 +381,7 @@ export function App(): JSX.Element {
   const hasInitializedRef = useRef(false);
   const regionsRequestRef = useRef(0);
   const launchInFlightRef = useRef(false);
+  const streamStatusRef = useRef<StreamStatus>("idle");
   const exitPromptResolverRef = useRef<((confirmed: boolean) => void) | null>(null);
 
   const applyVariantSelections = useCallback((catalog: GameInfo[]): void => {
@@ -414,6 +415,10 @@ export function App(): JSX.Element {
   useEffect(() => {
     sessionRef.current = session;
   }, [session]);
+
+  useEffect(() => {
+    streamStatusRef.current = streamStatus;
+  }, [streamStatus]);
 
   useEffect(() => {
     document.body.classList.toggle("controller-mode", controllerConnected);
@@ -759,7 +764,17 @@ export function App(): JSX.Element {
   // Signaling events
   useEffect(() => {
     const unsubscribe = window.openNow.onSignalingEvent(async (event: MainToRendererSignalingEvent) => {
-      console.log(`[App] Signaling event: ${event.type}`, event.type === "offer" ? `(SDP ${event.sdp.length} chars)` : "", event.type === "remote-ice" ? event.candidate : "");
+      const eventDetail =
+        event.type === "offer"
+          ? `(SDP ${event.sdp.length} chars)`
+          : event.type === "remote-ice"
+            ? event.candidate
+            : event.type === "disconnected"
+              ? event.reason
+              : event.type === "error" || event.type === "log"
+                ? event.message
+                : "";
+      console.log(`[App] Signaling event: ${event.type}`, eventDetail);
       try {
         if (event.type === "offer") {
           const activeSession = sessionRef.current;
@@ -798,6 +813,22 @@ export function App(): JSX.Element {
               onMicStateChange: (state) => {
                 console.log(`[App] Mic state: ${state.state}${state.deviceLabel ? ` (${state.deviceLabel})` : ""}`);
               },
+              onStreamExit: (info) => {
+                console.warn("[App] Stream exit from control channel:", info);
+                void window.openNow.disconnectSignaling().catch(() => {});
+                clientRef.current?.dispose();
+                clientRef.current = null;
+                setLaunchError({
+                  stage: "connecting",
+                  title: "Stream Ended by Server",
+                  description: info.nvstResult
+                    ? `The server ended the stream (nvstResult ${info.nvstResult}).`
+                    : "The server ended the stream unexpectedly.",
+                  codeLabel: toCodeLabel(info.gfnErrorCode),
+                });
+                resetLaunchRuntime({ keepLaunchError: true, keepStreamingContext: true });
+                launchInFlightRef.current = false;
+              },
             });
             // Auto-start microphone if mode is enabled
             if (settings.microphoneMode !== "disabled") {
@@ -815,20 +846,45 @@ export function App(): JSX.Element {
             });
             setLaunchError(null);
             setStreamStatus("streaming");
-            // Start power save blocker to prevent display sleep during streaming
-            void window.openNow.startPowerSaveBlocker().catch((err) => {
-              console.warn("[App] Failed to start power save blocker:", err);
-            });
+            // Power save blocker disabled - was causing stream start issues on Windows after sleep
           }
         } else if (event.type === "remote-ice") {
           await clientRef.current?.addRemoteCandidate(event.candidate);
         } else if (event.type === "disconnected") {
           console.warn("Signaling disconnected:", event.reason);
+          const currentStreamStatus = streamStatusRef.current;
+          const mediaObject = videoRef.current?.srcObject;
+          const hasLiveMediaTracks =
+            mediaObject instanceof MediaStream &&
+            mediaObject.getTracks().some((track) => track.readyState === "live");
+          console.warn(
+            "Signaling disconnected - streamStatus:",
+            currentStreamStatus,
+            "videoRef exists:",
+            !!videoRef.current,
+            "hasLiveMediaTracks:",
+            hasLiveMediaTracks,
+          );
+          const reconnectExhausted = event.reason.includes("reconnect exhausted");
+          if ((currentStreamStatus === "streaming" || currentStreamStatus === "connecting") && hasLiveMediaTracks && !reconnectExhausted) {
+            console.warn("[App] Ignoring signaling disconnect while WebRTC media is still live");
+            return;
+          }
+          if (videoRef.current) {
+            console.warn("Video element state before dispose:", {
+              isConnected: videoRef.current.isConnected,
+              parentElement: videoRef.current.parentElement?.tagName,
+              paused: videoRef.current.paused,
+              readyState: videoRef.current.readyState,
+              videoWidth: videoRef.current.videoWidth,
+              videoHeight: videoRef.current.videoHeight,
+              srcObject: videoRef.current.srcObject ? "set" : "null",
+            });
+          }
           clientRef.current?.dispose();
           clientRef.current = null;
           resetLaunchRuntime();
-          // Stop power save blocker on unexpected disconnect
-          void window.openNow.stopPowerSaveBlocker().catch(() => {});
+          // Power save blocker disabled - was causing stream start issues on Windows after sleep
           launchInFlightRef.current = false;
         } else if (event.type === "error") {
           console.error("Signaling error:", event.message);
@@ -1269,15 +1325,11 @@ export function App(): JSX.Element {
       clientRef.current = null;
       setNavbarActiveSession(null);
       resetLaunchRuntime();
-      // Stop power save blocker when streaming ends
-      void window.openNow.stopPowerSaveBlocker().catch((err) => {
-        console.warn("[App] Failed to stop power save blocker:", err);
-      });
+      // Power save blocker disabled - was causing stream start issues on Windows after sleep
       void refreshNavbarActiveSession();
     } catch (error) {
       console.error("Stop failed:", error);
-      // Ensure power save blocker is stopped even on error
-      void window.openNow.stopPowerSaveBlocker().catch(() => {});
+      // Power save blocker disabled - was causing stream start issues on Windows after sleep
     }
   }, [authSession, refreshNavbarActiveSession, resetLaunchRuntime, resolveExitPrompt]);
 
@@ -1286,8 +1338,7 @@ export function App(): JSX.Element {
     clientRef.current?.dispose();
     clientRef.current = null;
     resetLaunchRuntime();
-    // Stop power save blocker when dismissing launch error
-    void window.openNow.stopPowerSaveBlocker().catch(() => {});
+    // Power save blocker disabled - was causing stream start issues on Windows after sleep
     void refreshNavbarActiveSession();
   }, [refreshNavbarActiveSession, resetLaunchRuntime]);
 

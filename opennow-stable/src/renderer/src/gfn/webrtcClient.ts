@@ -185,6 +185,11 @@ export interface StreamTimeWarning {
   secondsLeft?: number;
 }
 
+export interface StreamExitInfo {
+  nvstResult?: number;
+  gfnErrorCode: number;
+}
+
 interface ClientOptions {
   videoElement: HTMLVideoElement;
   audioElement: HTMLAudioElement;
@@ -199,6 +204,7 @@ interface ClientOptions {
   onEscHoldProgress?: (visible: boolean, progress: number) => void;
   onTimeWarning?: (warning: StreamTimeWarning) => void;
   onMicStateChange?: (state: MicStateChange) => void;
+  onStreamExit?: (info: StreamExitInfo) => void;
 }
 
 function timestampUs(sourceTimestampMs?: number): bigint {
@@ -438,6 +444,7 @@ export class GfnWebRtcClient {
   private readonly inputEncoder = new InputEncoder();
 
   private pc: RTCPeerConnection | null = null;
+  private disposed = false;
   private reliableInputChannel: RTCDataChannel | null = null;
   private mouseInputChannel: RTCDataChannel | null = null;
   private cursorChannel: RTCDataChannel | null = null;
@@ -464,6 +471,7 @@ export class GfnWebRtcClient {
   private pendingMouseDy = 0;
   private inputCleanup: Array<() => void> = [];
   private queuedCandidates: RTCIceCandidateInit[] = [];
+  private streamExitHandled = false;
 
   // Input mode: auto-switches between mouse+keyboard and gamepad
   // When gamepad has activity, mouse/keyboard are suppressed (and vice versa)
@@ -588,6 +596,7 @@ export class GfnWebRtcClient {
   };
 
   constructor(private readonly options: ClientOptions) {
+    this.log(`WebRTCClient constructor - video element isConnected=${options.videoElement.isConnected}, parentElement=${options.videoElement.parentElement?.tagName || 'null'}`);
     options.videoElement.srcObject = this.videoStream;
     options.audioElement.srcObject = this.audioStream;
     options.audioElement.muted = true;
@@ -1030,6 +1039,9 @@ export class GfnWebRtcClient {
   }
 
   private cleanupPeerConnection(): void {
+    this.log("cleanupPeerConnection() called");
+    this.log(`cleanupPeerConnection() - video element: isConnected=${this.options.videoElement.isConnected}, parentElement=${this.options.videoElement.parentElement?.tagName || 'null'}`);
+    this.streamExitHandled = false;
     this.clearTimers();
     this.detachInputCapture();
     this.closeDataChannels();
@@ -1049,10 +1061,16 @@ export class GfnWebRtcClient {
     }
 
     // Remove old tracks so reconnects don't accumulate ended tracks in srcObject streams.
-    for (const track of this.videoStream.getTracks()) {
+    const videoTracksBefore = this.videoStream.getTracks();
+    this.log(`cleanupPeerConnection: removing ${videoTracksBefore.length} video tracks`);
+    for (const track of videoTracksBefore) {
+      this.log(`cleanupPeerConnection: removing video track - id=${track.id}, readyState=${track.readyState}, muted=${track.muted}, enabled=${track.enabled}`);
       this.videoStream.removeTrack(track);
     }
-    for (const track of this.audioStream.getTracks()) {
+    const audioTracksBefore = this.audioStream.getTracks();
+    this.log(`cleanupPeerConnection: removing ${audioTracksBefore.length} audio tracks`);
+    for (const track of audioTracksBefore) {
+      this.log(`cleanupPeerConnection: removing audio track - id=${track.id}, readyState=${track.readyState}, muted=${track.muted}, enabled=${track.enabled}`);
       this.audioStream.removeTrack(track);
     }
 
@@ -1089,6 +1107,10 @@ export class GfnWebRtcClient {
       // Set up render FPS tracking using video element
       const video = this.options.videoElement;
       const frameCallback = () => {
+        // Stop callback if disposed or video element removed
+        if (this.disposed || !video.isConnected) {
+          return;
+        }
         this.updateRenderFps();
         if (this.videoStream.active) {
           video.requestVideoFrameCallback(frameCallback);
@@ -1102,14 +1124,38 @@ export class GfnWebRtcClient {
 
       // Explicitly start video playback after track attachment.
       // Some Chromium/Electron builds keep the video element paused even with autoplay.
-      video
-        .play()
-        .then(() => {
-          this.log("Video element playback started");
-        })
-        .catch((playError) => {
-          this.log(`Video play() failed: ${String(playError)}`);
-        });
+      // Add error handler for video element
+      video.onerror = (e) => {
+        const videoEl = e.target as HTMLVideoElement;
+        const error = videoEl.error;
+        this.log(`Video element error: code=${error?.code}, message=${error?.message || 'unknown'}, networkState=${videoEl.networkState}`);
+      };
+
+      // Only play if video element is still in DOM
+      if (video.isConnected) {
+        video
+          .play()
+          .then(() => {
+            // Check if still connected before logging to avoid errors after unmount
+            if (video.isConnected) {
+              this.log("Video element playback started");
+            } else {
+              this.log("Video playback started but element was removed from DOM shortly after");
+            }
+          })
+          .catch((playError) => {
+            // Only log detailed errors if element is still in DOM - avoids false errors during cleanup
+            if (video.isConnected) {
+              this.log(`Video play() failed: ${String(playError)}`);
+              this.log(`Video play() failure context: isConnected=${video.isConnected}, parentElement=${video.parentElement?.tagName || 'null'}, srcObject=${video.srcObject ? 'set' : 'null'}`);
+              this.log(`Video play() failure - video state: paused=${video.paused}, readyState=${video.readyState}, networkState=${video.networkState}`);
+            } else {
+              this.log(`Video play() aborted - element was removed from DOM (expected during cleanup)`);
+            }
+          });
+      } else {
+        this.log("Skipping video play() - element not connected to DOM");
+      }
 
       window.setTimeout(() => {
         this.log(
@@ -1123,11 +1169,66 @@ export class GfnWebRtcClient {
       track.onmute = () => {
         this.log("Warning: video track muted by sender");
       };
-      track.onended = () => {
-        this.log("Warning: video track ended");
-      };
 
       this.log("Video track attached");
+      
+      // Monitor video element for DOM removal using MutationObserver
+      if (video.parentElement) {
+        const observer = new MutationObserver((mutations) => {
+          for (const mutation of mutations) {
+            if (mutation.type === 'childList') {
+              for (const node of mutation.removedNodes) {
+                if (node === video || (node instanceof Element && node.contains(video))) {
+                  this.log(`CRITICAL: Video element or parent removed from DOM! removedNode=${node.nodeName}`);
+                }
+              }
+            }
+          }
+          // Also check general state
+          if (!video.isConnected) {
+            this.log(`CRITICAL: Video element no longer connected to DOM! parentElement=${video.parentElement?.tagName || 'null'}`);
+          }
+        });
+        observer.observe(video.parentElement, { childList: true, subtree: true });
+        this.log(`MutationObserver attached to video parent: ${video.parentElement.tagName}`);
+      }
+      
+      // Periodic check as backup
+      const checkVideoInDom = () => {
+        if (!video.isConnected) {
+          this.log(`CRITICAL: Video element removed from DOM! parentElement=${video.parentElement?.tagName || 'null'}`);
+        }
+        if (video.srcObject !== this.videoStream) {
+          this.log(`CRITICAL: Video srcObject changed! current=${video.srcObject ? (video.srcObject === this.videoStream ? 'our stream' : 'different stream') : 'null'}`);
+        }
+      };
+      // Check immediately and periodically
+      checkVideoInDom();
+      const domCheckInterval = window.setInterval(checkVideoInDom, 2000);
+      
+      // Clean up interval when track ends
+      track.onended = () => {
+        if (this.disposed) {
+          this.log("Video track ended but client already disposed - skipping cleanup (expected during dispose)");
+          window.clearInterval(domCheckInterval);
+          return;
+        }
+        
+        this.log("Warning: video track ended");
+        
+        // Only log video element state if it's still in DOM to avoid misleading logs
+        if (video.isConnected) {
+          this.log(`Video track ended - state: readyState=${track.readyState}, muted=${track.muted}, enabled=${track.enabled}`);
+          this.log(`Video element state: parentElement=${video.parentElement?.tagName || 'null'}, isConnected=${video.isConnected}, srcObject=${video.srcObject ? 'set' : 'null'}`);
+          this.log(`Video stream state: active=${this.videoStream.active}, tracks=${this.videoStream.getTracks().length}`);
+        } else {
+          this.log(`Video track ended - element already removed from DOM (likely due to stream stopping)`);
+          this.log(`Video track ended - state: readyState=${track.readyState}, muted=${track.muted}, enabled=${track.enabled}`);
+          this.log(`Video stream state: active=${this.videoStream.active}, tracks=${this.videoStream.getTracks().length}`);
+        }
+        window.clearInterval(domCheckInterval);
+      };
+      
       return;
     }
 
@@ -1213,12 +1314,28 @@ export class GfnWebRtcClient {
       window.clearInterval(this.heartbeatTimer);
     }
 
+    let heartbeatCount = 0;
+    let lastLogTime = performance.now();
+
     this.heartbeatTimer = window.setInterval(() => {
       if (!this.inputReady) {
         return;
       }
       const bytes = this.inputEncoder.encodeHeartbeat();
-      this.sendReliable(bytes);
+      const sent = this.sendReliable(bytes);
+      heartbeatCount++;
+
+      // Log heartbeat stats every 10 seconds
+      const now = performance.now();
+      if (now - lastLogTime > 10000) {
+        this.log(`Heartbeat stats: sent=${heartbeatCount}, reliableChannel=${this.reliableInputChannel?.readyState || "null"}, inputReady=${this.inputReady}`);
+        lastLogTime = now;
+        heartbeatCount = 0;
+      }
+
+      if (!sent) {
+        this.log(`Heartbeat failed to send - reliableChannel=${this.reliableInputChannel?.readyState || "null"}, bufferedAmount=${this.reliableInputChannel?.bufferedAmount || 0}`);
+      }
     }, 2000);
   }
 
@@ -1430,9 +1547,19 @@ export class GfnWebRtcClient {
     this.reliableInputChannel = pc.createDataChannel("input_channel_v1", {
       ordered: true,
     });
+    this.reliableInputChannel.binaryType = "arraybuffer";
 
     this.reliableInputChannel.onopen = () => {
+      this.reliableDropLogged = false;
       this.log("Reliable input channel open");
+    };
+
+    this.reliableInputChannel.onclose = () => {
+      this.log("Reliable input channel closed");
+    };
+
+    this.reliableInputChannel.onerror = (e) => {
+      this.log(`Reliable input channel error: ${e.type}`);
     };
 
     this.reliableInputChannel.onmessage = async (event) => {
@@ -1444,9 +1571,18 @@ export class GfnWebRtcClient {
       ordered: false,
       maxPacketLifeTime: this.partialReliableThresholdMs,
     });
+    this.mouseInputChannel.binaryType = "arraybuffer";
 
     this.mouseInputChannel.onopen = () => {
       this.log(`Mouse channel open (partially reliable, maxPacketLifeTime=${this.partialReliableThresholdMs}ms)`);
+    };
+
+    this.mouseInputChannel.onclose = () => {
+      this.log("Mouse input channel closed");
+    };
+
+    this.mouseInputChannel.onerror = (e) => {
+      this.log(`Mouse input channel error: ${e.type}`);
     };
 
     // Server-rendered cursor channel for precise cursor positioning
@@ -1455,14 +1591,28 @@ export class GfnWebRtcClient {
       ordered: true,
       reliable: true,
     });
+    this.cursorChannel.binaryType = "arraybuffer";
 
     this.cursorChannel.onopen = () => {
       this.log("Cursor channel open (server-rendered cursor, reliable=true)");
     };
 
+    this.cursorChannel.onclose = () => {
+      this.log("Cursor channel closed");
+    };
+
+    this.cursorChannel.onerror = (e) => {
+      this.log(`Cursor channel error: ${e.type}`);
+    };
+
     this.cursorChannel.onmessage = (event) => {
-      // Handle server cursor position updates (for server-rendered cursor)
-      this.handleCursorMessage(event.data as ArrayBuffer);
+      void toBytes(event.data as string | Blob | ArrayBuffer)
+        .then((bytes) => {
+          this.handleCursorMessage(bytes);
+        })
+        .catch((error) => {
+          this.log(`Cursor channel decode error: ${String(error)}`);
+        });
     };
 
     // Stats/telemetry channel for stream quality metrics
@@ -1472,14 +1622,28 @@ export class GfnWebRtcClient {
       reliable: false,
       maxRetransmits: 0,
     });
+    this.statsChannel.binaryType = "arraybuffer";
 
     this.statsChannel.onopen = () => {
       this.log("Stats channel open (telemetry, fire-and-forget)");
     };
 
+    this.statsChannel.onclose = () => {
+      this.log("Stats channel closed");
+    };
+
+    this.statsChannel.onerror = (e) => {
+      this.log(`Stats channel error: ${e.type}`);
+    };
+
     this.statsChannel.onmessage = (event) => {
-      // Handle server telemetry/stats messages
-      this.handleServerStatsMessage(event.data as ArrayBuffer);
+      void toBytes(event.data as string | Blob | ArrayBuffer)
+        .then((bytes) => {
+          this.handleServerStatsMessage(bytes);
+        })
+        .catch((error) => {
+          this.log(`Stats channel decode error: ${String(error)}`);
+        });
     };
   }
 
@@ -1497,6 +1661,17 @@ export class GfnWebRtcClient {
     return null;
   }
 
+  private mapNvstResultToGfnErrorCode(nvstResult: number | undefined): number {
+    switch (nvstResult) {
+      case 2147680271:
+        return 3237094147; // ServerDisconnectedFrameGrabFailed
+      case 2147680259:
+        return 3237094152; // ServerDisconnectedGameLaunchFailed
+      default:
+        return 15868672; // StreamDisconnectedFromServer
+    }
+  }
+
   /**
    * Handle cursor image data from cursor_channel.
    * 
@@ -1504,135 +1679,172 @@ export class GfnWebRtcClient {
    * The cursor_channel sends binary messages with embedded cursor images.
    * 
    * Message format:
-   * - Byte 0: Message type (0=set cursor+pos, 1=update cursor def, 10=set visibility)
+   * - Byte 0: Message type (0=apply cursor+pos, 1=define cursor, 10=allowUnconfined flag)
    * - Byte 1: Cursor ID (m)
    * - Byte 2: Hotspot X (Sf)
    * - Byte 3: Hotspot Y (wf)
-   * - Byte 4: Style name length (L)
-   * - Bytes 5 to 5+L: Style name (UTF-8, optional)
+   * - Byte 4: MIME type length (L)
+   * - Bytes 5 to 5+L: MIME type (UTF-8, optional)
    * - Next 2 bytes: Image data length (16-bit LE)
    * - Next N bytes: Base64 cursor image data (bf)
    * - Next 4 bytes (optional): Position X, Y (16-bit LE each)
+   * - Next 2 bytes (optional): Scale x100 (uint16 LE)
    * 
    * The server sends: type 1 to define cursor image, then type 0 to set position
    */
-  private cursorImageCache: Map<number, { bf: string; Sf: number; wf: number; style: string }> = new Map();
+  private cursorImageCache: Map<number, { bf: string; Sf: number; wf: number; mimeType: string; scale: number }> = new Map();
   private currentCursorId: number = 0;
 
-  private handleCursorMessage(data: ArrayBuffer): void {
+  private inferCursorMimeType(base64Image: string, hintedMimeType: string): string {
+    const normalizedHint = hintedMimeType.trim().toLowerCase();
+    if (normalizedHint.startsWith("image/")) {
+      return normalizedHint;
+    }
+    if (base64Image.startsWith("iVBOR")) {
+      return "image/png";
+    }
+    if (base64Image.startsWith("/9j/")) {
+      return "image/jpeg";
+    }
+    if (base64Image.startsWith("R0lGOD")) {
+      return "image/gif";
+    }
+    if (base64Image.startsWith("PHN2Z")) {
+      return "image/svg+xml";
+    }
+    return "image/x-icon";
+  }
+
+  private applyCursorFromCache(cursorId: number, posX?: number, posY?: number): void {
+    const cursorData = this.cursorImageCache.get(cursorId);
+    if (!cursorData) {
+      this.log(`Cursor not found: id=${cursorId}`);
+      return;
+    }
+
+    this.currentCursorId = cursorId;
+    this.diagnostics.cursorImageUrl = `data:${cursorData.mimeType};base64,${cursorData.bf}`;
+    this.diagnostics.cursorHotspotX = cursorData.Sf;
+    this.diagnostics.cursorHotspotY = cursorData.wf;
+    this.diagnostics.cursorType = "default";
+    this.diagnostics.cursorVisible = true;
+
+    if (posX !== undefined && posY !== undefined) {
+      this.diagnostics.cursorX = posX;
+      this.diagnostics.cursorY = posY;
+    }
+
+    this.emitStats();
+    this.log(
+      `Cursor applied: id=${cursorId}, pos=(${this.diagnostics.cursorX},${this.diagnostics.cursorY}), hotspot=(${cursorData.Sf},${cursorData.wf}), scale=${cursorData.scale.toFixed(2)}`,
+    );
+  }
+
+  private handleCursorMessage(u: Uint8Array): void {
     try {
-      const u = new Uint8Array(data);
-      
-      // Need at least 5 bytes for header
+      if (u.byteLength < 1) {
+        this.log("Cursor message too short: 0 bytes");
+        return;
+      }
+
+      const msgType = u[0];
+
+      // type 10 is an unconfined cursor flag in the official client, not visibility.
+      if (msgType === 10) {
+        const allowUnconfined = u.byteLength >= 2 && u[1] === 1;
+        this.log(`Cursor channel flag: allowUnconfined=${allowUnconfined}`);
+        return;
+      }
+
       if (u.byteLength < 5) {
         this.log(`Cursor message too short: ${u.byteLength} bytes`);
         return;
       }
-      
-      const msgType = u[0];
+      if (msgType !== 0 && msgType !== 1) {
+        this.log(`Cursor message ignored: unsupported type=${msgType}`);
+        return;
+      }
+
       const cursorId = u[1];
       const hotspotX = u[2];
       const hotspotY = u[3];
-      const styleNameLen = u[4];
-      
+      const mimeTypeLen = u[4];
+
       let offset = 5;
-      
-      // Read style name if present
-      let styleName = "";
-      if (styleNameLen > 0 && offset + styleNameLen <= u.byteLength) {
-        styleName = new TextDecoder("utf-8").decode(u.subarray(offset, offset + styleNameLen));
-        offset += styleNameLen;
+
+      // Read MIME type hint if present
+      let mimeTypeHint = "";
+      if (mimeTypeLen > 0) {
+        if (offset + mimeTypeLen > u.byteLength) {
+          this.log(`Cursor message truncated (mime type): id=${cursorId}, len=${u.byteLength}`);
+          return;
+        }
+        mimeTypeHint = new TextDecoder("utf-8").decode(u.subarray(offset, offset + mimeTypeLen));
+        offset += mimeTypeLen;
       }
-      
+
       // Helper to read 16-bit LE
-      const readUint16 = () => {
-        if (offset + 2 > u.byteLength) return 0;
+      const readUint16 = (): number | undefined => {
+        if (offset + 2 > u.byteLength) return undefined;
         const val = u[offset] | (u[offset + 1] << 8);
         offset += 2;
         return val;
       };
-      
+
       // Read image data length and image data
       const imageDataLen = readUint16();
+      if (imageDataLen === undefined) {
+        this.log(`Cursor message truncated (image length): id=${cursorId}, len=${u.byteLength}`);
+        return;
+      }
       let base64Image = "";
-      
-      if (imageDataLen > 0 && offset + imageDataLen <= u.byteLength) {
+
+      if (imageDataLen > 0) {
+        if (offset + imageDataLen > u.byteLength) {
+          this.log(`Cursor message truncated (image payload): id=${cursorId}, len=${u.byteLength}`);
+          return;
+        }
         base64Image = new TextDecoder("utf-8").decode(u.subarray(offset, offset + imageDataLen));
         offset += imageDataLen;
-        
-        // Cache this cursor image (type 1 = define cursor)
-        if (msgType === 1) {
-          this.cursorImageCache.set(cursorId, {
-            bf: base64Image,
-            Sf: hotspotX,
-            wf: hotspotY,
-            style: styleName
-          });
-          this.log(`Cursor cached: id=${cursorId}, len=${base64Image.length}, style="${styleName}"`);
-        }
       }
-      
+
       // Read position if present (need 4 more bytes)
       let posX: number | undefined;
       let posY: number | undefined;
-      
+
       if (offset + 4 <= u.byteLength) {
         posX = readUint16();
         posY = readUint16();
       }
-      
-      // Handle type 0: Set cursor and position
-      if (msgType === 0) {
-        // Get cursor data - either from message or from cache
-        let cursorData = base64Image ? {
+
+      // Optional scale (uint16 / 100)
+      let scale = 1;
+      if (offset + 2 <= u.byteLength) {
+        const parsedScale = readUint16();
+        if (parsedScale && parsedScale > 0) {
+          scale = parsedScale / 100;
+        }
+      }
+
+      // Cache cursor definition if message includes image payload
+      if (base64Image.length > 0) {
+        const cachedMimeType = this.cursorImageCache.get(cursorId)?.mimeType ?? "";
+        const mimeType = this.inferCursorMimeType(base64Image, mimeTypeHint || cachedMimeType);
+        this.cursorImageCache.set(cursorId, {
           bf: base64Image,
           Sf: hotspotX,
           wf: hotspotY,
-          style: styleName
-        } : this.cursorImageCache.get(cursorId);
-        
-        if (!cursorData) {
-          this.log(`Cursor not found: id=${cursorId}`);
-          return;
-        }
-        
-        this.currentCursorId = cursorId;
-        
-        // Determine MIME type from base64 header
-        let mimeType = 'image/x-icon'; // Default ICO (AAABAA...)
-        if (cursorData.bf.startsWith('iVBOR')) {
-          mimeType = 'image/png';
-        } else if (cursorData.bf.startsWith('/9j/')) {
-          mimeType = 'image/jpeg';
-        } else if (cursorData.bf.startsWith('R0lGOD')) {
-          mimeType = 'image/gif';
-        } else if (cursorData.bf.startsWith('PHN2Z')) {
-          mimeType = 'image/svg+xml';
-        }
-        
-        // Update diagnostics
-        this.diagnostics.cursorImageUrl = `data:${mimeType};base64,${cursorData.bf}`;
-        this.diagnostics.cursorHotspotX = cursorData.Sf;
-        this.diagnostics.cursorHotspotY = cursorData.wf;
-        this.diagnostics.cursorType = cursorData.style || 'default';
-        this.diagnostics.cursorVisible = true;
-        
-        // Update position if provided
-        if (posX !== undefined && posY !== undefined) {
-          this.diagnostics.cursorX = posX;
-          this.diagnostics.cursorY = posY;
-        }
-        
-        this.log(`Cursor set: id=${cursorId}, pos=(${posX},${posY}), hotspot=(${cursorData.Sf},${cursorData.wf})`);
+          mimeType,
+          scale,
+        });
+        this.log(`Cursor cached: id=${cursorId}, len=${base64Image.length}, mime="${mimeType}", scale=${scale.toFixed(2)}`);
+      } else if (msgType === 1 && !this.cursorImageCache.has(cursorId)) {
+        this.log(`Cursor define missing image: id=${cursorId}`);
+        return;
       }
-      
-      // Handle type 10: Set visibility
-      if (msgType === 10) {
-        const visible = u[1] === 1;
-        this.diagnostics.cursorVisible = visible;
-        this.log(`Cursor visibility: ${visible}`);
-      }
-      
+
+      // Official behavior: type 0 applies cached cursor+position, type 1 defines and can also apply.
+      this.applyCursorFromCache(cursorId, posX, posY);
     } catch (e) {
       this.log(`Cursor message parse error: ${String(e)}`);
     }
@@ -1653,9 +1865,9 @@ export class GfnWebRtcClient {
    *   - Bytes 33-36: serverPerfScore (float32 BE)
    *   - etc.
    */
-  private handleServerStatsMessage(data: ArrayBuffer): void {
+  private handleServerStatsMessage(data: Uint8Array): void {
     try {
-      const view = new DataView(data);
+      const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
       if (data.byteLength < 1) return;
 
       const version = view.getUint8(0);
@@ -1736,6 +1948,28 @@ export class GfnWebRtcClient {
       return;
     }
 
+    if (parsed && typeof parsed === "object") {
+      const control = parsed as Record<string, unknown>;
+      if ("exitMessage" in control) {
+        this.log(`Control exit message: ${JSON.stringify(control.exitMessage)}`);
+        if (!this.streamExitHandled && control.exitMessage && typeof control.exitMessage === "object") {
+          const exit = control.exitMessage as Record<string, unknown>;
+          const rawNvstResult = Number(exit.nvstResult);
+          const nvstResult = Number.isFinite(rawNvstResult) ? rawNvstResult : undefined;
+          const gfnErrorCode = this.mapNvstResultToGfnErrorCode(nvstResult);
+          this.streamExitHandled = true;
+          this.options.onStreamExit?.({
+            nvstResult,
+            gfnErrorCode,
+          });
+        }
+      } else if ("videoStreamProgressEvent" in control) {
+        this.log(`Control videoStreamProgressEvent: ${JSON.stringify(control.videoStreamProgressEvent)}`);
+      } else if ("customMessage" in control) {
+        this.log(`Control custom message: ${JSON.stringify(control.customMessage)}`);
+      }
+    }
+
     if (!parsed || typeof parsed !== "object" || !("timerNotification" in parsed)) {
       return;
     }
@@ -1779,14 +2013,16 @@ export class GfnWebRtcClient {
 
   private reliableDropLogged = false;
 
-  public sendReliable(payload: Uint8Array): void {
+  public sendReliable(payload: Uint8Array): boolean {
     if (this.reliableInputChannel?.readyState === "open") {
       const safePayload = Uint8Array.from(payload);
       this.reliableInputChannel.send(safePayload.buffer);
+      return true;
     } else if (!this.reliableDropLogged) {
       this.reliableDropLogged = true;
       this.log(`Reliable channel not open (state=${this.reliableInputChannel?.readyState ?? "null"}), dropping event (${payload.length} bytes)`);
     }
+    return false;
   }
 
   private async lockEscapeInFullscreen(): Promise<void> {
@@ -2512,11 +2748,13 @@ export class GfnWebRtcClient {
         this.log("Window blur during mic permission - keeping keys pressed");
         return;
       }
+      this.log(`Window blur event - document.hidden=${document.hidden}, visibilityState=${document.visibilityState}, video.paused=${this.options.videoElement.paused}`);
       this.clearEscapeHoldTimer();
       this.releasePressedKeys("window blur");
     };
 
     const onVisibilityChange = () => {
+      this.log(`Visibility change event: ${document.visibilityState} - video.paused=${this.options.videoElement.paused}, document.hidden=${document.hidden}`);
       if (document.visibilityState !== "visible") {
         this.clearEscapeHoldTimer();
         this.releasePressedKeys(`visibility ${document.visibilityState}`);
@@ -2864,6 +3102,10 @@ export class GfnWebRtcClient {
       if (!payload.candidate) {
         return;
       }
+      if (payload.candidate.includes(" tcp ")) {
+        this.log(`Skipping local ICE candidate (tcp): ${payload.candidate}`);
+        return;
+      }
       this.log(`Local ICE candidate: ${payload.candidate}`);
       const candidate: IceCandidatePayload = {
         candidate: payload.candidate,
@@ -2880,6 +3122,15 @@ export class GfnWebRtcClient {
       this.diagnostics.connectionState = pc.connectionState;
       this.emitStats();
       this.log(`Peer connection state: ${pc.connectionState}`);
+      
+      // Enhanced logging for debugging Windows crashes
+      if (pc.connectionState === "disconnected" || pc.connectionState === "failed" || pc.connectionState === "closed") {
+        this.log(`Connection state change to ${pc.connectionState} - video element isConnected=${this.options.videoElement.isConnected}, videoStream.active=${this.videoStream.active}`);
+        const videoTracks = this.videoStream.getTracks();
+        this.log(`Video stream tracks: ${videoTracks.length}, states: ${videoTracks.map(t => `${t.readyState}/${t.muted}`).join(", ") || "none"}`);
+        const audioTracks = this.audioStream.getTracks();
+        this.log(`Audio stream tracks: ${audioTracks.length}, states: ${audioTracks.map(t => `${t.readyState}/${t.muted}`).join(", ") || "none"}`);
+      }
     };
 
     pc.ondatachannel = (event) => {
@@ -2915,6 +3166,11 @@ export class GfnWebRtcClient {
 
     pc.oniceconnectionstatechange = () => {
       this.log(`ICE connection state: ${pc.iceConnectionState}`);
+      // Log ICE connection failures for debugging
+      if (pc.iceConnectionState === "disconnected" || pc.iceConnectionState === "failed" || pc.iceConnectionState === "closed") {
+        this.log(`ICE state ${pc.iceConnectionState} detected - checking data channels`);
+        this.log(`Reliable channel: ${this.reliableInputChannel?.readyState || "null"}, Mouse channel: ${this.mouseInputChannel?.readyState || "null"}`);
+      }
     };
 
     pc.onicegatheringstatechange = () => {
@@ -2999,7 +3255,14 @@ export class GfnWebRtcClient {
     }
 
     if (supported.length > 0 && !supported.includes(settings.codec)) {
-      this.log(`Warning: ${settings.codec} not reported in browser codec list; forcing requested codec anyway`);
+      const fallbackOrder: VideoCodec[] = ["H264", "H265", "AV1"];
+      const fallbackCodec = fallbackOrder.find((codecName) => supported.includes(codecName));
+      if (fallbackCodec) {
+        this.log(`Warning: ${settings.codec} not supported by browser; falling back to ${fallbackCodec}`);
+        effectiveCodec = fallbackCodec;
+      } else {
+        this.log(`Warning: ${settings.codec} not reported in browser codec list; forcing requested codec anyway`);
+      }
     }
     this.log(`Effective codec: ${effectiveCodec} (preferred HEVC profile-id=${preferredHevcProfileId})`);
     const filteredOffer = preferCodec(processedOffer, effectiveCodec, {
@@ -3070,7 +3333,7 @@ export class GfnWebRtcClient {
       }
 
       if (effectiveCodec === "H265" && !hasNegotiatedH265) {
-        throw new Error("H265 requested but not negotiated in local SDP (no H265 rtpmap in answer)");
+        this.log("Warning: H265 requested but not negotiated in local SDP; continuing with negotiated codec");
       }
     }
 
@@ -3175,6 +3438,14 @@ export class GfnWebRtcClient {
   }
 
   dispose(): void {
+    if (this.disposed) {
+      this.log("dispose() called but already disposed - ignoring");
+      return;
+    }
+    this.disposed = true;
+    
+    this.log(`dispose() called - stack trace: ${new Error().stack}`);
+    this.log(`dispose() state: pc=${this.pc ? 'exists' : 'null'}, videoStream.active=${this.videoStream.active}, audioStream.active=${this.audioStream.active}`);
     this.cleanupPeerConnection();
 
     // Cleanup microphone
@@ -3184,11 +3455,14 @@ export class GfnWebRtcClient {
     }
 
     for (const track of this.videoStream.getTracks()) {
+      this.log(`dispose(): removing video track - readyState=${track.readyState}, muted=${track.muted}`);
       this.videoStream.removeTrack(track);
     }
     for (const track of this.audioStream.getTracks()) {
+      this.log(`dispose(): removing audio track - readyState=${track.readyState}, muted=${track.muted}`);
       this.audioStream.removeTrack(track);
     }
+    this.log("dispose() complete");
   }
 
   /**
