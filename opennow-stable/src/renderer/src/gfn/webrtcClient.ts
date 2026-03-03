@@ -1500,115 +1500,139 @@ export class GfnWebRtcClient {
   /**
    * Handle cursor image data from cursor_channel.
    * 
-   * The official GFN web client sends actual cursor image data via cursor_channel
-   * in addition to position updates. The image data is base64-encoded ICO format
-   * (starts with "AAABAAEAICACAA..." which is a standard Windows ICO header).
+   * Based on vendor_beautified.js Jf() function (line 14822):
+   * The cursor_channel sends binary messages with embedded cursor images.
    * 
-   * Message format (from vendor_beautified.js analysis):
-   * - Header with cursor metadata (position, hotspot, type)
-   * - Base64-encoded cursor image data (ICO/PNG format)
+   * Message format:
+   * - Byte 0: Message type (0=set cursor+pos, 1=update cursor def, 10=set visibility)
+   * - Byte 1: Cursor ID (m)
+   * - Byte 2: Hotspot X (Sf)
+   * - Byte 3: Hotspot Y (wf)
+   * - Byte 4: Style name length (L)
+   * - Bytes 5 to 5+L: Style name (UTF-8, optional)
+   * - Next 2 bytes: Image data length (16-bit LE)
+   * - Next N bytes: Base64 cursor image data (bf)
+   * - Next 4 bytes (optional): Position X, Y (16-bit LE each)
    * 
-   * The server-rendered cursor in the video may appear black, so we need to
-   * render the actual cursor image as an overlay on top of the video.
+   * The server sends: type 1 to define cursor image, then type 0 to set position
    */
-  private cursorImageDataUrl: string | null = null;
-  private cursorHotspotX: number = 0;
-  private cursorHotspotY: number = 0;
-  private cursorWidth: number = 32;
-  private cursorHeight: number = 32;
+  private cursorImageCache: Map<number, { bf: string; Sf: number; wf: number; style: string }> = new Map();
+  private currentCursorId: number = 0;
 
   private handleCursorMessage(data: ArrayBuffer): void {
     try {
-      // Check if this is a text message (JSON with base64 image) or binary position message
-      const textDecoder = new TextDecoder('utf-8');
-      const textData = textDecoder.decode(data);
+      const u = new Uint8Array(data);
       
-      // Try to parse as JSON first (contains cursor image data)
-      if (textData.startsWith('{') || textData.includes('"image"') || textData.includes('AAABAA')) {
-        try {
-          const cursorData = JSON.parse(textData);
-          
-          // Extract cursor image (base64 encoded ICO/PNG)
-          if (cursorData.image || cursorData.bf) {
-            const base64Image = cursorData.image || cursorData.bf;
-            // Determine image format from header
-            let mimeType = 'image/x-icon'; // Default ICO format
-            if (base64Image.startsWith('iVBOR')) {
-              mimeType = 'image/png';
-            } else if (base64Image.startsWith('/9j/')) {
-              mimeType = 'image/jpeg';
-            } else if (base64Image.startsWith('R0lGOD')) {
-              mimeType = 'image/gif';
-            }
-            this.cursorImageDataUrl = `data:${mimeType};base64,${base64Image}`;
-            this.log(`Cursor image received: ${base64Image.length} chars, format: ${mimeType}`);
-          }
-          
-          // Extract cursor hotspot (click point relative to cursor image)
-          if (cursorData.hotspotX !== undefined) {
-            this.cursorHotspotX = cursorData.hotspotX;
-          }
-          if (cursorData.hotspotY !== undefined) {
-            this.cursorHotspotY = cursorData.hotspotY;
-          }
-          if (cursorData.Sf !== undefined) {
-            this.cursorHotspotX = cursorData.Sf;
-          }
-          if (cursorData.wf !== undefined) {
-            this.cursorHotspotY = cursorData.wf;
-          }
-          
-          // Extract cursor size
-          if (cursorData.width) this.cursorWidth = cursorData.width;
-          if (cursorData.height) this.cursorHeight = cursorData.height;
-          
-          // Extract position if present
-          if (cursorData.x !== undefined && cursorData.y !== undefined) {
-            this.diagnostics.cursorX = cursorData.x;
-            this.diagnostics.cursorY = cursorData.y;
-          }
-          
-          // Extract visibility
-          if (cursorData.visible !== undefined) {
-            this.diagnostics.cursorVisible = cursorData.visible;
-          }
-          if (cursorData.style !== undefined) {
-            this.diagnostics.cursorType = cursorData.style;
-          }
-          
-          // Update diagnostics with image URL
-          this.diagnostics.cursorImageUrl = this.cursorImageDataUrl;
-          this.diagnostics.cursorHotspotX = this.cursorHotspotX;
-          this.diagnostics.cursorHotspotY = this.cursorHotspotY;
-          
-        } catch (jsonErr) {
-          // Not valid JSON, might be binary position message
-          this.log(`Cursor message not JSON, trying binary format`);
+      // Need at least 5 bytes for header
+      if (u.byteLength < 5) {
+        this.log(`Cursor message too short: ${u.byteLength} bytes`);
+        return;
+      }
+      
+      const msgType = u[0];
+      const cursorId = u[1];
+      const hotspotX = u[2];
+      const hotspotY = u[3];
+      const styleNameLen = u[4];
+      
+      let offset = 5;
+      
+      // Read style name if present
+      let styleName = "";
+      if (styleNameLen > 0 && offset + styleNameLen <= u.byteLength) {
+        styleName = new TextDecoder("utf-8").decode(u.subarray(offset, offset + styleNameLen));
+        offset += styleNameLen;
+      }
+      
+      // Helper to read 16-bit LE
+      const readUint16 = () => {
+        if (offset + 2 > u.byteLength) return 0;
+        const val = u[offset] | (u[offset + 1] << 8);
+        offset += 2;
+        return val;
+      };
+      
+      // Read image data length and image data
+      const imageDataLen = readUint16();
+      let base64Image = "";
+      
+      if (imageDataLen > 0 && offset + imageDataLen <= u.byteLength) {
+        base64Image = new TextDecoder("utf-8").decode(u.subarray(offset, offset + imageDataLen));
+        offset += imageDataLen;
+        
+        // Cache this cursor image (type 1 = define cursor)
+        if (msgType === 1) {
+          this.cursorImageCache.set(cursorId, {
+            bf: base64Image,
+            Sf: hotspotX,
+            wf: hotspotY,
+            style: styleName
+          });
+          this.log(`Cursor cached: id=${cursorId}, len=${base64Image.length}, style="${styleName}"`);
         }
       }
       
-      // Also handle binary position messages (4+ bytes)
-      if (data.byteLength >= 4) {
-        const view = new DataView(data);
-        let x = view.getInt16(0, false); // BE
-        let y = view.getInt16(2, false); // BE
-        
-        // Check for visibility flag in bit 15
-        let visible = true;
-        if ((x & 0x8000) !== 0) {
-          x = x & 0x7FFF;
-        }
-        if ((y & 0x8000) !== 0) {
-          visible = false;
-          y = y & 0x7FFF;
-        }
-        
-        this.diagnostics.cursorX = x;
-        this.diagnostics.cursorY = y;
-        this.diagnostics.cursorVisible = visible && this.diagnostics.cursorVisible !== false;
-        
-        this.log(`Server cursor position: x=${x}, y=${y}, visible=${visible}`);
+      // Read position if present (need 4 more bytes)
+      let posX: number | undefined;
+      let posY: number | undefined;
+      
+      if (offset + 4 <= u.byteLength) {
+        posX = readUint16();
+        posY = readUint16();
       }
+      
+      // Handle type 0: Set cursor and position
+      if (msgType === 0) {
+        // Get cursor data - either from message or from cache
+        let cursorData = base64Image ? {
+          bf: base64Image,
+          Sf: hotspotX,
+          wf: hotspotY,
+          style: styleName
+        } : this.cursorImageCache.get(cursorId);
+        
+        if (!cursorData) {
+          this.log(`Cursor not found: id=${cursorId}`);
+          return;
+        }
+        
+        this.currentCursorId = cursorId;
+        
+        // Determine MIME type from base64 header
+        let mimeType = 'image/x-icon'; // Default ICO (AAABAA...)
+        if (cursorData.bf.startsWith('iVBOR')) {
+          mimeType = 'image/png';
+        } else if (cursorData.bf.startsWith('/9j/')) {
+          mimeType = 'image/jpeg';
+        } else if (cursorData.bf.startsWith('R0lGOD')) {
+          mimeType = 'image/gif';
+        } else if (cursorData.bf.startsWith('PHN2Z')) {
+          mimeType = 'image/svg+xml';
+        }
+        
+        // Update diagnostics
+        this.diagnostics.cursorImageUrl = `data:${mimeType};base64,${cursorData.bf}`;
+        this.diagnostics.cursorHotspotX = cursorData.Sf;
+        this.diagnostics.cursorHotspotY = cursorData.wf;
+        this.diagnostics.cursorType = cursorData.style || 'default';
+        this.diagnostics.cursorVisible = true;
+        
+        // Update position if provided
+        if (posX !== undefined && posY !== undefined) {
+          this.diagnostics.cursorX = posX;
+          this.diagnostics.cursorY = posY;
+        }
+        
+        this.log(`Cursor set: id=${cursorId}, pos=(${posX},${posY}), hotspot=(${cursorData.Sf},${cursorData.wf})`);
+      }
+      
+      // Handle type 10: Set visibility
+      if (msgType === 10) {
+        const visible = u[1] === 1;
+        this.diagnostics.cursorVisible = visible;
+        this.log(`Cursor visibility: ${visible}`);
+      }
+      
     } catch (e) {
       this.log(`Cursor message parse error: ${String(e)}`);
     }
