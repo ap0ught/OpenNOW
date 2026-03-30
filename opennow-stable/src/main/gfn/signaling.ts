@@ -41,25 +41,19 @@ export class GfnSignalingClient {
   ) {}
 
   private buildSignInUrl(): string {
-    // Match Rust behavior: extract host:port from signalingUrl if available,
-    // since the signalingUrl contains the real server address (which may differ
-    // from signalingServer when the resource path was an rtsps:// URL)
-    let serverWithPort: string;
+    const fallbackHost = this.signalingServer.includes(":")
+      ? this.signalingServer
+      : `${this.signalingServer}:443`;
+    const baseUrl = this.signalingUrl?.trim() || `wss://${fallbackHost}/nvst/`;
+    const signInUrl = new URL(baseUrl);
 
-    if (this.signalingUrl) {
-      // Extract host:port from wss://host:port/path
-      const withoutScheme = this.signalingUrl.replace(/^wss?:\/\//, "");
-      const hostPort = withoutScheme.split("/")[0];
-      serverWithPort = hostPort && hostPort.length > 0
-        ? (hostPort.includes(":") ? hostPort : `${hostPort}:443`)
-        : (this.signalingServer.includes(":") ? this.signalingServer : `${this.signalingServer}:443`);
-    } else {
-      serverWithPort = this.signalingServer.includes(":")
-        ? this.signalingServer
-        : `${this.signalingServer}:443`;
-    }
+    signInUrl.protocol = "wss:";
+    signInUrl.pathname = `${signInUrl.pathname.replace(/\/?$/, "/")}sign_in`;
+    signInUrl.search = "";
+    signInUrl.searchParams.set("peer_id", this.peerName);
+    signInUrl.searchParams.set("version", "2");
 
-    const url = `wss://${serverWithPort}/nvst/sign_in?peer_id=${this.peerName}&version=2`;
+    const url = signInUrl.toString();
     console.log("[Signaling] URL:", url, "(server:", this.signalingServer, ", signalingUrl:", this.signalingUrl, ")");
     return url;
   }
