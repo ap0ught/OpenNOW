@@ -1254,6 +1254,7 @@ export class GfnWebRtcClient {
     decodeTimeMs: number;
     decodeFps: number;
     recentVideo: RecentVideoWindowMetrics | null;
+    recentPresentation: RecentPresentationWindowMetrics | null;
   }): DecoderPressureSignal {
     const recent = params.recentVideo;
     if (!recent || recent.intervalMs < 400 || recent.receivedFrames <= 0) {
@@ -1292,6 +1293,15 @@ export class GfnWebRtcClient {
       ) ||
       (recent.dropRatePercent >= 8 && recent.droppedFrames >= 4);
     const lowDecodeOutput = recent.decodedFrames <= Math.max(4, Math.round(recent.receivedFrames * 0.4));
+    const recentPresentation = params.recentPresentation;
+    const likelyPresentationCadenceIssue =
+      !!recentPresentation &&
+      recentPresentation.intervalMs >= 400 &&
+      recentPresentation.maxCadenceIntervalMs >= 100 &&
+      recentPresentation.underflowPolls === 0 &&
+      recentPresentation.freezeCount === 0 &&
+      recentPresentation.presentedFps > 0 &&
+      recentPresentation.presentedFps < Math.max(30, params.decodeFps * 0.9);
 
     if (severeStall) {
       return {
@@ -1300,6 +1310,16 @@ export class GfnWebRtcClient {
         recentDeficitFrames,
         dropRatePercent: recent.dropRatePercent,
         detail: `no decodes for ${recent.intervalMs.toFixed(0)}ms while receiving ${recent.receivedFrames} frames`,
+      };
+    }
+
+    if (likelyPresentationCadenceIssue) {
+      return {
+        active: false,
+        reason: "stable",
+        recentDeficitFrames,
+        dropRatePercent: recent.dropRatePercent,
+        detail: "Presentation cadence issue dominating over decoder pressure",
       };
     }
 
@@ -1606,6 +1626,7 @@ export class GfnWebRtcClient {
     let framesReceived = 0;
     let framesDecoded = 0;
     let framesDropped = 0;
+    const recentPresentation = this.captureRecentPresentationWindow(now);
     let playoutTelemetry: {
       targetDelayMs?: number;
       currentDelayMs?: number;
@@ -1811,6 +1832,7 @@ export class GfnWebRtcClient {
         decodeTimeMs: this.diagnostics.decodeTimeMs,
         decodeFps: this.diagnostics.decodeFps,
         recentVideo,
+        recentPresentation,
       });
 
       if (decoderPressureSignal.reason === "recent_stall") {
@@ -1825,7 +1847,6 @@ export class GfnWebRtcClient {
       await this.maybeRecoverFromDecoderPressure(decoderPressureSignal);
     }
 
-    const recentPresentation = this.captureRecentPresentationWindow(now);
     if (recentPresentation) {
       this.diagnostics.renderFps = Math.round(recentPresentation.presentedFps);
       if (recentPresentation.avgCadenceIntervalMs > 0) {
