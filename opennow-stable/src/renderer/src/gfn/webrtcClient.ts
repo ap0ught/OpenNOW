@@ -259,12 +259,16 @@ interface DecoderPressureSignal {
 interface VideoPlaybackQualitySample {
   totalVideoFrames: number;
   droppedVideoFrames: number;
+  freezeCount: number;
+  totalFreezesDurationMs: number;
 }
 
 interface RecentPresentationSample {
   intervalMs: number;
   presentedFramesDelta: number;
   droppedFramesDelta: number;
+  freezeCountDelta: number;
+  freezesDurationDeltaMs: number;
   cadenceSampleCount: number;
   cadenceIntervalSumMs: number;
   maxCadenceIntervalMs: number;
@@ -278,6 +282,8 @@ interface RecentPresentationWindowMetrics {
   pollCount: number;
   presentedFrames: number;
   droppedFrames: number;
+  freezeCount: number;
+  freezesDurationMs: number;
   presentedFps: number;
   dropRatePercent: number;
   avgCadenceIntervalMs: number;
@@ -1061,6 +1067,8 @@ export class GfnWebRtcClient {
     return {
       totalVideoFrames: Number(quality.totalVideoFrames ?? 0),
       droppedVideoFrames: Number(quality.droppedVideoFrames ?? 0),
+      freezeCount: Number((quality as VideoPlaybackQuality & { freezeCount?: number }).freezeCount ?? 0),
+      totalFreezesDurationMs: Number((quality as VideoPlaybackQuality & { totalFreezesDuration?: number }).totalFreezesDuration ?? 0) * 1000,
     };
   }
 
@@ -1104,10 +1112,18 @@ export class GfnWebRtcClient {
         const droppedFramesDelta = playbackQuality && this.lastPlaybackQualitySample
           ? Math.max(0, playbackQuality.droppedVideoFrames - this.lastPlaybackQualitySample.droppedVideoFrames)
           : 0;
+        const freezeCountDelta = playbackQuality && this.lastPlaybackQualitySample
+          ? Math.max(0, playbackQuality.freezeCount - this.lastPlaybackQualitySample.freezeCount)
+          : 0;
+        const freezesDurationDeltaMs = playbackQuality && this.lastPlaybackQualitySample
+          ? Math.max(0, playbackQuality.totalFreezesDurationMs - this.lastPlaybackQualitySample.totalFreezesDurationMs)
+          : 0;
         this.appendRecentPresentationSample({
           intervalMs,
           presentedFramesDelta,
           droppedFramesDelta,
+          freezeCountDelta,
+          freezesDurationDeltaMs,
           cadenceSampleCount: this.presentationCadenceSincePoll.sampleCount,
           cadenceIntervalSumMs: this.presentationCadenceSincePoll.intervalSumMs,
           maxCadenceIntervalMs: this.presentationCadenceSincePoll.maxIntervalMs,
@@ -1134,6 +1150,8 @@ export class GfnWebRtcClient {
     let intervalMs = 0;
     let presentedFrames = 0;
     let droppedFrames = 0;
+    let freezeCount = 0;
+    let freezesDurationMs = 0;
     let cadenceSampleCount = 0;
     let cadenceIntervalSumMs = 0;
     let maxCadenceIntervalMs = 0;
@@ -1144,6 +1162,8 @@ export class GfnWebRtcClient {
       intervalMs += sample.intervalMs;
       presentedFrames += sample.presentedFramesDelta;
       droppedFrames += sample.droppedFramesDelta;
+      freezeCount += sample.freezeCountDelta;
+      freezesDurationMs += sample.freezesDurationDeltaMs;
       cadenceSampleCount += sample.cadenceSampleCount;
       cadenceIntervalSumMs += sample.cadenceIntervalSumMs;
       maxCadenceIntervalMs = Math.max(maxCadenceIntervalMs, sample.maxCadenceIntervalMs);
@@ -1165,6 +1185,8 @@ export class GfnWebRtcClient {
       pollCount: this.recentPresentationSamples.length,
       presentedFrames,
       droppedFrames,
+      freezeCount,
+      freezesDurationMs,
       presentedFps: (presentedFrames * 1000) / intervalMs,
       dropRatePercent: renderedFrameTotal > 0 ? (droppedFrames / renderedFrameTotal) * 100 : 0,
       avgCadenceIntervalMs: cadenceSampleCount > 0 ? cadenceIntervalSumMs / cadenceSampleCount : 0,
@@ -1331,15 +1353,18 @@ export class GfnWebRtcClient {
       recent.maxCadenceIntervalMs >= Math.max(34, recent.avgCadenceIntervalMs * 1.8) ||
       recent.underflowPolls >= 2;
     const dropBurst = recent.droppedFrames >= 3 || recent.dropRatePercent >= 3;
+    const freezeBurst = recent.freezeCount > 0 || recent.freezesDurationMs >= 80;
     const presentStall =
       recent.intervalMs >= GfnWebRtcClient.RENDER_STALL_MIN_WINDOW_MS &&
       recent.presentedFrames <= Math.max(1, Math.round(params.decodeFps * 0.1)) &&
       recent.pausedPolls === 0;
     const fpsShortfall = recent.presentedFps > 0 && (fpsGap >= 10 || recent.presentedFps < params.decodeFps * 0.75);
 
-    if (presentStall || (fpsShortfall && (cadenceUnstable || dropBurst)) || (dropBurst && cadenceUnstable)) {
+    if (presentStall || freezeBurst || (fpsShortfall && (cadenceUnstable || dropBurst)) || (dropBurst && cadenceUnstable)) {
       const detailParts = [`present ${recent.presentedFps.toFixed(0)}fps vs decode ${params.decodeFps.toFixed(0)}fps`];
       if (recent.dropRatePercent > 0) detailParts.push(`video drops ${recent.dropRatePercent.toFixed(1)}%`);
+      if (recent.freezeCount > 0) detailParts.push(`freezes ${recent.freezeCount}`);
+      if (recent.freezesDurationMs > 0) detailParts.push(`freeze ${recent.freezesDurationMs.toFixed(0)}ms`);
       if (recent.maxCadenceIntervalMs > 0) detailParts.push(`max gap ${recent.maxCadenceIntervalMs.toFixed(1)}ms`);
       if (recent.underflowPolls > 0) detailParts.push("video underflow");
       return {
@@ -1797,6 +1822,15 @@ export class GfnWebRtcClient {
         recentPresentation,
         decoderPressure: decoderPressureSignal,
       });
+      if (
+        recentPresentation.freezeCount > 0 ||
+        recentPresentation.freezesDurationMs >= 80 ||
+        recentPresentation.maxCadenceIntervalMs >= 120
+      ) {
+        this.log(
+          `Video hitch evidence: present=${recentPresentation.presentedFps.toFixed(1)}fps drops=${recentPresentation.dropRatePercent.toFixed(1)}% freezes=${recentPresentation.freezeCount}/${recentPresentation.freezesDurationMs.toFixed(0)}ms maxGap=${recentPresentation.maxCadenceIntervalMs.toFixed(1)}ms underflow=${recentPresentation.underflowPolls}`,
+        );
+      }
     }
 
     // RTT from active candidate pair

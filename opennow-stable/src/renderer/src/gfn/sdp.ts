@@ -327,7 +327,6 @@ export function preferCodec(sdp: string, codec: VideoCodec, options?: PreferCode
     : preferredPayloads;
 
   const preferred = new Set(orderedPreferredPayloads);
-
   const allowed = new Set<string>(preferred);
 
   // Keep RTX payloads linked to preferred payloads (apt mapping)
@@ -337,9 +336,15 @@ export function preferCodec(sdp: string, codec: VideoCodec, options?: PreferCode
     }
   }
 
-  // Do NOT keep FLEXFEC/RED/ULPFEC during hard codec filtering.
-  // Chromium can otherwise negotiate a "video" m-line with only FEC payloads
-  // when primary codec intersection fails, causing black video with live audio.
+  // Keep FEC helper payloads alongside the preferred primary codec. Stripping
+  // them entirely makes the stream more brittle under modest packet loss and
+  // can show up as repeated short freezes followed by forward jumps.
+  const fecCodecs = ["RED", "ULPFEC", "FLEXFEC", "FLEXFEC-03"];
+  for (const fecCodec of fecCodecs) {
+    for (const pt of payloadTypesByCodec.get(fecCodec) ?? []) {
+      allowed.add(pt);
+    }
+  }
 
   console.log(`[SDP] preferCodec: preferred ordered payloads [${orderedPreferredPayloads.join(", ")}] for ${codec}`);
   console.log(`[SDP] preferCodec: keeping payload types [${Array.from(allowed).join(", ")}] for ${codec}`);
