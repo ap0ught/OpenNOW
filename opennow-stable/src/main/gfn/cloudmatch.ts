@@ -283,7 +283,7 @@ function resolveSignaling(response: CloudMatchResponse): {
 } {
   const connections = response.session.connectionInfo ?? [];
   const signalingConnection =
-    connections.find((conn) => conn.usage === 14 && conn.ip) ?? connections.find((conn) => conn.ip);
+    connections.find((conn) => conn.usage === 14) ?? connections.find((conn) => conn.ip);
 
   // Use the Rust-matching priority chain for server IP
   const serverIp = streamingServerIp(response);
@@ -291,20 +291,9 @@ function resolveSignaling(response: CloudMatchResponse): {
     throw new Error("CloudMatch response did not include a signaling host");
   }
 
-  const resourcePath = signalingConnection?.resourcePath ?? "/nvst/";
-
-  // Build signaling URL matching Rust's build_signaling_url() behavior:
-  // - rtsps://host:port -> extract host, convert to wss://host/nvst/
-  // - wss://... -> use as-is
-  // - /path -> wss://serverIp:443/path
-  // - fallback -> wss://serverIp:443/nvst/
-  const { signalingUrl, signalingHost } = buildSignalingUrl(resourcePath, serverIp);
-
-  // Use the resolved signaling host (which may differ from serverIp if extracted from rtsps:// URL)
+  const { signalingUrl, signalingHost, signalingPort } = buildSignalingUrl(signalingConnection, serverIp);
   const effectiveHost = signalingHost ?? serverIp;
-  const signalingServer = effectiveHost.includes(":")
-    ? effectiveHost
-    : `${effectiveHost}:443`;
+  const signalingServer = `${effectiveHost}:${signalingPort}`;
 
   return {
     serverIp,
@@ -400,50 +389,44 @@ function resolveMediaConnectionInfo(
 }
 
 /**
- * Build signaling WSS URL from the resourcePath, matching Rust implementation.
- * Returns the URL and optionally the extracted host (if different from serverIp).
+ * Build signaling websocket URL using CloudMatch usage=14 semantics.
+ * Prefer the connection's explicit host/port/path instead of forcing :443 + /nvst/.
  */
 function buildSignalingUrl(
-  raw: string,
+  connection: { ip?: string; port: number; appLevelProtocol?: number; resourcePath?: string } | undefined,
   serverIp: string,
-): { signalingUrl: string; signalingHost: string | null } {
-  if (raw.startsWith("rtsps://") || raw.startsWith("rtsp://")) {
-    // Extract hostname from RTSP URL, convert to wss://
-    const withoutScheme = raw.startsWith("rtsps://")
-      ? raw.slice("rtsps://".length)
-      : raw.slice("rtsp://".length);
-    const host = withoutScheme.split(":")[0]?.split("/")[0];
-    if (host && host.length > 0 && !host.startsWith(".")) {
+): { signalingUrl: string; signalingHost: string | null; signalingPort: number } {
+  const raw = connection?.resourcePath?.trim() || "/nvst";
+  const explicitIp = Array.isArray(connection?.ip) ? connection?.ip[0] : connection?.ip;
+  const defaultSecure = connection?.appLevelProtocol === 5;
+  const defaultPort = connection?.port && connection.port > 0 ? connection.port : 443;
+
+  if (/^(wss?|https?|rtsps?):\/\//i.test(raw)) {
+    try {
+      const parsed = new URL(raw.replace(/^rtsps:/i, "https:").replace(/^rtsp:/i, "http:"));
+      const protocol = parsed.protocol === "http:" ? "ws" : "wss";
+      const host = parsed.hostname || explicitIp || serverIp;
+      const port = parsed.port ? Number.parseInt(parsed.port, 10) : defaultPort;
+      const path = parsed.pathname && parsed.pathname.length > 0 ? parsed.pathname : "/nvst";
+      const search = parsed.search ?? "";
       return {
-        signalingUrl: `wss://${host}/nvst/`,
+        signalingUrl: `${protocol}://${host}:${port}${path}${search}`,
         signalingHost: host,
+        signalingPort: port,
       };
+    } catch {
+      // Fall through to path-based handling.
     }
-    return {
-      signalingUrl: `wss://${serverIp}:443/nvst/`,
-      signalingHost: null,
-    };
   }
 
-  if (raw.startsWith("wss://")) {
-    // Already a full WSS URL, use as-is; extract host
-    const withoutScheme = raw.slice("wss://".length);
-    const host = withoutScheme.split("/")[0] ?? null;
-    return { signalingUrl: raw, signalingHost: host };
-  }
+  const protocol = defaultSecure ? "wss" : "ws";
+  const host = explicitIp || serverIp;
+  const path = raw.startsWith("/") ? raw : `/${raw}`;
 
-  if (raw.startsWith("/")) {
-    // Relative path
-    return {
-      signalingUrl: `wss://${serverIp}:443${raw}`,
-      signalingHost: null,
-    };
-  }
-
-  // Fallback
   return {
-    signalingUrl: `wss://${serverIp}:443/nvst/`,
-    signalingHost: null,
+    signalingUrl: `${protocol}://${host}:${defaultPort}${path}`,
+    signalingHost: host,
+    signalingPort: defaultPort,
   };
 }
 
