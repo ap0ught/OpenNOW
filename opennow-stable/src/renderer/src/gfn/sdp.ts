@@ -477,12 +477,10 @@ export function buildNvstSdp(params: NvstParams): string {
     "a=vqos.fec.repairMinPercent:5",
     "a=vqos.fec.repairPercent:5",
     "a=vqos.fec.repairMaxPercent:35",
-    // DRC — always disabled to allow full bitrate
-    "a=vqos.drc.enable:0",
+    "a=vqos.drc.enable:1",
   ];
 
-  // Force-disable dynamic frame control to avoid server-side FPS/resolution adaptation.
-  lines.push("a=vqos.dfc.enable:0");
+  lines.push("a=vqos.dfc.enable:1");
 
   // Video encoder settings
   lines.push(
@@ -521,18 +519,13 @@ export function buildNvstSdp(params: NvstParams): string {
     );
   }
 
-  // Out-of-focus handling + disable ALL dynamic resolution control
+  // Keep the out-of-focus hints, but do not hard-disable the server's adaptive
+  // resolution / frame-control policy. Our previous "never scale / never adapt"
+  // stance made playback more brittle and stutter-prone than the official client.
   lines.push(
     "a=vqos.adjustStreamingFpsDuringOutOfFocus:1",
     "a=vqos.resControl.cpmRtc.ignoreOutOfFocusWindowState:1",
     "a=vqos.resControl.perfHistory.rtcIgnoreOutOfFocusWindowState:1",
-    // Disable CPM-based resolution changes (prevents SSRC switches)
-    "a=vqos.resControl.cpmRtc.featureMask:0",
-    "a=vqos.resControl.cpmRtc.enable:0",
-    // Never scale down resolution
-    "a=vqos.resControl.cpmRtc.minResolutionPercent:100",
-    // Infinite cooldown to prevent resolution changes
-    "a=vqos.resControl.cpmRtc.resolutionChangeHoldonMs:999999",
     // Packet pacing
     `a=packetPacing.numGroups:${is120Fps ? 3 : 5}`,
     "a=packetPacing.maxDelayUs:1000",
@@ -541,10 +534,6 @@ export function buildNvstSdp(params: NvstParams): string {
     "a=video.rtpNackQueueLength:1024",
     "a=video.rtpNackQueueMaxPackets:512",
     "a=video.rtpNackMaxPacketCount:25",
-    // Resolution/quality thresholds — high values prevent downscaling
-    "a=vqos.drc.qpMaxResThresholdAdj:4",
-    "a=vqos.grc.qpMaxResThresholdAdj:4",
-    "a=vqos.drc.iirFilterFactor:100",
   );
 
   // AV1-specific DRC/GRC tuning (mirrors official client intent):
@@ -590,16 +579,15 @@ export function buildNvstSdp(params: NvstParams): string {
     `a=vqos.bw.serverPeakBitrateKbps:${params.maxBitrateKbps}`,
     "a=vqos.bw.enableBandwidthEstimation:1",
     "a=vqos.bw.disableBitrateLimit:0",
-    // GRC — disabled
+    // Keep server-side adaptation enabled instead of pinning a rigid quality target.
     `a=vqos.grc.maximumBitrateKbps:${params.maxBitrateKbps}`,
-    "a=vqos.grc.enable:0",
+    "a=vqos.grc.enable:1",
     // Encoder settings
     "a=video.maxNumReferenceFrames:4",
     "a=video.mapRtpTimestampsToFrames:1",
     "a=video.encoderCscMode:3",
     "a=video.dynamicRangeMode:0",
     `a=video.bitDepth:${bitDepth}`,
-    // Disable server-side scaling and prefilter (prevents resolution downgrade)
     `a=video.scalingFeature1:${isAv1 ? 1 : 0}`,
     "a=video.prefilterParams.prefilterModel:0",
     // Audio track (receive-only from server)

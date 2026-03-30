@@ -563,10 +563,6 @@ export class GfnWebRtcClient {
   private static readonly DEFAULT_PARTIAL_RELIABLE_THRESHOLD_MS = 300;
   private static readonly RELIABLE_MOUSE_BACKPRESSURE_BYTES = 64 * 1024;
   private static readonly BACKPRESSURE_LOG_INTERVAL_MS = 2000;
-  private static readonly VIDEO_BASE_JITTER_TARGET_MS = 12;
-  private static readonly AUDIO_BASE_JITTER_TARGET_MS = 20;
-  private static readonly VIDEO_PRESSURE_JITTER_TARGET_MS = 30;
-  private static readonly AUDIO_PRESSURE_JITTER_TARGET_MS = 32;
   private static readonly RECENT_VIDEO_WINDOW_MS = 1600;
   private static readonly DECODER_STALL_MIN_WINDOW_MS = 900;
   private static readonly DECODER_STALL_MIN_RECEIVED_FRAMES = 24;
@@ -646,10 +642,6 @@ export class GfnWebRtcClient {
   private lastDecoderKeyframeRequestAtMs = 0;
   private negotiatedMaxBitrateKbps = 0;
   private currentBitrateCeilingKbps = 0;
-  private receiverLatencyTargets = {
-    video: GfnWebRtcClient.VIDEO_BASE_JITTER_TARGET_MS,
-    audio: GfnWebRtcClient.AUDIO_BASE_JITTER_TARGET_MS,
-  };
   private activeReceivers: Array<{ receiver: RTCRtpReceiver; kind: "audio" | "video" }> = [];
 
   // Microphone
@@ -817,17 +809,13 @@ export class GfnWebRtcClient {
   }
 
   /**
-   * Configure an RTCRtpReceiver for minimum jitter buffer delay.
+   * Register receiver-side hints without overriding Chromium's default playout
+   * buffering policy.
    *
-   * jitterBufferTarget controls how long Chrome holds decoded frames before
-   * displaying them. Setting to 0 tells the browser to use the absolute
-   * minimum buffer — effectively "display as soon as decoded". This is
-   * aggressive but correct for cloud gaming where we prioritize latency
-   * over smoothness.
-   *
-   * The official GFN browser client doesn't set this at all (defaulting to
-   * ~100-200ms). As an Electron app we can be more aggressive.
-   *
+   * Forcing ultra-low jitterBufferTarget/playoutDelayHint made OpenNOW more
+   * aggressive than the official GFN web client and produced visible cadence
+   * jumps under modest packet-arrival variance. We now leave receiver playout
+   * buffering browser-managed and only apply safe track hints.
    */
   private configureReceiverForLowLatency(receiver: RTCRtpReceiver, kind: string): void {
     if (kind !== "video" && kind !== "audio") {
@@ -837,22 +825,9 @@ export class GfnWebRtcClient {
     this.registerReceiver(receiver, kind);
 
     try {
-      const targetMs = this.receiverLatencyTargets[kind];
-      const rawReceiver = receiver as unknown as Record<string, unknown>;
-
-      if ("jitterBufferTarget" in receiver) {
-        rawReceiver.jitterBufferTarget = targetMs;
-        this.log(`${kind} receiver: jitterBufferTarget set to ${targetMs}ms`);
-      }
-
-      if ("playoutDelayHint" in receiver) {
-        const playoutDelaySeconds = targetMs / 1000;
-        rawReceiver.playoutDelayHint = playoutDelaySeconds;
-        this.log(`${kind} receiver: playoutDelayHint set to ${playoutDelaySeconds}s`);
-      }
-
       if (kind === "video" && "contentHint" in receiver.track) {
         receiver.track.contentHint = "motion";
+        this.log("video receiver: leaving browser playout buffering at default policy");
       }
     } catch (error) {
       this.log(`Warning: could not apply ${kind} low-latency receiver tuning: ${String(error)}`);
@@ -879,14 +854,8 @@ export class GfnWebRtcClient {
 
     this.decoderPressureActive = active;
     this.diagnostics.decoderPressureActive = active;
-    this.receiverLatencyTargets.video = active
-      ? GfnWebRtcClient.VIDEO_PRESSURE_JITTER_TARGET_MS
-      : GfnWebRtcClient.VIDEO_BASE_JITTER_TARGET_MS;
-    this.receiverLatencyTargets.audio = active
-      ? GfnWebRtcClient.AUDIO_PRESSURE_JITTER_TARGET_MS
-      : GfnWebRtcClient.AUDIO_BASE_JITTER_TARGET_MS;
     this.log(
-      `Decoder pressure mode ${active ? "enabled" : "cleared"}; receiver targets video=${this.receiverLatencyTargets.video}ms audio=${this.receiverLatencyTargets.audio}ms`,
+      `Decoder pressure mode ${active ? "enabled" : "cleared"}; keeping browser-managed receiver playout policy`,
     );
     this.applyReceiverLatencyTargets();
   }
@@ -910,8 +879,6 @@ export class GfnWebRtcClient {
     this.lastDecoderKeyframeRequestAtMs = 0;
     this.negotiatedMaxBitrateKbps = 0;
     this.currentBitrateCeilingKbps = 0;
-    this.receiverLatencyTargets.video = GfnWebRtcClient.VIDEO_BASE_JITTER_TARGET_MS;
-    this.receiverLatencyTargets.audio = GfnWebRtcClient.AUDIO_BASE_JITTER_TARGET_MS;
     this.activeReceivers = [];
     this.diagnostics.decoderPressureActive = false;
     this.diagnostics.decoderRecoveryAttempts = 0;
