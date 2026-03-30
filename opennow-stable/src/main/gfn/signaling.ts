@@ -115,7 +115,6 @@ export class GfnSignalingClient {
       deviceType: "DESKTOP",
       deviceMake: "UNKNOWN",
       deviceModel: "UNKNOWN",
-      browserType: "CHROME",
       deviceId: this.deviceId,
     });
 
