@@ -498,7 +498,6 @@ export function buildNvstSdp(params: NvstParams): string {
     "a=vqos.bw.txRxLag.minFeedbackTxDeltaMs:200",
     "a=vqos.drc.bitrateIirFilterFactor:18",
     "a=video.packetSize:1140",
-    "a=packetPacing.minNumPacketsPerGroup:15",
   );
 
   // High FPS optimizations
@@ -509,7 +508,6 @@ export function buildNvstSdp(params: NvstParams): string {
       "a=video.encoderPreset:6",
       "a=vqos.resControl.cpmRtc.badNwSkipFramesCount:600",
       "a=vqos.resControl.cpmRtc.decodeTimeThresholdMs:9",
-      `a=video.fbcDynamicFpsGrabTimeoutMs:${is120Fps ? 6 : 18}`,
       `a=vqos.resControl.cpmRtc.serverResolutionUpdateCoolDownCount:${is120Fps ? 6000 : 12000}`,
     );
   }
@@ -531,14 +529,6 @@ export function buildNvstSdp(params: NvstParams): string {
     "a=vqos.adjustStreamingFpsDuringOutOfFocus:1",
     "a=vqos.resControl.cpmRtc.ignoreOutOfFocusWindowState:1",
     "a=vqos.resControl.perfHistory.rtcIgnoreOutOfFocusWindowState:1",
-    // Packet pacing
-    `a=packetPacing.numGroups:${is120Fps ? 3 : 5}`,
-    "a=packetPacing.maxDelayUs:1000",
-    "a=packetPacing.minNumPacketsFrame:10",
-    // NACK queue settings
-    "a=video.rtpNackQueueLength:1024",
-    "a=video.rtpNackQueueMaxPackets:512",
-    "a=video.rtpNackMaxPacketCount:25",
   );
 
   // AV1-specific DRC/GRC tuning (mirrors official client intent):
@@ -589,7 +579,6 @@ export function buildNvstSdp(params: NvstParams): string {
     "a=vqos.grc.enable:1",
     // Encoder settings
     "a=video.maxNumReferenceFrames:4",
-    "a=video.mapRtpTimestampsToFrames:1",
     "a=video.encoderCscMode:3",
     "a=video.dynamicRangeMode:0",
     `a=video.bitDepth:${bitDepth}`,

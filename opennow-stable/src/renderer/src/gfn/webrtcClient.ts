@@ -1606,6 +1606,12 @@ export class GfnWebRtcClient {
     let framesReceived = 0;
     let framesDecoded = 0;
     let framesDropped = 0;
+    let playoutTelemetry: {
+      targetDelayMs?: number;
+      currentDelayMs?: number;
+      minPlayoutDelayMs?: number;
+      timingFrameInfo?: string;
+    } | null = null;
     let decoderPressureSignal: DecoderPressureSignal = {
       active: false,
       reason: "stable",
@@ -1732,6 +1738,19 @@ export class GfnWebRtcClient {
         this.diagnostics.jitterBufferDelayMs = Math.round((jbDelay / jbEmitted) * 1000 * 10) / 10;
       }
 
+      const targetDelayMs = Number(inboundVideo.googTargetDelayMs);
+      const currentDelayMs = Number(inboundVideo.googCurrentDelayMs);
+      const minPlayoutDelayMs = Number(inboundVideo.googMinPlayoutDelayMs);
+      const timingFrameInfo = typeof inboundVideo.googTimingFrameInfo === "string"
+        ? inboundVideo.googTimingFrameInfo
+        : undefined;
+      playoutTelemetry = {
+        targetDelayMs: Number.isFinite(targetDelayMs) && targetDelayMs > 0 ? targetDelayMs : undefined,
+        currentDelayMs: Number.isFinite(currentDelayMs) && currentDelayMs > 0 ? currentDelayMs : undefined,
+        minPlayoutDelayMs: Number.isFinite(minPlayoutDelayMs) && minPlayoutDelayMs >= 0 ? minPlayoutDelayMs : undefined,
+        timingFrameInfo,
+      };
+
       // Get codec information
       const codecId = inboundVideo.codecId as string;
       if (codecId && codecs.has(codecId)) {
@@ -1827,8 +1846,13 @@ export class GfnWebRtcClient {
         recentPresentation.freezesDurationMs >= 80 ||
         recentPresentation.maxCadenceIntervalMs >= 120
       ) {
+        const telemetryParts: string[] = [];
+        if (playoutTelemetry?.targetDelayMs !== undefined) telemetryParts.push(`targetDelay=${playoutTelemetry.targetDelayMs.toFixed(0)}ms`);
+        if (playoutTelemetry?.currentDelayMs !== undefined) telemetryParts.push(`currentDelay=${playoutTelemetry.currentDelayMs.toFixed(0)}ms`);
+        if (playoutTelemetry?.minPlayoutDelayMs !== undefined) telemetryParts.push(`minDelay=${playoutTelemetry.minPlayoutDelayMs.toFixed(0)}ms`);
+        if (playoutTelemetry?.timingFrameInfo) telemetryParts.push(`timing=${playoutTelemetry.timingFrameInfo}`);
         this.log(
-          `Video hitch evidence: present=${recentPresentation.presentedFps.toFixed(1)}fps drops=${recentPresentation.dropRatePercent.toFixed(1)}% freezes=${recentPresentation.freezeCount}/${recentPresentation.freezesDurationMs.toFixed(0)}ms maxGap=${recentPresentation.maxCadenceIntervalMs.toFixed(1)}ms underflow=${recentPresentation.underflowPolls}`,
+          `Video hitch evidence: present=${recentPresentation.presentedFps.toFixed(1)}fps drops=${recentPresentation.dropRatePercent.toFixed(1)}% freezes=${recentPresentation.freezeCount}/${recentPresentation.freezesDurationMs.toFixed(0)}ms maxGap=${recentPresentation.maxCadenceIntervalMs.toFixed(1)}ms underflow=${recentPresentation.underflowPolls}${telemetryParts.length > 0 ? ` · ${telemetryParts.join(" · ")}` : ""}`,
         );
       }
     }
