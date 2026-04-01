@@ -43,7 +43,6 @@ import type {
   SessionConflictChoice,
   PingResult,
   StreamRegion,
-  VideoAccelerationPreference,
   ScreenshotDeleteRequest,
   ScreenshotEntry,
   ScreenshotSaveAsRequest,
@@ -71,20 +70,15 @@ import {
 import { fetchSubscription, fetchDynamicRegions } from "./gfn/subscription";
 import { GfnSignalingClient } from "./gfn/signaling";
 import { isSessionError, SessionError, GfnErrorCode } from "./gfn/errorCodes";
+import { getBootstrapVideoPrefs } from "./videoAccelerationBootstrap";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 // Configure Chromium video and WebRTC behavior before app.whenReady().
-// Video acceleration is always set to "auto" - decoder and encoder preferences removed from settings
+// Intel-only Windows: software decode/encode avoids broken D3D11/MF WebRTC paths on some iGPUs.
 
-const bootstrapVideoPrefs: {
-  decoderPreference: VideoAccelerationPreference;
-  encoderPreference: VideoAccelerationPreference;
-} = {
-  decoderPreference: "auto",
-  encoderPreference: "auto",
-};
+const bootstrapVideoPrefs = getBootstrapVideoPrefs();
 console.log(
   `[Main] Video acceleration: decode=${bootstrapVideoPrefs.decoderPreference}, encode=${bootstrapVideoPrefs.encoderPreference}`,
 );
