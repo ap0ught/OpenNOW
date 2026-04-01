@@ -1560,11 +1560,6 @@ export function App(): JSX.Element {
     sessionRef.current = claimed;
     setQueuePosition(undefined);
     setStreamStatus("connecting");
-    await window.openNow.connectSignaling({
-      sessionId: claimed.sessionId,
-      signalingServer: claimed.signalingServer,
-      signalingUrl: claimed.signalingUrl,
-    });
     if (settings.enableExternalStreamer) {
       await window.openNow.startExternalStreamer({
         session: claimed,
@@ -1579,6 +1574,11 @@ export function App(): JSX.Element {
         },
       });
     }
+    await window.openNow.connectSignaling({
+      sessionId: claimed.sessionId,
+      signalingServer: claimed.signalingServer,
+      signalingUrl: claimed.signalingUrl,
+    });
   }, [authSession, effectiveStreamingBaseUrl, findGameContextForSession, settings]);
 
   // Play game handler
@@ -1790,11 +1790,6 @@ export function App(): JSX.Element {
         status: sessionToConnect.status,
       });
 
-      await window.openNow.connectSignaling({
-        sessionId: sessionToConnect.sessionId,
-        signalingServer: sessionToConnect.signalingServer,
-        signalingUrl: sessionToConnect.signalingUrl,
-      });
       if (settings.enableExternalStreamer) {
         await window.openNow.startExternalStreamer({
           session: sessionToConnect,
@@ -1809,6 +1804,11 @@ export function App(): JSX.Element {
           },
         });
       }
+      await window.openNow.connectSignaling({
+        sessionId: sessionToConnect.sessionId,
+        signalingServer: sessionToConnect.signalingServer,
+        signalingUrl: sessionToConnect.signalingUrl,
+      });
     } catch (error) {
       if (launchAbortRef.current) {
         return;

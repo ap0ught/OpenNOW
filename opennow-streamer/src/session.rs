@@ -53,6 +53,17 @@ impl StreamSession {
         let width = settings.resolution.split('x').next().and_then(|v| v.parse::<u32>().ok()).unwrap_or(1920);
         let height = settings.resolution.split('x').nth(1).and_then(|v| v.parse::<u32>().ok()).unwrap_or(1080);
         let media = MediaPipeline::new(media_tx, control_tx.clone(), VideoSettings { width, height, codec: settings.codec.clone() });
+        control_tx.send(StreamerMessage::Log {
+            level: "info".into(),
+            message: format!(
+                "configured native session {} {} {}fps codec={} bitrate={}mbps",
+                session.session_id,
+                settings.resolution,
+                settings.fps,
+                settings.codec,
+                settings.max_bitrate_mbps,
+            ),
+        }).await.ok();
 
         let control_clone = control_tx.clone();
         peer.on_ice_candidate(Box::new(move |candidate| {
@@ -104,6 +115,10 @@ impl StreamSession {
     }
 
     pub async fn apply_offer(&self, offer_sdp: String) -> anyhow::Result<()> {
+        self.control_tx.send(StreamerMessage::Log {
+            level: "info".into(),
+            message: format!("applying remote offer ({} chars)", offer_sdp.len()),
+        }).await.ok();
         let partial_reliable = parse_partial_reliable_threshold_ms(&offer_sdp).unwrap_or(30);
         if self.partially_reliable.lock().await.is_none() {
             let channel = self.peer.create_data_channel("input_channel_partially_reliable", Some(RTCDataChannelInit { ordered: Some(false), max_packet_life_time: Some(partial_reliable), ..Default::default() })).await?;
@@ -131,6 +146,10 @@ impl StreamSession {
             self.settings.enable_l4s,
             partial_reliable,
         );
+        self.control_tx.send(StreamerMessage::Log {
+            level: "info".into(),
+            message: format!("sending local answer ({} chars) and nvst blob ({} chars)", local.sdp.len(), nvst.len()),
+        }).await.ok();
         self.control_tx.send(StreamerMessage::Answer { sdp: local.sdp.clone(), nvst_sdp: nvst }).await.ok();
 
         if let Some(mci) = &self.session.media_connection_info {
