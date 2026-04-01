@@ -22,7 +22,9 @@ use crate::messages::StreamerMessage;
 pub struct VideoFrame {
     pub width: u32,
     pub height: u32,
-    pub pixels: Vec<u8>,
+    pub y_plane: Vec<u8>,
+    pub u_plane: Vec<u8>,
+    pub v_plane: Vec<u8>,
 }
 
 #[derive(Clone)]
@@ -170,31 +172,51 @@ impl FfmpegVideoDecoder {
         log_tx: tokio::sync::mpsc::Sender<StreamerMessage>,
     ) -> anyhow::Result<Self> {
         let ffmpeg = resolve_ffmpeg_binary()?;
-        let mut child = Command::new(ffmpeg)
+        let mut command = Command::new(ffmpeg);
+        command.args([
+            "-loglevel", "warning",
+            "-fflags", "nobuffer",
+            "-flags", "low_delay",
+            "-flags2", "fast",
+            "-probesize", "32",
+            "-analyzeduration", "0",
+            "-thread_queue_size", "4",
+        ]);
+        #[cfg(target_os = "linux")]
+        command.args([
+            "-hwaccel", "auto",
+            "-extra_hw_frames", "8",
+        ]);
+        command
             .args([
-                "-loglevel", "error",
-                "-fflags", "nobuffer",
-                "-flags", "low_delay",
-                "-probesize", "32",
-                "-analyzeduration", "0",
                 "-f", demuxer,
                 "-i", "pipe:0",
+                "-vf", "setpts=PTS-STARTPTS",
+                "-pix_fmt", "yuv420p",
                 "-f", "rawvideo",
-                "-pix_fmt", "rgb24",
                 "pipe:1",
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()
-            .context("spawn ffmpeg video decoder")?;
-        let frame_size = (width * height * 3) as usize;
+            ;
+        let mut child = command.spawn().context("spawn ffmpeg video decoder")?;
+        let y_size = (width * height) as usize;
+        let uv_size = ((width / 2) * (height / 2)) as usize;
+        let frame_size = y_size + uv_size + uv_size;
         let mut stdout = child.stdout.take().ok_or_else(|| anyhow!("missing ffmpeg stdout"))?;
         let mut stderr = child.stderr.take().ok_or_else(|| anyhow!("missing ffmpeg stderr"))?;
+        let _ = log_tx.blocking_send(StreamerMessage::Log {
+            level: "info".into(),
+            message: format!("spawned ffmpeg decoder for {demuxer} {}x{} (linux_hwaccel={})", width, height, cfg!(target_os = "linux")),
+        });
         thread::spawn(move || {
             let mut buffer = vec![0_u8; frame_size];
             while stdout.read_exact(&mut buffer).is_ok() {
-                let _ = event_tx.send(MediaEvent::Video(VideoFrame { width, height, pixels: buffer.clone() }));
+                let y_plane = buffer[..y_size].to_vec();
+                let u_plane = buffer[y_size..(y_size + uv_size)].to_vec();
+                let v_plane = buffer[(y_size + uv_size)..].to_vec();
+                let _ = event_tx.send(MediaEvent::Video(VideoFrame { width, height, y_plane, u_plane, v_plane }));
             }
         });
         thread::spawn(move || {

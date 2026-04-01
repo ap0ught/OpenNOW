@@ -12,7 +12,7 @@ use sdl2::{
     mouse::MouseUtil,
     pixels::PixelFormatEnum,
     rect::Rect,
-    render::{Canvas, TextureCreator},
+    render::{BlendMode, Canvas, TextureCreator},
     video::Window,
     video::WindowContext,
 };
@@ -54,11 +54,12 @@ pub fn run(_session: SharedSession, media_rx: Receiver<MediaEvent>, input_tx: Un
         .resizable()
         .build()
         .context("create SDL window")?;
-    let mut canvas = window.into_canvas().accelerated().present_vsync().build().context("create SDL canvas")?;
+    let mut canvas = window.into_canvas().accelerated().build().context("create SDL canvas")?;
     let texture_creator: TextureCreator<WindowContext> = canvas.texture_creator();
     let mut texture = texture_creator
-        .create_texture_streaming(PixelFormatEnum::RGB24, width, height)
+        .create_texture_streaming(PixelFormatEnum::IYUV, width, height)
         .context("create texture")?;
+    texture.set_blend_mode(BlendMode::None);
 
     let queue: AudioQueue<i16> = audio
         .open_queue::<i16, _>(None, &AudioSpecDesired { freq: Some(48_000), channels: Some(2), samples: Some(1024) })
@@ -80,7 +81,17 @@ pub fn run(_session: SharedSession, media_rx: Receiver<MediaEvent>, input_tx: Un
         }
 
         if let Some(frame) = latest_frame.take() {
-            texture.update(None, &frame.pixels, (frame.width * 3) as usize).context("texture update")?;
+            texture
+                .update_yuv(
+                    None,
+                    &frame.y_plane,
+                    frame.width as usize,
+                    &frame.u_plane,
+                    (frame.width / 2) as usize,
+                    &frame.v_plane,
+                    (frame.width / 2) as usize,
+                )
+                .context("texture update yuv")?;
         }
 
         canvas.clear();
@@ -193,7 +204,7 @@ pub fn run(_session: SharedSession, media_rx: Receiver<MediaEvent>, input_tx: Un
                 _ => {}
             }
         }
-        std::thread::sleep(Duration::from_millis(4));
+        std::thread::sleep(Duration::from_millis(1));
     }
 
     Ok(())
