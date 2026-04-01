@@ -68,31 +68,76 @@ pub fn extract_ice_credentials(sdp: &str) -> IceCredentials {
 }
 
 pub fn munge_answer_sdp(sdp: &str, max_bitrate_kbps: u32) -> String {
+    let line_ending = if sdp.contains("\r\n") { "\r\n" } else { "\n" };
     let mut out = Vec::new();
-    let mut current_media = String::new();
-    let mut inserted_bitrate = false;
+    for line in sdp.lines() {
+        out.push(line.to_string());
+        if line.starts_with("m=video") {
+            out.push(format!("b=AS:{max_bitrate_kbps}"));
+        } else if line.starts_with("m=audio") {
+            out.push("b=AS:128".to_string());
+        } else if line.starts_with("a=fmtp:") && line.contains("minptime=") && !line.contains("stereo=1") {
+            out.pop();
+            out.push(format!("{line};stereo=1"));
+        }
+    }
+    out.join(line_ending)
+}
+
+pub fn normalize_answer_transport_sdp(sdp: &str) -> String {
+    let line_ending = if sdp.contains("\r\n") { "\r\n" } else { "\n" };
+    let session_fingerprint = sdp
+        .lines()
+        .find(|line| line.starts_with("a=fingerprint:"))
+        .map(ToOwned::to_owned);
+
+    let mut result = Vec::new();
+    let mut current_media = Vec::new();
+
+    let flush_media = |result: &mut Vec<String>, current_media: &mut Vec<String>| {
+        if current_media.is_empty() {
+            return;
+        }
+        let mut setup_seen = false;
+        let mut fingerprint_seen = false;
+        let mut normalized = Vec::with_capacity(current_media.len() + 2);
+        for line in current_media.drain(..) {
+            if line.starts_with("a=setup:") {
+                if !setup_seen {
+                    normalized.push("a=setup:active".to_string());
+                    setup_seen = true;
+                }
+                continue;
+            }
+            if line.starts_with("a=fingerprint:") {
+                fingerprint_seen = true;
+            }
+            normalized.push(line);
+        }
+        if !setup_seen {
+            normalized.push("a=setup:active".to_string());
+        }
+        if !fingerprint_seen {
+            if let Some(fingerprint) = &session_fingerprint {
+                normalized.push(fingerprint.clone());
+            }
+        }
+        result.extend(normalized);
+    };
+
     for line in sdp.lines() {
         if line.starts_with("m=") {
-            current_media = line.to_string();
-            inserted_bitrate = false;
-            out.push(line.to_string());
-            continue;
+            flush_media(&mut result, &mut current_media);
         }
-        if !inserted_bitrate && (line.starts_with("c=") || line.starts_with("a=mid:")) {
-            out.push(line.to_string());
-            if current_media.starts_with("m=video") {
-                out.push(format!("b=AS:{max_bitrate_kbps}"));
-                inserted_bitrate = true;
-            }
-            continue;
+        if current_media.is_empty() && !line.starts_with("m=") {
+            result.push(line.to_string());
+        } else {
+            current_media.push(line.to_string());
         }
-        if line.starts_with("a=fmtp:") && current_media.starts_with("m=audio") && !line.contains("stereo=1") {
-            out.push(format!("{line};stereo=1;sprop-stereo=1"));
-            continue;
-        }
-        out.push(line.to_string());
     }
-    out.join("\r\n")
+    flush_media(&mut result, &mut current_media);
+
+    result.join(line_ending)
 }
 
 pub fn prefer_codec(sdp: &str, codec: &str) -> String {

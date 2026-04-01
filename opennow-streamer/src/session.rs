@@ -16,7 +16,7 @@ use crate::{
     input,
     media::{MediaEvent, MediaPipeline, VideoSettings},
     messages::{ControlMessage, SessionInfo, StreamSettings, StreamerMessage, StreamerState},
-    sdp::{build_nvst_sdp, extract_ice_credentials, extract_ice_ufrag_from_offer, fix_server_ip, munge_answer_sdp, parse_partial_reliable_threshold_ms, prefer_codec, rewrite_h265_offer, extract_public_ip},
+    sdp::{build_nvst_sdp, extract_ice_credentials, extract_ice_ufrag_from_offer, extract_public_ip, fix_server_ip, munge_answer_sdp, normalize_answer_transport_sdp, parse_partial_reliable_threshold_ms, prefer_codec, rewrite_h265_offer},
 };
 
 pub struct StreamSession {
@@ -44,6 +44,7 @@ impl StreamSession {
         setting_engine
             .set_answering_dtls_role(DTLSRole::Client)
             .context("set_answering_dtls_role")?;
+        setting_engine.set_sdp_media_level_fingerprints(true);
         let api = APIBuilder::new()
             .with_media_engine(media_engine)
             .with_setting_engine(setting_engine)
@@ -274,7 +275,8 @@ impl StreamSession {
             ),
         }).await.ok();
         let munged_local_sdp = munge_answer_sdp(&local.sdp, u32::from(self.settings.max_bitrate_mbps) * 1000);
-        let negotiated_video_lines = munged_local_sdp
+        let normalized_local_sdp = normalize_answer_transport_sdp(&munged_local_sdp);
+        let negotiated_video_lines = normalized_local_sdp
             .lines()
             .scan(false, |in_video, line| {
                 if line.starts_with("m=video") {
@@ -297,6 +299,17 @@ impl StreamSession {
             level: "info".into(),
             message: format!("negotiated local video SDP: {negotiated_video_lines}"),
         }).await.ok();
+        if let Some(setup_line) = normalized_local_sdp.lines().find(|line| line.trim().starts_with("a=setup:")) {
+            self.control_tx.send(StreamerMessage::Log {
+                level: "info".into(),
+                message: format!("normalized answer DTLS setup line {setup_line}"),
+            }).await.ok();
+        }
+        let fingerprint_count = normalized_local_sdp.lines().filter(|line| line.trim().starts_with("a=fingerprint:")).count();
+        self.control_tx.send(StreamerMessage::Log {
+            level: "info".into(),
+            message: format!("normalized answer fingerprint lines {fingerprint_count}"),
+        }).await.ok();
         let nvst = build_nvst_sdp(
             &self.settings.resolution,
             width,
@@ -310,9 +323,9 @@ impl StreamSession {
         );
         self.control_tx.send(StreamerMessage::Log {
             level: "info".into(),
-            message: format!("sending local answer ({} chars) and nvst blob ({} chars)", munged_local_sdp.len(), nvst.len()),
+            message: format!("sending local answer ({} chars) and nvst blob ({} chars)", normalized_local_sdp.len(), nvst.len()),
         }).await.ok();
-        self.control_tx.send(StreamerMessage::Answer { sdp: munged_local_sdp, nvst_sdp: nvst }).await.ok();
+        self.control_tx.send(StreamerMessage::Answer { sdp: normalized_local_sdp, nvst_sdp: nvst }).await.ok();
 
         if let Some(mci) = &self.session.media_connection_info {
             if let Some(ip) = extract_public_ip(&mci.ip) {
