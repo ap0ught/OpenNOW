@@ -101,9 +101,35 @@ impl StreamSession {
         }));
 
         let control_clone = control_tx.clone();
+        peer.on_signaling_state_change(Box::new(move |state| {
+            let sender = control_clone.clone();
+            Box::pin(async move {
+                let _ = sender.send(StreamerMessage::Log {
+                    level: "info".into(),
+                    message: format!("signaling state {state}"),
+                }).await;
+            })
+        }));
+
+        let control_clone = control_tx.clone();
+        peer.dtls_transport().on_state_change(Box::new(move |state| {
+            let sender = control_clone.clone();
+            Box::pin(async move {
+                let _ = sender.send(StreamerMessage::Log {
+                    level: "info".into(),
+                    message: format!("dtls transport state {state}"),
+                }).await;
+            })
+        }));
+
+        let control_clone = control_tx.clone();
         peer.on_peer_connection_state_change(Box::new(move |state| {
             let sender = control_clone.clone();
             Box::pin(async move {
+                let _ = sender.send(StreamerMessage::Log {
+                    level: "info".into(),
+                    message: format!("peer connection state {state}"),
+                }).await;
                 let mapped = match state.to_string().as_str() {
                     "connected" => StreamerState::Connected,
                     "failed" => StreamerState::Failed,
@@ -111,6 +137,30 @@ impl StreamSession {
                     _ => StreamerState::Connecting,
                 };
                 let _ = sender.send(StreamerMessage::State { state: mapped, detail: Some(state.to_string()) }).await;
+            })
+        }));
+
+        let control_clone = control_tx.clone();
+        peer.on_data_channel(Box::new(move |channel| {
+            let sender = control_clone.clone();
+            Box::pin(async move {
+                let label = channel.label().to_string();
+                let _ = sender.send(StreamerMessage::Log {
+                    level: "info".into(),
+                    message: format!("remote data channel label={label}"),
+                }).await;
+                let open_sender = sender.clone();
+                let open_label = label.clone();
+                channel.on_open(Box::new(move || {
+                    let sender = open_sender.clone();
+                    let label = open_label.clone();
+                    Box::pin(async move {
+                        let _ = sender.send(StreamerMessage::Log {
+                            level: "info".into(),
+                            message: format!("remote data channel opened label={label}"),
+                        }).await;
+                    })
+                }));
             })
         }));
 
@@ -123,9 +173,13 @@ impl StreamSession {
                 let mime = track.codec().capability.mime_type.clone();
                 let _ = control.send(StreamerMessage::Log { level: "info".into(), message: format!("track {mime}") }).await;
                 if mime.to_lowercase().contains("video") {
-                    let _ = media.attach_video_track(track).await;
+                    if let Err(error) = media.attach_video_track(track).await {
+                        let _ = control.send(StreamerMessage::Error { message: format!("attach video track failed: {error:#}") }).await;
+                    }
                 } else if mime.to_lowercase().contains("audio") {
-                    let _ = media.attach_audio_track(track).await;
+                    if let Err(error) = media.attach_audio_track(track).await {
+                        let _ = control.send(StreamerMessage::Error { message: format!("attach audio track failed: {error:#}") }).await;
+                    }
                 }
             })
         }));
@@ -161,6 +215,11 @@ impl StreamSession {
         self.control_tx.send(StreamerMessage::Log {
             level: "info".into(),
             message: "remote description applied".into(),
+        }).await.ok();
+        let transceivers = self.peer.get_transceivers().await;
+        self.control_tx.send(StreamerMessage::Log {
+            level: "info".into(),
+            message: format!("transceivers after remote description: {}", transceivers.len()),
         }).await.ok();
 
         self.control_tx.send(StreamerMessage::Log {
@@ -203,6 +262,29 @@ impl StreamSession {
             ),
         }).await.ok();
         let munged_local_sdp = munge_answer_sdp(&local.sdp, u32::from(self.settings.max_bitrate_mbps) * 1000);
+        let negotiated_video_lines = munged_local_sdp
+            .lines()
+            .scan(false, |in_video, line| {
+                if line.starts_with("m=video") {
+                    *in_video = true;
+                    return Some(Some(line.to_string()));
+                }
+                if line.starts_with("m=") && *in_video {
+                    *in_video = false;
+                    return Some(None);
+                }
+                if *in_video && (line.starts_with("a=rtpmap:") || line.starts_with("a=fmtp:") || line.starts_with("a=rtcp-fb:")) {
+                    return Some(Some(line.to_string()));
+                }
+                Some(None)
+            })
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" | ");
+        self.control_tx.send(StreamerMessage::Log {
+            level: "info".into(),
+            message: format!("negotiated local video SDP: {negotiated_video_lines}"),
+        }).await.ok();
         let nvst = build_nvst_sdp(
             &self.settings.resolution,
             width,
