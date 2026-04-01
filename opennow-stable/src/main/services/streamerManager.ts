@@ -179,9 +179,21 @@ export class StreamerManager {
     const __filename = fileURLToPath(import.meta.url);
     const mainDir = dirname(__filename);
     const suffix = process.platform === "win32" ? ".exe" : "";
+    const envOverride = process.env.OPENNOW_STREAMER_BIN;
+    const repoCandidates = [
+      process.cwd(),
+      app.getAppPath(),
+      resolve(app.getAppPath(), ".."),
+      "/home/zortos/Projects/OpenNOW",
+    ].flatMap((root) => [
+      resolve(root, `opennow-streamer/target/release/opennow-streamer${suffix}`),
+      resolve(root, `opennow-streamer/target/debug/opennow-streamer${suffix}`),
+    ]);
     const candidates = [
+      ...(envOverride ? [envOverride] : []),
       resolve(mainDir, `../../../../opennow-streamer/target/release/opennow-streamer${suffix}`),
       resolve(mainDir, `../../../../opennow-streamer/target/debug/opennow-streamer${suffix}`),
+      ...repoCandidates,
       join(process.resourcesPath, "bin", `opennow-streamer${suffix}`),
       resolve(app.getAppPath(), `../opennow-streamer/target/release/opennow-streamer${suffix}`),
     ];
