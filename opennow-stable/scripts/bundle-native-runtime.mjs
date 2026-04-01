@@ -1,4 +1,4 @@
-import { cpSync, existsSync, mkdirSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
@@ -19,6 +19,20 @@ if (!streamer) {
   throw new Error(`Missing opennow-streamer binary. Build it first: ${streamerCandidates.join(', ')}`);
 }
 cpSync(streamer, join(outDir, `opennow-streamer${exeSuffix}`));
+
+if (process.platform === 'linux') {
+  const sdlLibDir = execFileSync('pkg-config', ['--variable=libdir', 'sdl2'], { encoding: 'utf8' }).trim();
+  const sdlCandidates = [
+    join(sdlLibDir, 'libSDL2-2.0.so.0'),
+    '/lib/x86_64-linux-gnu/libSDL2-2.0.so.0',
+    '/usr/lib/x86_64-linux-gnu/libSDL2-2.0.so.0',
+  ];
+  const sdlLib = sdlCandidates.find((candidate) => existsSync(candidate));
+  if (!sdlLib) {
+    throw new Error(`Missing libSDL2-2.0.so.0. Checked: ${sdlCandidates.join(', ')}`);
+  }
+  cpSync(realpathSync(sdlLib), join(outDir, 'libSDL2-2.0.so.0'));
+}
 
 const ffmpegEnv = process.env.OPENNOW_FFMPEG_BIN;
 const ffmpeg = ffmpegEnv || execFileSync(process.platform === 'win32' ? 'where' : 'which', ['ffmpeg'], { encoding: 'utf8' }).split(/\r?\n/).find(Boolean);

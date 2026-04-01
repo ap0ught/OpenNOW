@@ -9,7 +9,6 @@ license = "MIT"
 anyhow = "1"
 bytes = "1"
 opus = "0.3"
-sdl2 = { version = "0.38", features = ["bundled"] }
 clap = { version = "4", features = ["derive"] }
 env_logger = "0.11"
 gilrs = "0.11"
@@ -22,6 +21,12 @@ url = "2"
 webrtc = "0.17"
 rtp = "0.17"
 winit = "0.30"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+sdl2 = { version = "0.38", features = ["use-pkgconfig"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+sdl2 = { version = "0.38", features = ["bundled"] }
 
 [profile.release]
 lto = true

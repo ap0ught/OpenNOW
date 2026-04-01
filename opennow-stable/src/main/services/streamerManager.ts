@@ -88,9 +88,17 @@ export class StreamerManager {
     this.emit({ type: "availability", available: true });
     this.emit({ type: "state", state: "connecting", detail: "launching native streamer" });
 
+    const runtimeEnv = { ...process.env };
+    if (process.platform === "linux") {
+      const binaryDir = dirname(binaryPath);
+      runtimeEnv.LD_LIBRARY_PATH = [binaryDir, runtimeEnv.LD_LIBRARY_PATH]
+        .filter((value): value is string => Boolean(value && value.length > 0))
+        .join(":");
+    }
+
     const child = spawn(binaryPath, ["--control-url", `tcp://127.0.0.1:${port}`], {
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env },
+      env: runtimeEnv,
     });
     this.process = child;
 
