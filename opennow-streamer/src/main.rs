@@ -8,6 +8,8 @@ mod window;
 
 use std::sync::{Arc, mpsc};
 
+use tokio::sync::mpsc as tokio_mpsc;
+
 use clap::Parser;
 use tokio::sync::Mutex;
 
@@ -35,20 +37,38 @@ async fn main() -> anyhow::Result<()> {
     let active: SharedSession = Arc::new(Mutex::new(None));
     let window_session = active.clone();
     let (media_tx, media_rx) = mpsc::channel::<MediaEvent>();
+    let (input_tx, mut input_rx) = tokio_mpsc::unbounded_channel();
     std::thread::spawn(move || {
-        if let Err(error) = window::run(window_session, media_rx, 1920, 1080) {
+        if let Err(error) = window::run(window_session, media_rx, input_tx, 1920, 1080) {
             eprintln!("window loop failed: {error:#}");
         }
     });
 
-    while let Some(message) = control_rx.recv().await {
-        if let Err(error) = handle_control_message(&active, &control_tx, &media_tx, message).await {
-            let _ = control_tx
-                .send(StreamerMessage::State {
-                    state: StreamerState::Failed,
-                    detail: Some(error.to_string()),
-                })
-                .await;
+    loop {
+        tokio::select! {
+            maybe_payload = input_rx.recv() => {
+                match maybe_payload {
+                    Some(payload) => {
+                        if let Some(active_session) = active.lock().await.clone() {
+                            active_session.send_input(payload).await;
+                        }
+                    }
+                    None => break,
+                }
+            }
+            maybe_message = control_rx.recv() => {
+                match maybe_message {
+                    Some(message) => {
+                        if let Err(error) = handle_control_message(&active, &control_tx, &media_tx, message).await {
+                            let _ = control_tx.send(StreamerMessage::State {
+                                state: StreamerState::Failed,
+                                detail: Some(error.to_string()),
+                            }).await;
+                        }
+                    }
+                    None => break,
+                }
+            }
         }
     }
 

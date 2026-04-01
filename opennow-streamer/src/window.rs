@@ -1,5 +1,7 @@
 use std::{sync::mpsc::Receiver, time::Duration};
 
+use tokio::sync::mpsc::UnboundedSender;
+
 use anyhow::Context;
 use sdl2::{
     audio::{AudioQueue, AudioSpecDesired},
@@ -17,7 +19,7 @@ use crate::{
     session::{InputPayload, SharedSession},
 };
 
-pub fn run(session: SharedSession, media_rx: Receiver<MediaEvent>, width: u32, height: u32) -> anyhow::Result<()> {
+pub fn run(_session: SharedSession, media_rx: Receiver<MediaEvent>, input_tx: UnboundedSender<InputPayload>, width: u32, height: u32) -> anyhow::Result<()> {
     let sdl = sdl2::init().map_err(|e| anyhow::anyhow!(e)).context("sdl init")?;
     let video = sdl.video().map_err(|e| anyhow::anyhow!(e)).context("sdl video")?;
     let audio = sdl.audio().map_err(|e| anyhow::anyhow!(e)).context("sdl audio")?;
@@ -78,7 +80,7 @@ pub fn run(session: SharedSession, media_rx: Receiver<MediaEvent>, width: u32, h
                 Event::KeyDown { scancode: Some(scancode), keymod, repeat, .. } => {
                     if !repeat {
                         if let Some((vk, code)) = map_scancode(scancode) {
-                            send_input(&session, InputPayload::Key {
+                            send_input(&input_tx, InputPayload::Key {
                                 key_code: vk,
                                 scan_code: code,
                                 modifiers: map_modifiers(keymod),
@@ -90,7 +92,7 @@ pub fn run(session: SharedSession, media_rx: Receiver<MediaEvent>, width: u32, h
                 Event::KeyUp { scancode: Some(scancode), keymod, repeat, .. } => {
                     if !repeat {
                         if let Some((vk, code)) = map_scancode(scancode) {
-                            send_input(&session, InputPayload::Key {
+                            send_input(&input_tx, InputPayload::Key {
                                 key_code: vk,
                                 scan_code: code,
                                 modifiers: map_modifiers(keymod),
@@ -101,17 +103,17 @@ pub fn run(session: SharedSession, media_rx: Receiver<MediaEvent>, width: u32, h
                 }
                 Event::MouseMotion { xrel, yrel, .. } => {
                     if xrel != 0 || yrel != 0 {
-                        send_input(&session, InputPayload::MouseMove { dx: xrel.clamp(i16::MIN as i32, i16::MAX as i32) as i16, dy: yrel.clamp(i16::MIN as i32, i16::MAX as i32) as i16 });
+                        send_input(&input_tx, InputPayload::MouseMove { dx: xrel.clamp(i16::MIN as i32, i16::MAX as i32) as i16, dy: yrel.clamp(i16::MIN as i32, i16::MAX as i32) as i16 });
                     }
                 }
                 Event::MouseButtonDown { mouse_btn, .. } => {
                     if let Some(button) = map_mouse_button(mouse_btn) {
-                        send_input(&session, InputPayload::MouseButton { button, down: true });
+                        send_input(&input_tx, InputPayload::MouseButton { button, down: true });
                     }
                 }
                 Event::MouseButtonUp { mouse_btn, .. } => {
                     if let Some(button) = map_mouse_button(mouse_btn) {
-                        send_input(&session, InputPayload::MouseButton { button, down: false });
+                        send_input(&input_tx, InputPayload::MouseButton { button, down: false });
                     }
                 }
                 Event::ControllerAxisMotion { .. }
@@ -120,7 +122,7 @@ pub fn run(session: SharedSession, media_rx: Receiver<MediaEvent>, width: u32, h
                 | Event::ControllerDeviceAdded { .. }
                 | Event::ControllerDeviceRemoved { .. } => {
                     if let Some(controller) = opened_controller.as_ref() {
-                        send_input(&session, InputPayload::Gamepad {
+                        send_input(&input_tx, InputPayload::Gamepad {
                             buttons: map_controller_buttons(controller),
                             left_trigger: axis_to_u8(controller.axis(sdl2::controller::Axis::TriggerLeft)),
                             right_trigger: axis_to_u8(controller.axis(sdl2::controller::Axis::TriggerRight)),
@@ -140,13 +142,8 @@ pub fn run(session: SharedSession, media_rx: Receiver<MediaEvent>, width: u32, h
     Ok(())
 }
 
-fn send_input(session: &SharedSession, payload: InputPayload) {
-    let session = session.clone();
-    tokio::spawn(async move {
-        if let Some(active) = session.lock().await.clone() {
-            active.send_input(payload).await;
-        }
-    });
+fn send_input(input_tx: &UnboundedSender<InputPayload>, payload: InputPayload) {
+    let _ = input_tx.send(payload);
 }
 
 fn queue_audio(queue: &AudioQueue<i16>, frame: AudioFrame) {

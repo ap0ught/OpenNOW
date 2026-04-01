@@ -40,6 +40,20 @@ export class StreamerManager {
   private pendingReady: { resolve: () => void; reject: (error: Error) => void; timer: NodeJS.Timeout } | null = null;
   private mode: "idle" | "legacy" | "external" = "idle";
 
+  private settlePendingReady(outcome: { resolve: true } | { resolve: false; error: Error }): void {
+    const pending = this.pendingReady;
+    if (!pending) {
+      return;
+    }
+    clearTimeout(pending.timer);
+    this.pendingReady = null;
+    if (outcome.resolve) {
+      pending.resolve();
+      return;
+    }
+    pending.reject(outcome.error);
+  }
+
   constructor(
     private readonly windowProvider: () => BrowserWindow | null,
     private readonly signalingHandlers: {
@@ -69,6 +83,7 @@ export class StreamerManager {
     await this.stop();
     const port = await this.createControlServer();
     const binaryPath = this.resolveBinaryPath();
+    const ready = this.waitForReady();
     this.mode = "external";
     this.emit({ type: "availability", available: true });
     this.emit({ type: "state", state: "connecting", detail: "launching native streamer" });
@@ -89,22 +104,29 @@ export class StreamerManager {
       if (message) this.emit({ type: "log", level: "stderr", message });
     });
 
+    child.once("error", (error) => {
+      this.settlePendingReady({ resolve: false, error: new Error(`native streamer failed to launch: ${String(error)}`) });
+    });
+
     child.once("exit", (code, signal) => {
+      const detail = `native streamer exited code=${code ?? "null"} signal=${signal ?? "null"}`;
+      this.settlePendingReady({ resolve: false, error: new Error(detail) });
       this.emit({
         type: "state",
         state: code === 0 ? "disconnected" : "failed",
-        detail: `native streamer exited code=${code ?? "null"} signal=${signal ?? "null"}`,
+        detail,
       });
       this.cleanupSocket();
       this.process = null;
       this.mode = "idle";
     });
 
-    await this.waitForReady();
+    await ready;
     await this.sendControl({ type: "configure", session: request.session, settings: request.settings });
   }
 
   async stop(): Promise<void> {
+    this.settlePendingReady({ resolve: false, error: new Error("native streamer startup cancelled") });
     if (this.socket && !this.socket.destroyed) {
       await this.sendControl({ type: "stop" }).catch(() => {});
     }
@@ -189,7 +211,13 @@ export class StreamerManager {
         }
       });
       socket.on("close", () => {
-        this.socket = null;
+        if (this.socket === socket) {
+          this.socket = null;
+        }
+        this.settlePendingReady({ resolve: false, error: new Error("native streamer control socket closed before handshake") });
+      });
+      socket.on("error", (error) => {
+        this.settlePendingReady({ resolve: false, error: new Error(`native streamer control socket error: ${String(error)}`) });
       });
     });
 
@@ -209,18 +237,13 @@ export class StreamerManager {
   private waitForReady(): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.pendingReady = null;
-        reject(new Error("Timed out waiting for native streamer handshake"));
+        this.settlePendingReady({ resolve: false, error: new Error("Timed out waiting for native streamer handshake") });
       }, 10_000);
       this.pendingReady = { resolve, reject, timer };
     });
   }
 
   private cleanupSocket(): void {
-    if (this.pendingReady) {
-      clearTimeout(this.pendingReady.timer);
-      this.pendingReady = null;
-    }
     this.socket?.destroy();
     this.socket = null;
   }
@@ -245,9 +268,7 @@ export class StreamerManager {
 
     if (parsed.type === "hello") {
       if (this.pendingReady) {
-        clearTimeout(this.pendingReady.timer);
-        this.pendingReady.resolve();
-        this.pendingReady = null;
+        this.settlePendingReady({ resolve: true });
       }
       this.emit({ type: "log", level: "info", message: `native streamer connected pid=${parsed.pid ?? "unknown"}` });
       return;
