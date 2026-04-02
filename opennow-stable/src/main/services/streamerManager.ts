@@ -96,6 +96,13 @@ export class StreamerManager {
         .filter((value): value is string => Boolean(value && value.length > 0))
         .join(":");
     }
+    if (process.platform === "darwin") {
+      const binaryDir = dirname(binaryPath);
+      runtimeEnv.DYLD_LIBRARY_PATH = [binaryDir, runtimeEnv.DYLD_LIBRARY_PATH]
+        .filter((value): value is string => Boolean(value && value.length > 0))
+        .join(":");
+    }
+    runtimeEnv.RUST_BACKTRACE ??= "1";
 
     const child = spawn(binaryPath, ["--control-url", `tcp://127.0.0.1:${port}`], {
       stdio: ["ignore", "pipe", "pipe"],
@@ -190,17 +197,25 @@ export class StreamerManager {
     const suffix = process.platform === "win32" ? ".exe" : "";
     const envOverride = process.env.OPENNOW_STREAMER_BIN;
     const home = homedir();
-    const repoCandidates = [
+    const repoRoots = [
       process.cwd(),
       app.getAppPath(),
       resolve(app.getAppPath(), ".."),
       "/home/zortos/Projects/OpenNOW",
       "/Users/zortos/Projects/OpenNOW",
       resolve(home, "Projects/OpenNOW"),
-    ].flatMap((root) => [
-      resolve(root, `opennow-streamer/target/release/opennow-streamer${suffix}`),
-      resolve(root, `opennow-streamer/target/debug/opennow-streamer${suffix}`),
-    ]);
+    ];
+    const repoCandidates = repoRoots.flatMap((root) =>
+      app.isPackaged
+        ? [
+            resolve(root, `opennow-streamer/target/release/opennow-streamer${suffix}`),
+            resolve(root, `opennow-streamer/target/debug/opennow-streamer${suffix}`),
+          ]
+        : [
+            resolve(root, `opennow-streamer/target/debug/opennow-streamer${suffix}`),
+            resolve(root, `opennow-streamer/target/release/opennow-streamer${suffix}`),
+          ],
+    );
     const candidates = [
       ...(envOverride ? [envOverride] : []),
       resolve(mainDir, `../../../../opennow-streamer/target/release/opennow-streamer${suffix}`),
