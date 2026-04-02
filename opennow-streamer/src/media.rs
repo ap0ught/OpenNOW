@@ -403,7 +403,7 @@ fn spawn_decoder_process(
         .spawn()
         .with_context(|| format!("spawn ffmpeg decoder backend {}", candidate.name))?;
 
-        let y_size = (width * height) as usize;
+    let y_size = (width * height) as usize;
     let uv_size = ((width / 2) * (height / 2)) as usize;
     let frame_size = match candidate.output_pixel_format {
         VideoPixelFormat::I420 | VideoPixelFormat::Nv12 => y_size + uv_size + uv_size,
@@ -466,6 +466,7 @@ fn send_streamer_log(
 
 fn build_decoder_candidates(ffmpeg: &Path, demuxer: &str) -> Vec<DecoderCandidate> {
     let hwaccels = query_hwaccels(ffmpeg);
+    let _decoders = query_decoders(ffmpeg);
     let mut candidates = Vec::new();
 
     #[cfg(target_os = "windows")]
@@ -505,17 +506,34 @@ fn build_decoder_candidates(ffmpeg: &Path, demuxer: &str) -> Vec<DecoderCandidat
             "h264" => "h264_videotoolbox",
             _ => "hevc_videotoolbox",
         };
-        candidates.push(DecoderCandidate {
-            name: "macos-videotoolbox-copyback".into(),
-            input_args: base_ffmpeg_input_args(&[
-                "-hwaccel",
-                "videotoolbox",
-                "-c:v",
-                decoder,
-            ]),
-            output_args: ffmpeg_output_args(&["-pix_fmt", "nv12"]),
-            output_pixel_format: VideoPixelFormat::Nv12,
-        });
+        if _decoders.contains(decoder) {
+            candidates.push(DecoderCandidate {
+                name: "macos-videotoolbox-native-decoder".into(),
+                input_args: base_ffmpeg_input_args(&[
+                    "-hwaccel",
+                    "videotoolbox",
+                    "-hwaccel_output_format",
+                    "videotoolbox",
+                    "-c:v",
+                    decoder,
+                ]),
+                output_args: ffmpeg_output_args(&["-pix_fmt", "nv12"]),
+                output_pixel_format: VideoPixelFormat::Nv12,
+            });
+        }
+        if hwaccels.contains("videotoolbox") || _decoders.contains(decoder) || hwaccels.is_empty() {
+            candidates.push(DecoderCandidate {
+                name: "macos-videotoolbox-copyback".into(),
+                input_args: base_ffmpeg_input_args(&[
+                    "-hwaccel",
+                    "videotoolbox",
+                    "-hwaccel_output_format",
+                    "videotoolbox",
+                ]),
+                output_args: ffmpeg_output_args(&["-pix_fmt", "nv12"]),
+                output_pixel_format: VideoPixelFormat::Nv12,
+            });
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -637,6 +655,30 @@ fn ffmpeg_output_args(extra: &[&str]) -> Vec<String> {
     let mut args = vec!["-threads".into(), "1".into()];
     args.extend(extra.iter().map(|value| value.to_string()));
     args
+}
+
+fn query_decoders(ffmpeg: &Path) -> HashSet<String> {
+    Command::new(ffmpeg)
+        .arg("-hide_banner")
+        .arg("-decoders")
+        .output()
+        .ok()
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| {
+                    let trimmed = line.trim_start();
+                    if trimmed.len() < 3 || !trimmed.starts_with('V') {
+                        return None;
+                    }
+                    trimmed
+                        .split_whitespace()
+                        .nth(1)
+                        .map(|name| name.to_lowercase())
+                })
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default()
 }
 
 fn query_hwaccels(ffmpeg: &Path) -> HashSet<String> {
