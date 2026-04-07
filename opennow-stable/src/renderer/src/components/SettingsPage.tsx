@@ -1330,6 +1330,28 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
               </span>
             </div>
 
+            <div className="settings-row settings-row--column">
+              <div className="settings-row-top settings-row-top--compact">
+                <label className="settings-label settings-label--wrap">
+                  <span className="settings-label-title">
+                    OpenNOW Native Streamer
+                    <span className="settings-inline-badge settings-inline-badge--beta">Beta</span>
+                  </span>
+                </label>
+                <label className="settings-toggle">
+                  <input
+                    type="checkbox"
+                    checked={settings.enableNativeStreamer}
+                    onChange={(e) => handleChange("enableNativeStreamer", e.target.checked)}
+                  />
+                  <span className="settings-toggle-track" />
+                </label>
+              </div>
+              <span className="settings-subtle-hint">
+                Launch streams in the external OpenNOW Native Streamer window using the native C++/FFmpeg/libdatachannel/SDL3 backend. Turn this off to keep the existing Chromium WebRTC path.
+              </span>
+            </div>
+
           </div>
         </section>
 

@@ -108,6 +108,7 @@ For a fuller setup guide, see [docs/development.md](docs/development.md).
 ```text
 .
 ├── opennow-stable/   Electron app workspace
+├── opennow-native-streamer/  Native C++ streamer project
 ├── docs/             Local project documentation
 ├── .github/          Workflows, templates, contributing docs
 ├── logo.png          Project logo
@@ -131,6 +132,8 @@ OpenNOW is split into three Electron layers:
 | Renderer | React + TypeScript | Login flow, browsing, settings, WebRTC playback, diagnostics, controls |
 
 The code lives under [`opennow-stable/src/`](opennow-stable/src), with shared TypeScript types and IPC contracts in [`opennow-stable/src/shared/`](opennow-stable/src/shared).
+
+The repository now also includes [`opennow-native-streamer/`](opennow-native-streamer), a standalone `C++20 + FFmpeg + libdatachannel + SDL3` native streaming backend. The Electron app remains the launcher shell and preserves the existing Chromium/WebRTC path by default. A settings toggle can switch launches over to the external `OpenNOW Native Streamer` process/window.
 
 ## Contributing
 

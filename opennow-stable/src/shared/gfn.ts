@@ -72,6 +72,8 @@ export interface Settings {
   gameLanguage: GameLanguage;
   /** Experimental request for Low Latency, Low Loss, Scalable throughput on new sessions */
   enableL4S: boolean;
+  /** Route streaming through the external OpenNOW Native Streamer process instead of Chromium WebRTC. */
+  enableNativeStreamer: boolean;
 }
 
 export interface LoginProvider {
@@ -326,7 +328,10 @@ export interface SignalingConnectRequest {
   sessionId: string;
   signalingServer: string;
   signalingUrl?: string;
+  target?: SignalingTarget;
 }
+
+export type SignalingTarget = "renderer-webrtc" | "native-streamer";
 
 export interface IceCandidatePayload {
   candidate: string;
@@ -352,6 +357,40 @@ export type MainToRendererSignalingEvent =
   | { type: "offer"; sdp: string }
   | { type: "remote-ice"; candidate: IceCandidatePayload }
   | { type: "error"; message: string }
+  | { type: "log"; message: string };
+
+export type NativeStreamerLifecycleState =
+  | "idle"
+  | "launching"
+  | "handshaking"
+  | "ready"
+  | "connecting"
+  | "streaming"
+  | "failed"
+  | "exited";
+
+export interface NativeStreamerStateSnapshot {
+  backend: "native-streamer";
+  state: NativeStreamerLifecycleState;
+  message?: string;
+  detail?: string;
+  pid?: number;
+  executablePath?: string;
+  updatedAtMs: number;
+}
+
+export interface NativeStreamerStartRequest {
+  session: SessionInfo;
+  settings: StreamSettings;
+  gameTitle?: string;
+}
+
+export interface NativeStreamerStopRequest {
+  reason?: string;
+}
+
+export type NativeStreamerEvent =
+  | { type: "state"; state: NativeStreamerStateSnapshot }
   | { type: "log"; message: string };
 
 /** Dialog result for session conflict resolution */
@@ -383,6 +422,10 @@ export interface OpenNowApi {
   sendIceCandidate(input: IceCandidatePayload): Promise<void>;
   requestKeyframe(input: KeyframeRequest): Promise<void>;
   onSignalingEvent(listener: (event: MainToRendererSignalingEvent) => void): () => void;
+  startNativeStreamer(input: NativeStreamerStartRequest): Promise<NativeStreamerStateSnapshot>;
+  stopNativeStreamer(input?: NativeStreamerStopRequest): Promise<void>;
+  getNativeStreamerState(): Promise<NativeStreamerStateSnapshot>;
+  onNativeStreamerEvent(listener: (event: NativeStreamerEvent) => void): () => void;
   /** Listen for F11 fullscreen toggle from main process */
   onToggleFullscreen(listener: () => void): () => void;
   quitApp(): Promise<void>;

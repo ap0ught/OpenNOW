@@ -9,8 +9,11 @@ import type {
   GameVariant,
   LoginProvider,
   MainToRendererSignalingEvent,
+  NativeStreamerEvent,
+  NativeStreamerStateSnapshot,
   SessionInfo,
   Settings,
+  StreamSettings,
   SubscriptionInfo,
   StreamRegion,
   VideoCodec,
@@ -71,6 +74,7 @@ type GameSource = "main" | "library" | "public";
 type AppPage = "home" | "library" | "settings";
 type StreamStatus = "idle" | "queue" | "setup" | "starting" | "connecting" | "streaming";
 type StreamLoadingStatus = "queue" | "setup" | "starting" | "connecting";
+type StreamBackend = "chromium-webrtc" | "native-streamer";
 type ExitPromptState = { open: boolean; gameTitle: string };
 type StreamWarningState = {
   code: StreamTimeWarning["code"];
@@ -365,6 +369,26 @@ function toLaunchErrorState(error: unknown, stage: StreamLoadingStatus): LaunchE
   };
 }
 
+function buildStreamSettings(settings: Settings): StreamSettings {
+  return {
+    resolution: settings.resolution,
+    fps: settings.fps,
+    maxBitrateMbps: settings.maxBitrateMbps,
+    codec: settings.codec,
+    colorQuality: settings.colorQuality,
+    gameLanguage: settings.gameLanguage,
+    enableL4S: settings.enableL4S,
+  };
+}
+
+function toNativeStreamerErrorState(state: NativeStreamerStateSnapshot): LaunchErrorState {
+  return {
+    stage: "connecting",
+    title: "Native Streamer Failed",
+    description: state.detail || state.message || "The OpenNOW Native Streamer process exited unexpectedly.",
+  };
+}
+
 export function App(): JSX.Element {
 
   // Auth State
@@ -426,6 +450,7 @@ export function App(): JSX.Element {
     windowHeight: 900,
     gameLanguage: "en_US",
     enableL4S: false,
+    enableNativeStreamer: false,
   });
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [regions, setRegions] = useState<StreamRegion[]>([]);
@@ -453,6 +478,8 @@ export function App(): JSX.Element {
   const [sessionStartedAtMs, setSessionStartedAtMs] = useState<number | null>(null);
   const [sessionElapsedSeconds, setSessionElapsedSeconds] = useState(0);
   const [streamWarning, setStreamWarning] = useState<StreamWarningState | null>(null);
+  const [streamBackend, setStreamBackend] = useState<StreamBackend | null>(null);
+  const [nativeStreamerState, setNativeStreamerState] = useState<NativeStreamerStateSnapshot | null>(null);
 
   const { playtime, startSession: startPlaytimeSession, endSession: endPlaytimeSession } = usePlaytime();
 
@@ -650,7 +677,9 @@ export function App(): JSX.Element {
   const launchInFlightRef = useRef(false);
   const launchAbortRef = useRef(false);
   const streamStatusRef = useRef<StreamStatus>(streamStatus);
+  const streamBackendRef = useRef<StreamBackend | null>(streamBackend);
   const exitPromptResolverRef = useRef<((confirmed: boolean) => void) | null>(null);
+  const nativeStopExpectedRef = useRef(false);
 
   useEffect(() => {
     controllerOverlayOpenRef.current = controllerOverlayOpen;
@@ -706,6 +735,9 @@ export function App(): JSX.Element {
     setSessionElapsedSeconds(0);
     setStreamWarning(null);
     setEscHoldReleaseIndicator({ visible: false, progress: 0 });
+    setStreamBackend(null);
+    setNativeStreamerState(null);
+    nativeStopExpectedRef.current = false;
     diagnosticsStore.set(defaultDiagnostics());
 
     if (!options?.keepStreamingContext) {
@@ -727,6 +759,10 @@ export function App(): JSX.Element {
   useEffect(() => {
     streamStatusRef.current = streamStatus;
   }, [streamStatus]);
+
+  useEffect(() => {
+    streamBackendRef.current = streamBackend;
+  }, [streamBackend]);
 
   // Broadcast minimal session/loading state for UI overlays (controller + other listeners)
   useEffect(() => {
@@ -1118,13 +1154,14 @@ export function App(): JSX.Element {
   // Anti-AFK interval
   useEffect(() => {
     if (!antiAfkEnabled || streamStatus !== "streaming") return;
+    if (streamBackend !== "chromium-webrtc") return;
 
     const interval = window.setInterval(() => {
       clientRef.current?.sendAntiAfkPulse();
     }, 240000); // 4 minutes
 
     return () => clearInterval(interval);
-  }, [antiAfkEnabled, streamStatus]);
+  }, [antiAfkEnabled, streamBackend, streamStatus]);
 
   // Periodically re-sync subscription playtime from backend while streaming.
   useEffect(() => {
@@ -1300,6 +1337,48 @@ export function App(): JSX.Element {
 
     return () => unsubscribe();
   }, [resetLaunchRuntime, settings]);
+
+  useEffect(() => {
+    const unsubscribe = window.openNow.onNativeStreamerEvent(async (event: NativeStreamerEvent) => {
+      if (event.type === "log") {
+        console.log(`[NativeStreamer] ${event.message}`);
+        return;
+      }
+
+      setNativeStreamerState(event.state);
+      if (streamBackendRef.current !== "native-streamer") {
+        return;
+      }
+
+      switch (event.state.state) {
+        case "launching":
+        case "handshaking":
+        case "ready":
+        case "connecting":
+          if (streamStatusRef.current !== "streaming") {
+            setStreamStatus("connecting");
+          }
+          break;
+        case "streaming":
+          setLaunchError(null);
+          setStreamStatus("streaming");
+          break;
+        case "failed":
+        case "exited":
+          if (nativeStopExpectedRef.current || streamStatusRef.current === "idle") {
+            return;
+          }
+          setLaunchError(toNativeStreamerErrorState(event.state));
+          await window.openNow.disconnectSignaling().catch(() => {});
+          await window.openNow.stopNativeStreamer({ reason: "native-failure-cleanup" }).catch(() => {});
+          resetLaunchRuntime({ keepLaunchError: true, keepStreamingContext: true });
+          void refreshNavbarActiveSession();
+          break;
+      }
+    });
+
+    return () => unsubscribe();
+  }, [refreshNavbarActiveSession, resetLaunchRuntime]);
 
   // Save settings when changed
   const updateSetting = useCallback(async <K extends keyof Settings>(key: K, value: Settings[K]) => {
@@ -1532,10 +1611,22 @@ export function App(): JSX.Element {
     sessionRef.current = claimed;
     setQueuePosition(undefined);
     setStreamStatus("connecting");
+    const useNativeStreamer = settings.enableNativeStreamer;
+    setStreamBackend(useNativeStreamer ? "native-streamer" : "chromium-webrtc");
+    if (useNativeStreamer) {
+      nativeStopExpectedRef.current = false;
+      const state = await window.openNow.startNativeStreamer({
+        session: claimed,
+        settings: buildStreamSettings(settings),
+        gameTitle: matchedContext?.game.title,
+      });
+      setNativeStreamerState(state);
+    }
     await window.openNow.connectSignaling({
       sessionId: claimed.sessionId,
       signalingServer: claimed.signalingServer,
       signalingUrl: claimed.signalingUrl,
+      target: useNativeStreamer ? "native-streamer" : "renderer-webrtc",
     });
   }, [authSession, effectiveStreamingBaseUrl, findGameContextForSession, settings]);
 
@@ -1741,6 +1832,8 @@ export function App(): JSX.Element {
 
       // Use the polled session data which has the latest signaling info
       const sessionToConnect = sessionRef.current ?? finalSession ?? newSession;
+      const useNativeStreamer = settings.enableNativeStreamer;
+      setStreamBackend(useNativeStreamer ? "native-streamer" : "chromium-webrtc");
       console.log("Connecting signaling with:", {
         sessionId: sessionToConnect.sessionId,
         signalingServer: sessionToConnect.signalingServer,
@@ -1748,10 +1841,21 @@ export function App(): JSX.Element {
         status: sessionToConnect.status,
       });
 
+      if (useNativeStreamer) {
+        nativeStopExpectedRef.current = false;
+        const state = await window.openNow.startNativeStreamer({
+          session: sessionToConnect,
+          settings: buildStreamSettings(settings),
+          gameTitle: matchedGameContext.game.title,
+        });
+        setNativeStreamerState(state);
+      }
+
       await window.openNow.connectSignaling({
         sessionId: sessionToConnect.sessionId,
         signalingServer: sessionToConnect.signalingServer,
         signalingUrl: sessionToConnect.signalingUrl,
+        target: useNativeStreamer ? "native-streamer" : "renderer-webrtc",
       });
     } catch (error) {
       if (launchAbortRef.current) {
@@ -1760,6 +1864,7 @@ export function App(): JSX.Element {
       console.error("Launch failed:", error);
       setLaunchError(toLaunchErrorState(error, loadingStep));
       await window.openNow.disconnectSignaling().catch(() => {});
+      await window.openNow.stopNativeStreamer({ reason: "launch-failed" }).catch(() => {});
       clientRef.current?.dispose();
       clientRef.current = null;
       resetLaunchRuntime({ keepLaunchError: true, keepStreamingContext: true });
@@ -1817,6 +1922,7 @@ export function App(): JSX.Element {
       console.error("Navbar resume failed:", error);
       setLaunchError(toLaunchErrorState(error, loadingStep));
       await window.openNow.disconnectSignaling().catch(() => {});
+      await window.openNow.stopNativeStreamer({ reason: "resume-failed" }).catch(() => {});
       clientRef.current?.dispose();
       clientRef.current = null;
       resetLaunchRuntime({ keepLaunchError: true });
@@ -1844,7 +1950,9 @@ export function App(): JSX.Element {
       if (status !== "idle" && status !== "streaming") {
         launchAbortRef.current = true;
       }
+      nativeStopExpectedRef.current = true;
       await window.openNow.disconnectSignaling();
+      await window.openNow.stopNativeStreamer({ reason: "user-stop" }).catch(() => {});
 
       const current = sessionRef.current;
       if (current) {
@@ -1916,7 +2024,9 @@ export function App(): JSX.Element {
   }, [handleStopStream, handlePlayGame]);
 
   const handleDismissLaunchError = useCallback(async () => {
+    nativeStopExpectedRef.current = true;
     await window.openNow.disconnectSignaling().catch(() => {});
+    await window.openNow.stopNativeStreamer({ reason: "dismiss-launch-error" }).catch(() => {});
     clientRef.current?.dispose();
     clientRef.current = null;
     resetLaunchRuntime();
@@ -1990,7 +2100,7 @@ export function App(): JSX.Element {
       }
 
       const isPasteShortcut = e.key.toLowerCase() === "v" && !e.altKey && (isMac ? e.metaKey : e.ctrlKey);
-      if (streamStatus === "streaming" && isPasteShortcut) {
+      if (streamStatus === "streaming" && streamBackend === "chromium-webrtc" && isPasteShortcut) {
         // Always stop local/browser paste behavior while streaming.
         // If clipboard paste is enabled, send clipboard text into the stream.
         e.preventDefault();
@@ -2029,7 +2139,7 @@ export function App(): JSX.Element {
         e.preventDefault();
         e.stopPropagation();
         e.stopImmediatePropagation();
-        if (streamStatus === "streaming" && videoRef.current) {
+        if (streamStatus === "streaming" && streamBackend === "chromium-webrtc" && videoRef.current) {
           if (document.pointerLockElement === videoRef.current) {
             try {
               (clientRef.current as any).suppressNextSyntheticEscape = true;
@@ -2057,7 +2167,7 @@ export function App(): JSX.Element {
         e.preventDefault();
         e.stopPropagation();
         e.stopImmediatePropagation();
-        if (streamStatus === "streaming") {
+        if (streamStatus === "streaming" && streamBackend === "chromium-webrtc") {
           setAntiAfkEnabled((prev) => !prev);
         }
         return;
@@ -2067,7 +2177,7 @@ export function App(): JSX.Element {
         e.preventDefault();
         e.stopPropagation();
         e.stopImmediatePropagation();
-        if (streamStatus === "streaming") {
+        if (streamStatus === "streaming" && streamBackend === "chromium-webrtc") {
           clientRef.current?.toggleMicrophone();
         }
       }
@@ -2084,6 +2194,7 @@ export function App(): JSX.Element {
     requestEscLockedPointerCapture,
     settings.clipboardPaste,
     shortcuts,
+    streamBackend,
     streamStatus,
   ]);
 
@@ -2131,6 +2242,7 @@ export function App(): JSX.Element {
   }
 
   const showLaunchOverlay = streamStatus !== "idle" || launchError !== null || isSwitchingGame;
+  const showNativeStreamerShell = streamBackend === "native-streamer" && streamStatus === "streaming";
   const consumedHours =
     streamStatus === "streaming"
       ? Math.floor(sessionElapsedSeconds / 60) / 60
@@ -2142,7 +2254,7 @@ export function App(): JSX.Element {
     const loadingStatus = launchError ? launchError.stage : toLoadingStatus(streamStatus);
     return (
       <>
-        {streamStatus !== "idle" && (
+        {streamStatus !== "idle" && !showNativeStreamerShell && (
           <StreamView
             className={isSwitchingGame ? "sv--switching" : undefined}
             videoRef={videoRef}
@@ -2203,6 +2315,45 @@ export function App(): JSX.Element {
               void releasePointerLockIfNeeded();
             }}
           />
+        )}
+        {showNativeStreamerShell && (
+          <div className="native-streamer-shell">
+            <div className="native-streamer-shell__card">
+              <div className="native-streamer-shell__eyebrow">OpenNOW Native Streamer</div>
+              <div className="native-streamer-shell__title">Streaming in separate native window</div>
+              <div className="native-streamer-shell__text">
+                {nativeStreamerState?.message || "The game is running in the external OpenNOW Native Streamer process."}
+              </div>
+              {nativeStreamerState?.detail && (
+                <div className="native-streamer-shell__detail">{nativeStreamerState.detail}</div>
+              )}
+              <div className="native-streamer-shell__meta">
+                <span>{streamingGame?.title ?? "Game"}</span>
+                {nativeStreamerState?.pid && <span>PID {nativeStreamerState.pid}</span>}
+                <span>Backend native-streamer</span>
+              </div>
+              <div className="native-streamer-shell__actions">
+                <button
+                  type="button"
+                  className="native-streamer-shell__button native-streamer-shell__button--secondary"
+                  onClick={() => {
+                    setCurrentPage("library");
+                  }}
+                >
+                  Library
+                </button>
+                <button
+                  type="button"
+                  className="native-streamer-shell__button native-streamer-shell__button--primary"
+                  onClick={() => {
+                    void handlePromptedStopStream();
+                  }}
+                >
+                  Stop Session
+                </button>
+              </div>
+            </div>
+          </div>
         )}
         {isSwitchingGame && settings.controllerMode && streamStatus !== "connecting" && (
           <ControllerStreamLoading

@@ -8,6 +8,10 @@ import type {
   ResolveLaunchIdRequest,
   RegionsFetchRequest,
   MainToRendererSignalingEvent,
+  NativeStreamerEvent,
+  NativeStreamerStartRequest,
+  NativeStreamerStateSnapshot,
+  NativeStreamerStopRequest,
   OpenNowApi,
   SessionCreateRequest,
   SessionPollRequest,
@@ -70,6 +74,22 @@ const api: OpenNowApi = {
     ipcRenderer.on(IPC_CHANNELS.SIGNALING_EVENT, wrapped);
     return () => {
       ipcRenderer.off(IPC_CHANNELS.SIGNALING_EVENT, wrapped);
+    };
+  },
+  startNativeStreamer: (input: NativeStreamerStartRequest): Promise<NativeStreamerStateSnapshot> =>
+    ipcRenderer.invoke(IPC_CHANNELS.NATIVE_STREAMER_START, input),
+  stopNativeStreamer: (input: NativeStreamerStopRequest = {}): Promise<void> =>
+    ipcRenderer.invoke(IPC_CHANNELS.NATIVE_STREAMER_STOP, input),
+  getNativeStreamerState: (): Promise<NativeStreamerStateSnapshot> =>
+    ipcRenderer.invoke(IPC_CHANNELS.NATIVE_STREAMER_STATE_GET),
+  onNativeStreamerEvent: (listener: (event: NativeStreamerEvent) => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, payload: NativeStreamerEvent) => {
+      listener(payload);
+    };
+
+    ipcRenderer.on(IPC_CHANNELS.NATIVE_STREAMER_EVENT, wrapped);
+    return () => {
+      ipcRenderer.off(IPC_CHANNELS.NATIVE_STREAMER_EVENT, wrapped);
     };
   },
   onToggleFullscreen: (listener: () => void) => {

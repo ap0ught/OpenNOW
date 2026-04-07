@@ -1,0 +1,46 @@
+#pragma once
+
+#include <memory>
+#include <string>
+
+#include "opennow/native/input_bridge.hpp"
+#include "opennow/native/ipc_client.hpp"
+#include "opennow/native/media_pipeline.hpp"
+#include "opennow/native/webrtc_session.hpp"
+
+#if defined(OPENNOW_HAS_SDL3)
+#include <SDL3/SDL.h>
+#else
+struct SDL_Window;
+struct SDL_Renderer;
+#endif
+
+namespace opennow::native {
+
+class Application {
+ public:
+  Application(std::string ipc_host, int ipc_port, std::string session_id);
+  ~Application();
+
+  bool Initialize(std::string& error);
+  int Run();
+
+ private:
+  void HandleIncomingJson(const std::string& json);
+  void EmitState(const std::string& state, const std::string& message, const std::string& detail = "");
+  void EmitLog(const std::string& message);
+  void EmitInput(InputPacket packet);
+
+  std::string ipc_host_;
+  int ipc_port_;
+  std::string session_id_;
+  SDL_Window* window_{nullptr};
+  SDL_Renderer* renderer_{nullptr};
+  bool running_{false};
+  IpcClient ipc_client_;
+  InputBridge input_bridge_;
+  MediaPipeline media_pipeline_;
+  WebRtcSession webrtc_session_;
+};
+
+}  // namespace opennow::native

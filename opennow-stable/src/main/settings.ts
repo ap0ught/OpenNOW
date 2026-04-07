@@ -67,6 +67,8 @@ export interface Settings {
   gameLanguage: GameLanguage;
   /** Experimental request for Low Latency, Low Loss, Scalable throughput on new sessions */
   enableL4S: boolean;
+  /** Route streaming through the external OpenNOW Native Streamer process instead of Chromium WebRTC. */
+  enableNativeStreamer: boolean;
 }
 
 const defaultStopShortcut = "Ctrl+Shift+Q";
@@ -108,6 +110,7 @@ const DEFAULT_SETTINGS: Settings = {
   windowHeight: 900,
   gameLanguage: "en_US",
   enableL4S: false,
+  enableNativeStreamer: false,
 };
 
 export class SettingsManager {

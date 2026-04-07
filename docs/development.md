@@ -2,6 +2,8 @@
 
 This guide covers the active Electron-based OpenNOW client in [`opennow-stable/`](../opennow-stable).
 
+The repository also contains the native streamer project in [`opennow-native-streamer/`](../opennow-native-streamer).
+
 ## Prerequisites
 
 - Node.js 22 or newer
@@ -42,11 +44,16 @@ npm run dist:signed
 ## Workspace Layout
 
 ```text
+opennow-native-streamer/
+├── include/          Native IPC, WebRTC, media, input, platform headers
+├── src/              SDL app, IPC client, SDP helpers, media/input scaffolding
+└── CMakeLists.txt    Native build entry point
+
 opennow-stable/
 ├── src/
 │   ├── main/           Electron main process
 │   │   ├── gfn/        Auth, game catalogs, subscriptions, CloudMatch, signaling
-│   │   └── services/   Cache and refresh helpers
+│   │   └── services/   Cache helpers and native streamer manager
 │   ├── preload/        Safe API exposed to the renderer
 │   ├── renderer/src/   React application
 │   │   ├── components/ Screens, stream UI, settings, library, navigation
@@ -68,6 +75,7 @@ The main process handles platform and system responsibilities:
 - Game catalog fetches and cache refresh
 - CloudMatch session creation, polling, claiming, and stopping
 - Signaling and low-level Electron integration
+- Native streamer process management and IPC bridging
 - Local media management for screenshots and recordings
 - Persistent settings storage
 
@@ -90,8 +98,30 @@ The renderer is a React app responsible for:
 - Login and provider selection
 - Browsing the catalog and public listings
 - Managing stream launch state and session recovery
-- Rendering the WebRTC stream
+- Rendering the Chromium/WebRTC stream when the native backend is disabled
 - Handling controller input, shortcuts, stats overlay, screenshots, recordings, and settings UI
+
+### Native streamer
+
+The native streamer is a separate process/window used when `enableNativeStreamer` is enabled in settings.
+
+Responsibilities:
+
+- local socket-based IPC handshake with Electron main
+- SDP/NVST protocol helper ownership
+- native SDL window lifecycle
+- libdatachannel peer connection ownership for signaling handoff, answer generation, ICE, and data channels
+- FFmpeg decode/audio output ownership for received media frames
+- native mouse/keyboard/controller capture using the same GFN packet semantics as the Chromium path
+
+Typical local build flow:
+
+```bash
+cmake -S opennow-native-streamer -B opennow-native-streamer/build
+cmake --build opennow-native-streamer/build
+```
+
+If the binary is not found, the Electron app now fails clearly when the native toggle is enabled instead of corrupting the legacy Chromium path.
 
 Key entry points:
 

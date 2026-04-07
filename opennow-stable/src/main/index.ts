@@ -18,6 +18,7 @@ import { initLogCapture, exportLogs } from "@shared/logger";
 import { cacheManager } from "./services/cacheManager";
 import { refreshScheduler } from "./services/refreshScheduler";
 import { cacheEventBus } from "./services/cacheEventBus";
+import { NativeStreamerManager } from "./services/nativeStreamerManager";
 import {
   fetchMainGamesUncached,
   fetchLibraryGamesUncached,
@@ -38,7 +39,12 @@ import type {
   SendAnswerRequest,
   IceCandidatePayload,
   KeyframeRequest,
+  NativeStreamerEvent,
+  NativeStreamerStartRequest,
+  NativeStreamerStateSnapshot,
+  NativeStreamerStopRequest,
   Settings,
+  SignalingTarget,
   SubscriptionFetchRequest,
   SessionConflictChoice,
   PingResult,
@@ -185,8 +191,10 @@ app.commandLine.appendSwitch("max-gum-fps", "999");
 let mainWindow: BrowserWindow | null = null;
 let signalingClient: GfnSignalingClient | null = null;
 let signalingClientKey: string | null = null;
+let signalingTarget: SignalingTarget = "renderer-webrtc";
 let authService: AuthService;
 let settingsManager: SettingsManager;
+let nativeStreamerManager: NativeStreamerManager;
 const SCREENSHOT_LIMIT = 60;
 
 function getScreenshotDirectory(): string {
@@ -486,6 +494,20 @@ function emitToRenderer(event: MainToRendererSignalingEvent): void {
   }
 }
 
+function emitNativeStreamerEvent(event: NativeStreamerEvent): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC_CHANNELS.NATIVE_STREAMER_EVENT, event);
+  }
+}
+
+async function routeSignalingEvent(event: MainToRendererSignalingEvent): Promise<void> {
+  if (signalingTarget === "native-streamer") {
+    await nativeStreamerManager.handleSignalingEvent(event);
+    return;
+  }
+  emitToRenderer(event);
+}
+
 async function createMainWindow(): Promise<void> {
   const preloadMjsPath = join(__dirname, "../preload/index.mjs");
   const preloadJsPath = join(__dirname, "../preload/index.js");
@@ -722,7 +744,8 @@ function registerIpcHandlers(): void {
     IPC_CHANNELS.CONNECT_SIGNALING,
     async (_event, payload: SignalingConnectRequest): Promise<void> => {
       const nextKey = `${payload.sessionId}|${payload.signalingServer}|${payload.signalingUrl ?? ""}`;
-      if (signalingClient && signalingClientKey === nextKey) {
+      const nextTarget = payload.target ?? "renderer-webrtc";
+      if (signalingClient && signalingClientKey === nextKey && signalingTarget === nextTarget) {
         console.log("[Signaling] Reuse existing signaling connection (duplicate connect request ignored)");
         return;
       }
@@ -737,7 +760,14 @@ function registerIpcHandlers(): void {
         payload.signalingUrl,
       );
       signalingClientKey = nextKey;
-      signalingClient.onEvent(emitToRenderer);
+      signalingTarget = nextTarget;
+      signalingClient.onEvent((event) => {
+        void routeSignalingEvent(event).catch((error) => {
+          const message = `Failed to route signaling event: ${String(error)}`;
+          console.error(message);
+          emitToRenderer({ type: "error", message });
+        });
+      });
       await signalingClient.connect();
     },
   );
@@ -746,6 +776,7 @@ function registerIpcHandlers(): void {
     signalingClient?.disconnect();
     signalingClient = null;
     signalingClientKey = null;
+    signalingTarget = "renderer-webrtc";
   });
 
   ipcMain.handle(IPC_CHANNELS.SEND_ANSWER, async (_event, payload: SendAnswerRequest) => {
@@ -767,6 +798,24 @@ function registerIpcHandlers(): void {
       throw new Error("Signaling is not connected");
     }
     return signalingClient.requestKeyframe(payload);
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.NATIVE_STREAMER_START,
+    async (_event, payload: NativeStreamerStartRequest): Promise<NativeStreamerStateSnapshot> => {
+      return nativeStreamerManager.start(payload);
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.NATIVE_STREAMER_STOP,
+    async (_event, payload: NativeStreamerStopRequest = {}): Promise<void> => {
+      await nativeStreamerManager.stop(payload);
+    },
+  );
+
+  ipcMain.handle(IPC_CHANNELS.NATIVE_STREAMER_STATE_GET, async (): Promise<NativeStreamerStateSnapshot> => {
+    return nativeStreamerManager.getState();
   });
 
   // Toggle fullscreen via IPC (for completeness)
@@ -1157,6 +1206,22 @@ app.whenReady().then(async () => {
   await authService.initialize();
 
   settingsManager = getSettingsManager();
+  nativeStreamerManager = new NativeStreamerManager({
+    workspaceRoot: resolve(__dirname, "../../../.."),
+    onAnswer: async (payload) => {
+      if (!signalingClient) {
+        throw new Error("Signaling is not connected");
+      }
+      await signalingClient.sendAnswer(payload);
+    },
+    onLocalIceCandidate: async (candidate) => {
+      if (!signalingClient) {
+        throw new Error("Signaling is not connected");
+      }
+      await signalingClient.sendIceCandidate(candidate);
+    },
+  });
+  nativeStreamerManager.onEvent(emitNativeStreamerEvent);
 
   // Request microphone permission on macOS at startup
   if (process.platform === "darwin") {
@@ -1254,6 +1319,8 @@ app.on("before-quit", () => {
   signalingClient?.disconnect();
   signalingClient = null;
   signalingClientKey = null;
+  signalingTarget = "renderer-webrtc";
+  void nativeStreamerManager?.stop({ reason: "app-quit" });
 });
 
 // Export for use by other modules
