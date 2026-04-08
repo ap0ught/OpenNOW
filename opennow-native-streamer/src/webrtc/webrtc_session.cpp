@@ -139,6 +139,7 @@ bool WebRtcSession::HandleOffer(const std::string& offer_sdp, std::string& error
 #else
   pending_offer_sdp_ = offer_sdp;
   media_failure_emitted_ = false;
+  manual_media_candidate_injected_ = false;
   auto fixed_offer = FixServerIp(offer_sdp, !media_connection_ip_.empty() ? media_connection_ip_ : server_ip_);
   last_server_ice_ufrag_ = ExtractIceUfragFromOffer(fixed_offer);
   fixed_offer = RewriteH265LevelIdByProfile(fixed_offer, 153, 153);
@@ -156,9 +157,11 @@ bool WebRtcSession::HandleOffer(const std::string& offer_sdp, std::string& error
 
   try {
     answer_sent_ = false;
+    Log(std::string("Applying remote offer SDP (") + std::to_string(fixed_offer.size()) + " chars)");
     peer_connection_->setRemoteDescription(rtc::Description(fixed_offer, "offer"));
     EmitState("connecting", "Remote offer applied");
-    TryInjectManualMediaCandidate();
+    Log("Remote offer accepted; generating native SDP answer");
+    peer_connection_->setLocalDescription();
     return true;
   } catch (const std::exception& ex) {
     error = ex.what();
@@ -175,9 +178,11 @@ void WebRtcSession::AddRemoteIce(const std::string& candidate_json) {
   }
   const auto candidate = FindJsonString(candidate_json, "candidate");
   if (!candidate || candidate->empty()) {
+    Log("Ignoring remote ICE payload without candidate string");
     return;
   }
   const auto mid = FindJsonString(candidate_json, "sdpMid");
+  Log(std::string("Adding remote ICE candidate (mid=") + (mid ? *mid : std::string("<none>")) + "): " + *candidate);
   try {
     if (mid && !mid->empty()) {
       peer_connection_->addRemoteCandidate(rtc::Candidate(*candidate, *mid));
@@ -210,6 +215,7 @@ void WebRtcSession::Disconnect() {
   answer_sent_ = false;
   input_ready_ = false;
   media_failure_emitted_ = false;
+  manual_media_candidate_injected_ = false;
 }
 
 bool WebRtcSession::SendInputPacket(const InputPacket& packet) {
@@ -313,6 +319,7 @@ void WebRtcSession::ConfigurePeerCallbacks() {
     if (description.typeString() != "answer" || answer_sent_) {
       return;
     }
+    Log(std::string("Native local description ready (type=") + description.typeString() + ")");
     auto answer = MungeAnswerSdp(ExtractLocalDescriptionSdp(description), max_bitrate_kbps_);
     const auto credentials = ExtractIceCredentials(answer);
     const auto nvst = BuildNvstSdp(
@@ -333,6 +340,7 @@ void WebRtcSession::ConfigurePeerCallbacks() {
   });
 
   peer_connection_->onLocalCandidate([this](rtc::Candidate candidate) {
+    Log(std::string("Emitting local ICE candidate (mid=") + candidate.mid() + "): " + candidate.candidate());
     std::ostringstream payload;
     payload << "{\"candidate\":\"" << EscapeJson(candidate.candidate()) << "\",\"sdpMid\":";
     if (candidate.mid().empty()) {
@@ -439,7 +447,7 @@ void WebRtcSession::ConfigureTrackHandlers() {
 
 void WebRtcSession::TryInjectManualMediaCandidate() {
 #if defined(OPENNOW_HAS_LIBDATACHANNEL)
-  if (!peer_connection_ || media_connection_port_ <= 0) {
+  if (!peer_connection_ || media_connection_port_ <= 0 || manual_media_candidate_injected_) {
     return;
   }
   const auto public_ip = ExtractPublicIp(media_connection_ip_);
@@ -447,11 +455,16 @@ void WebRtcSession::TryInjectManualMediaCandidate() {
     return;
   }
   const std::string candidate = "candidate:1 1 udp 2130706431 " + *public_ip + " " + std::to_string(media_connection_port_) + " typ host";
+  Log(std::string("Injecting manual media ICE candidate: ") + candidate);
   try {
     peer_connection_->addRemoteCandidate(rtc::Candidate(candidate, "0"));
+    manual_media_candidate_injected_ = true;
+    Log("Manual media ICE candidate injected on mid 0");
   } catch (...) {
     try {
       peer_connection_->addRemoteCandidate(rtc::Candidate(candidate, "1"));
+      manual_media_candidate_injected_ = true;
+      Log("Manual media ICE candidate injected on mid 1");
     } catch (...) {
       Log("Manual ICE candidate injection failed");
     }

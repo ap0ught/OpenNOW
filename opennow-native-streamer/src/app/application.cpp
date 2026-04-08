@@ -131,22 +131,41 @@ void Application::HandleIncomingJson(const std::string& json) {
   }
 
   if (*type == "signaling-connected") {
+    EmitLog("Electron main reported signaling connected");
     EmitState("connecting", "Signaling connected");
     return;
   }
 
   if (*type == "signaling-offer") {
     if (const auto sdp = FindJsonString(json, "sdp")) {
+      EmitLog(std::string("Received signaling offer from Electron (") + std::to_string(sdp->size()) + " chars)");
       std::string error;
       if (!webrtc_session_.HandleOffer(*sdp, error)) {
         EmitState("failed", "Offer handling failed", error);
       }
+    } else {
+      EmitLog("Received signaling-offer envelope without SDP payload");
     }
     return;
   }
 
   if (*type == "signaling-remote-ice") {
+    EmitLog("Received remote ICE candidate from Electron");
     webrtc_session_.AddRemoteIce(json);
+    return;
+  }
+
+  if (*type == "signaling-disconnected") {
+    const auto reason = FindJsonString(json, "reason");
+    EmitLog(std::string("Electron main reported signaling disconnected: ") + (reason ? *reason : std::string("<no-reason>")));
+    EmitState("failed", "Signaling disconnected", reason.value_or("socket closed"));
+    return;
+  }
+
+  if (*type == "signaling-error") {
+    const auto message = FindJsonString(json, "message");
+    EmitLog(std::string("Electron main reported signaling error: ") + (message ? *message : std::string("<no-message>")));
+    EmitState("failed", "Signaling error", message.value_or("unknown signaling error"));
     return;
   }
 

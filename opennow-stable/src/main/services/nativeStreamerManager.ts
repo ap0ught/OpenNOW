@@ -134,10 +134,12 @@ export class NativeStreamerManager {
   async handleSignalingEvent(event: MainToRendererSignalingEvent): Promise<void> {
     switch (event.type) {
       case "connected":
+        this.emit({ type: "log", message: "Routing signaling connected event to native streamer" });
         this.updateState("connecting", "Signaling connected");
         this.send({ version: PROTOCOL_VERSION, type: "signaling-connected" });
         return;
       case "offer":
+        this.emit({ type: "log", message: `Routing signaling offer to native streamer (${event.sdp.length} chars)` });
         this.updateState("connecting", "Received offer from signaling server");
         this.send({
           version: PROTOCOL_VERSION,
@@ -146,6 +148,7 @@ export class NativeStreamerManager {
         });
         return;
       case "remote-ice":
+        this.emit({ type: "log", message: `Routing remote ICE candidate to native streamer (mid=${event.candidate.sdpMid ?? "<none>"})` });
         this.send({
           version: PROTOCOL_VERSION,
           type: "signaling-remote-ice",
@@ -153,6 +156,7 @@ export class NativeStreamerManager {
         });
         return;
       case "disconnected":
+        this.emit({ type: "log", message: `Signaling disconnected while native streamer active: ${event.reason}` });
         this.send({
           version: PROTOCOL_VERSION,
           type: "signaling-disconnected",
@@ -161,6 +165,7 @@ export class NativeStreamerManager {
         this.updateState("failed", "Signaling disconnected", event.reason);
         return;
       case "error":
+        this.emit({ type: "log", message: `Signaling error while native streamer active: ${event.message}` });
         this.send({
           version: PROTOCOL_VERSION,
           type: "signaling-error",
@@ -335,6 +340,7 @@ export class NativeStreamerManager {
         return;
       case "answer":
         if (message.payload?.sdp && typeof message.payload.sdp === "string") {
+          this.emit({ type: "log", message: `Forwarding native SDP answer to signaling (${message.payload.sdp.length} chars)` });
           await this.onAnswer({
             sdp: message.payload.sdp,
             nvstSdp:
@@ -346,6 +352,7 @@ export class NativeStreamerManager {
         return;
       case "local-ice":
         if (message.payload?.candidate && typeof message.payload.candidate === "string") {
+          this.emit({ type: "log", message: `Forwarding native local ICE candidate to signaling (mid=${typeof message.payload.sdpMid === "string" ? message.payload.sdpMid : "<none>"})` });
           await this.onLocalIceCandidate({
             candidate: message.payload.candidate,
             sdpMid:
