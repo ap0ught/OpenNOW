@@ -138,6 +138,7 @@ bool WebRtcSession::HandleOffer(const std::string& offer_sdp, std::string& error
   return false;
 #else
   pending_offer_sdp_ = offer_sdp;
+  media_failure_emitted_ = false;
   auto fixed_offer = FixServerIp(offer_sdp, !media_connection_ip_.empty() ? media_connection_ip_ : server_ip_);
   last_server_ice_ufrag_ = ExtractIceUfragFromOffer(fixed_offer);
   fixed_offer = RewriteH265LevelIdByProfile(fixed_offer, 153, 153);
@@ -208,6 +209,7 @@ void WebRtcSession::Disconnect() {
 #endif
   answer_sent_ = false;
   input_ready_ = false;
+  media_failure_emitted_ = false;
 }
 
 bool WebRtcSession::SendInputPacket(const InputPacket& packet) {
@@ -279,8 +281,18 @@ void WebRtcSession::ConfigurePeerCallbacks() {
   peer_connection_->onStateChange([this](rtc::PeerConnection::State state) {
     switch (state) {
       case rtc::PeerConnection::State::Connected:
-        EmitState("streaming", "Native WebRTC connected");
-        TryInjectManualMediaCandidate();
+        if (!media_receive_supported_) {
+          if (!media_failure_emitted_) {
+            media_failure_emitted_ = true;
+            EmitState(
+                "failed",
+                "Native streamer build lacks media receive support",
+                "libdatachannel was built without media track handlers, so video/audio cannot be received in this build");
+          }
+        } else {
+          EmitState("streaming", "Native WebRTC connected");
+          TryInjectManualMediaCandidate();
+        }
         break;
       case rtc::PeerConnection::State::Failed:
         EmitState("failed", "Native WebRTC failed");
@@ -385,6 +397,7 @@ void WebRtcSession::ConfigureInputChannels() {
 
 void WebRtcSession::ConfigureTrackHandlers() {
 #if defined(OPENNOW_HAS_LIBDATACHANNEL) && defined(OPENNOW_HAS_LIBDATACHANNEL_MEDIA)
+  media_receive_supported_ = true;
   peer_connection_->onTrack([this](std::shared_ptr<rtc::Track> track) {
     const auto description = track->description();
     if (description.mid() == "video" || description.type() == "video") {
@@ -414,7 +427,13 @@ void WebRtcSession::ConfigureTrackHandlers() {
     });
   });
 #elif defined(OPENNOW_HAS_LIBDATACHANNEL)
+  media_receive_supported_ = false;
   Log("libdatachannel media support is unavailable; native track receive handlers are disabled for this build");
+  EmitState(
+      "failed",
+      "Native streamer build lacks media receive support",
+      "Install a media-enabled libdatachannel package to enable native video/audio playback");
+  media_failure_emitted_ = true;
 #endif
 }
 

@@ -69,6 +69,8 @@ class WebRtcSession {
 
   bool answer_sent_ = false;
   bool input_ready_ = false;
+  bool media_receive_supported_ = true;
+  bool media_failure_emitted_ = false;
   int input_protocol_version_ = 2;
   std::string pending_offer_sdp_;
   std::string last_server_ice_ufrag_;

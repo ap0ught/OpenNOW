@@ -102,5 +102,5 @@ jobs:
           name: opennow-native-streamer-${{ matrix.label }}
           path: |
             opennow-native-streamer/build/opennow-native-streamer
-            opennow-native-streamer/build/Release/opennow-native-streamer.exe
+            opennow-native-streamer/build/opennow-native-streamer.exe
           if-no-files-found: error
