@@ -6,6 +6,7 @@
 #if defined(OPENNOW_HAS_FFMPEG)
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavutil/log.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
@@ -15,6 +16,24 @@ extern "C" {
 #endif
 
 namespace opennow::native {
+
+#if defined(OPENNOW_HAS_FFMPEG)
+namespace {
+std::mutex g_ffmpeg_log_mutex;
+bool g_suppressed_deprecated_pixel_format_warning = false;
+
+void OpenNowFfmpegLogCallback(void* avcl, int level, const char* fmt, va_list args) {
+  if (fmt != nullptr && std::strstr(fmt, "deprecated pixel format used") != nullptr) {
+    std::lock_guard<std::mutex> lock(g_ffmpeg_log_mutex);
+    if (g_suppressed_deprecated_pixel_format_warning) {
+      return;
+    }
+    g_suppressed_deprecated_pixel_format_warning = true;
+  }
+  av_log_default_callback(avcl, level, fmt, args);
+}
+}  // namespace
+#endif
 
 MediaPipeline::~MediaPipeline() {
   Shutdown();
@@ -42,6 +61,7 @@ bool MediaPipeline::Initialize(SDL_Renderer* renderer, std::string& error) {
   SDL_ResumeAudioStreamDevice(audio_stream_);
 #endif
 #if defined(OPENNOW_HAS_FFMPEG)
+  ConfigureFfmpegLogging();
   packet_ = av_packet_alloc();
   video_frame_ = av_frame_alloc();
   audio_frame_ = av_frame_alloc();
@@ -150,6 +170,12 @@ void MediaPipeline::Log(const std::string& message) const {
   if (logger_) {
     logger_(message);
   }
+}
+
+void MediaPipeline::ConfigureFfmpegLogging() {
+#if defined(OPENNOW_HAS_FFMPEG)
+  av_log_set_callback(OpenNowFfmpegLogCallback);
+#endif
 }
 
 #if defined(OPENNOW_HAS_SDL3) && defined(OPENNOW_HAS_FFMPEG)
@@ -295,7 +321,10 @@ void MediaPipeline::StageFrame(AVFrame* frame) {
     std::lock_guard<std::mutex> lock(pending_video_mutex_);
     pending_video_frame_ = std::move(pending);
   }
-  Log("Staged decoded video frame on worker thread");
+  if (!logged_stage_thread_) {
+    logged_stage_thread_ = true;
+    Log("Staged decoded video frames on worker thread");
+  }
 }
 
 void MediaPipeline::UploadPendingFrame(const PendingVideoFrame& frame) {
@@ -320,7 +349,10 @@ void MediaPipeline::UploadPendingFrame(const PendingVideoFrame& frame) {
     Log(SDL_GetError());
     return;
   }
-  Log("Uploaded staged video frame on render thread");
+  if (!logged_upload_thread_) {
+    logged_upload_thread_ = true;
+    Log("Uploaded staged video frames on render thread");
+  }
 }
 #endif
 

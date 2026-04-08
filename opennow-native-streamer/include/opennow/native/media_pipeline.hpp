@@ -55,6 +55,7 @@ class MediaPipeline {
 
  private:
   void Log(const std::string& message) const;
+  void ConfigureFfmpegLogging();
 
 #if defined(OPENNOW_HAS_SDL3) && defined(OPENNOW_HAS_FFMPEG)
   bool EnsureVideoDecoder(std::string& error);
@@ -77,6 +78,8 @@ class MediaPipeline {
   int audio_clock_rate_ = 48000;
   int audio_channels_ = 2;
   std::uint64_t rendered_frames_ = 0;
+  bool logged_stage_thread_ = false;
+  bool logged_upload_thread_ = false;
   mutable std::mutex pending_video_mutex_;
   std::optional<PendingVideoFrame> pending_video_frame_;
 #if defined(OPENNOW_HAS_SDL3) && defined(OPENNOW_HAS_FFMPEG)

@@ -12,6 +12,9 @@ Application::Application(std::string ipc_host, int ipc_port, std::string session
 
 Application::~Application() {
   webrtc_session_.Disconnect();
+#if defined(OPENNOW_HAS_SDL3)
+  SetStreamingActive(false);
+#endif
   media_pipeline_.Shutdown();
   ipc_client_.Disconnect();
 #if defined(OPENNOW_HAS_SDL3)
@@ -71,6 +74,7 @@ bool Application::Initialize(std::string& error) {
   webrtc_session_.SetMediaPipeline(&media_pipeline_);
   webrtc_session_.SetInputReadyCallback([this](int protocol_version) {
     input_bridge_.OnInputReady(protocol_version);
+    SetStreamingActive(true);
     EmitState("streaming", "Input channel ready", "protocol v" + std::to_string(protocol_version));
   });
   input_bridge_.SetSendPacket([this](InputPacket packet) {
@@ -93,8 +97,18 @@ int Application::Run() {
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
       if (event.type == SDL_EVENT_QUIT) {
+        SetStreamingActive(false);
         running_ = false;
         break;
+      }
+      if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && stream_active_) {
+        SetMouseCapture(true, "mouse click");
+      }
+      if (event.type == SDL_EVENT_WINDOW_FOCUS_GAINED && stream_active_) {
+        SetMouseCapture(true, "window focus");
+      }
+      if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST && mouse_capture_enabled_) {
+        SetMouseCapture(false, "window focus lost");
       }
       input_bridge_.HandleEvent(event);
     }
@@ -157,6 +171,7 @@ void Application::HandleIncomingJson(const std::string& json) {
 
   if (*type == "signaling-disconnected") {
     const auto reason = FindJsonString(json, "reason");
+    SetStreamingActive(false);
     EmitLog(std::string("Electron main reported signaling disconnected: ") + (reason ? *reason : std::string("<no-reason>")));
     EmitState("failed", "Signaling disconnected", reason.value_or("socket closed"));
     return;
@@ -164,6 +179,7 @@ void Application::HandleIncomingJson(const std::string& json) {
 
   if (*type == "signaling-error") {
     const auto message = FindJsonString(json, "message");
+    SetStreamingActive(false);
     EmitLog(std::string("Electron main reported signaling error: ") + (message ? *message : std::string("<no-message>")));
     EmitState("failed", "Signaling error", message.value_or("unknown signaling error"));
     return;
@@ -171,6 +187,7 @@ void Application::HandleIncomingJson(const std::string& json) {
 
   if (*type == "disconnect") {
     running_ = false;
+    SetStreamingActive(false);
     webrtc_session_.Disconnect();
     EmitState("exited", "Disconnect requested by Electron shell");
   }
@@ -194,6 +211,67 @@ void Application::EmitInput(InputPacket packet) {
   if (!webrtc_session_.SendInputPacket(packet)) {
     EmitLog("Input packet dropped because the data channel is not open yet");
   }
+}
+
+void Application::SetStreamingActive(bool active) {
+#if defined(OPENNOW_HAS_SDL3)
+  stream_active_ = active;
+  if (active) {
+    SetFullscreen(true, "stream became active");
+    return;
+  }
+  SetMouseCapture(false, "stream stopped");
+  SetFullscreen(false, "stream stopped");
+#else
+  stream_active_ = active;
+#endif
+}
+
+void Application::SetFullscreen(bool enabled, const std::string& reason) {
+#if defined(OPENNOW_HAS_SDL3)
+  if (!window_ || fullscreen_enabled_ == enabled) {
+    return;
+  }
+  if (!SDL_SetWindowFullscreen(window_, enabled)) {
+    EmitLog(
+        std::string(enabled ? "Failed to enter fullscreen" : "Failed to leave fullscreen") + " (" + reason + "): " +
+        SDL_GetError());
+    return;
+  }
+  SDL_SyncWindow(window_);
+  fullscreen_enabled_ = enabled;
+  EmitLog(std::string(enabled ? "Native window entered fullscreen" : "Native window left fullscreen") + " (" + reason + ")");
+#else
+  (void)enabled;
+  (void)reason;
+#endif
+}
+
+void Application::SetMouseCapture(bool enabled, const std::string& reason) {
+#if defined(OPENNOW_HAS_SDL3)
+  if (!window_ || mouse_capture_enabled_ == enabled) {
+    return;
+  }
+  bool ok = true;
+  if (!SDL_SetWindowMouseGrab(window_, enabled)) {
+    ok = false;
+    EmitLog(std::string("SDL_SetWindowMouseGrab failed (") + reason + "): " + SDL_GetError());
+  }
+  if (!SDL_SetWindowRelativeMouseMode(window_, enabled)) {
+    ok = false;
+    EmitLog(std::string("SDL_SetWindowRelativeMouseMode failed (") + reason + "): " + SDL_GetError());
+  }
+  if (!SDL_CaptureMouse(enabled)) {
+    ok = false;
+    EmitLog(std::string("SDL_CaptureMouse failed (") + reason + "): " + SDL_GetError());
+  }
+  mouse_capture_enabled_ = enabled && ok;
+  EmitLog(std::string(mouse_capture_enabled_ ? "Mouse capture/relative mode active" : "Mouse capture/relative mode released") +
+          " (" + reason + ")");
+#else
+  (void)enabled;
+  (void)reason;
+#endif
 }
 
 }  // namespace opennow::native

@@ -30,6 +30,9 @@ class Application {
   void EmitState(const std::string& state, const std::string& message, const std::string& detail = "");
   void EmitLog(const std::string& message);
   void EmitInput(InputPacket packet);
+  void SetStreamingActive(bool active);
+  void SetFullscreen(bool enabled, const std::string& reason);
+  void SetMouseCapture(bool enabled, const std::string& reason);
 
   std::string ipc_host_;
   int ipc_port_;
@@ -37,6 +40,9 @@ class Application {
   SDL_Window* window_{nullptr};
   SDL_Renderer* renderer_{nullptr};
   bool running_{false};
+  bool stream_active_{false};
+  bool fullscreen_enabled_{false};
+  bool mouse_capture_enabled_{false};
   IpcClient ipc_client_;
   InputBridge input_bridge_;
   MediaPipeline media_pipeline_;
