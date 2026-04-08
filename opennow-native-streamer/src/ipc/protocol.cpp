@@ -5,6 +5,45 @@
 
 namespace opennow::native {
 
+namespace {
+
+std::string UnescapeJsonString(std::string_view input) {
+  std::string out;
+  out.reserve(input.size());
+  bool escaping = false;
+  for (const char ch : input) {
+    if (!escaping) {
+      if (ch == '\\') {
+        escaping = true;
+      } else {
+        out.push_back(ch);
+      }
+      continue;
+    }
+
+    switch (ch) {
+      case '\"': out.push_back('\"'); break;
+      case '\\': out.push_back('\\'); break;
+      case 'n': out.push_back('\n'); break;
+      case 'r': out.push_back('\r'); break;
+      case 't': out.push_back('\t'); break;
+      case 'b': out.push_back('\b'); break;
+      case 'f': out.push_back('\f'); break;
+      case '/': out.push_back('/'); break;
+      default:
+        out.push_back(ch);
+        break;
+    }
+    escaping = false;
+  }
+  if (escaping) {
+    out.push_back('\\');
+  }
+  return out;
+}
+
+}  // namespace
+
 std::vector<std::uint8_t> FrameJson(std::string_view json) {
   const auto size = static_cast<std::uint32_t>(json.size());
   std::vector<std::uint8_t> framed(4 + json.size());

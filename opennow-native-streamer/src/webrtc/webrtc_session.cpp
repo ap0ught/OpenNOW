@@ -158,14 +158,21 @@ bool WebRtcSession::HandleOffer(const std::string& offer_sdp, std::string& error
   try {
     answer_sent_ = false;
     Log(std::string("Applying remote offer SDP (") + std::to_string(fixed_offer.size()) + " chars)");
-    peer_connection_->setRemoteDescription(rtc::Description(fixed_offer, "offer"));
+    peer_connection_->setRemoteDescription(rtc::Description(fixed_offer, rtc::Description::Type::Offer));
     Log("setRemoteDescription completed successfully");
     EmitState("connecting", "Remote offer applied");
     Log("Invoking setLocalDescription(answer)");
     peer_connection_->setLocalDescription(rtc::Description::Type::Answer);
+    Log("setLocalDescription(answer) returned without throwing");
     return true;
   } catch (const std::exception& ex) {
     error = ex.what();
+    Log(std::string("Offer handling threw std::exception: ") + error);
+    EmitState("failed", "Offer handling failed", error);
+    return false;
+  } catch (...) {
+    error = "Unknown non-standard exception while applying remote offer";
+    Log(error);
     EmitState("failed", "Offer handling failed", error);
     return false;
   }
