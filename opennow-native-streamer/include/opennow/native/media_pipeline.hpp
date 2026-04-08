@@ -82,6 +82,7 @@ class MediaPipeline {
   void UploadPendingFrame(const PendingVideoFrame& frame);
   bool StageFrameDirect(::AVFrame* frame);
   void StageFrameRgba(::AVFrame* frame);
+  std::optional<PendingVideoFrame> ConvertPendingFrameToRgba(const PendingVideoFrame& frame);
   bool EnsureTransferFrame();
   bool TryInitializeHardwareDecode(const ::AVCodec* codec, std::string& error);
   static enum AVPixelFormat SelectHardwarePixelFormat(::AVCodecContext* context, const enum AVPixelFormat* pixel_formats);
@@ -111,6 +112,7 @@ class MediaPipeline {
   bool logged_upload_thread_ = false;
   bool logged_decoder_path_ = false;
   bool using_hardware_decode_ = false;
+  bool prefer_rgba_upload_ = false;
   std::string video_path_ = "video path: awaiting decoder initialization";
   mutable std::mutex pending_video_mutex_;
   std::optional<PendingVideoFrame> pending_video_frame_;

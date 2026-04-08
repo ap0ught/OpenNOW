@@ -1231,6 +1231,21 @@ export function App(): JSX.Element {
   }, [sessionStartedAtMs, streamStatus]);
 
   useEffect(() => {
+    if (streamStatus !== "streaming" || sessionStartedAtMs === null) {
+      setSessionElapsedSeconds(0);
+      return;
+    }
+
+    const updateElapsed = () => {
+      setSessionElapsedSeconds(Math.max(0, Math.floor((Date.now() - sessionStartedAtMs) / 1000)));
+    };
+
+    updateElapsed();
+    const timer = window.setInterval(updateElapsed, 1000);
+    return () => window.clearInterval(timer);
+  }, [sessionStartedAtMs, streamStatus]);
+
+  useEffect(() => {
     if (!streamWarning) return;
     const warning = streamWarning;
     const timer = window.setTimeout(() => {

@@ -147,6 +147,7 @@ void MediaPipeline::Shutdown() {
 
 void MediaPipeline::ConfigureVideoCodec(const std::string& codec) {
   video_codec_ = codec;
+  prefer_rgba_upload_ = false;
 }
 
 void MediaPipeline::ConfigureAudioCodec(const std::string& codec, int payload_type, int clock_rate, int channels) {
@@ -306,29 +307,64 @@ bool MediaPipeline::EnsureVideoDecoder(std::string& error) {
     error = "Requested video decoder is unavailable in FFmpeg";
     return false;
   }
-  video_decoder_ctx_ = avcodec_alloc_context3(codec);
-  if (!video_decoder_ctx_) {
-    error = "Failed to allocate video decoder context";
-    return false;
-  }
-  video_decoder_ctx_->opaque = this;
-  std::string hardware_error;
-  TryInitializeHardwareDecode(codec, hardware_error);
-  if (using_hardware_decode_) {
-    video_decoder_ctx_->get_format = &MediaPipeline::SelectHardwarePixelFormat;
-    video_decoder_ctx_->hw_device_ctx = av_buffer_ref(hw_device_ctx_);
-    LogVideoPath("video path: macOS VideoToolbox hardware decode + SDL YUV GPU upload");
-  } else {
-    if (!hardware_error.empty()) {
-      Log(std::string("VideoToolbox initialization unavailable, using fallback path: ") + hardware_error);
+
+  auto cleanup_decoder = [this]() {
+    if (video_decoder_ctx_) {
+      avcodec_free_context(&video_decoder_ctx_);
     }
-    LogVideoPath("video path: software decode + SDL YUV/RGBA upload fallback");
+    if (hw_device_ctx_) {
+      av_buffer_unref(&hw_device_ctx_);
+    }
+    using_hardware_decode_ = false;
+    hw_pixel_format_ = AV_PIX_FMT_NONE;
+  };
+
+  auto initialize_decoder = [&](bool allow_hardware, std::string& init_error) -> bool {
+    cleanup_decoder();
+    video_decoder_ctx_ = avcodec_alloc_context3(codec);
+    if (!video_decoder_ctx_) {
+      init_error = "Failed to allocate video decoder context";
+      return false;
+    }
+    video_decoder_ctx_->opaque = this;
+    if (allow_hardware) {
+      std::string hardware_error;
+      TryInitializeHardwareDecode(codec, hardware_error);
+      if (using_hardware_decode_) {
+        video_decoder_ctx_->get_format = &MediaPipeline::SelectHardwarePixelFormat;
+        video_decoder_ctx_->hw_device_ctx = av_buffer_ref(hw_device_ctx_);
+        LogVideoPath("video path: macOS VideoToolbox hardware decode + SDL YUV GPU upload");
+      } else if (!hardware_error.empty()) {
+        Log(std::string("VideoToolbox initialization unavailable, using fallback path: ") + hardware_error);
+      }
+    } else {
+      using_hardware_decode_ = false;
+      hw_pixel_format_ = AV_PIX_FMT_NONE;
+    }
+    if (!using_hardware_decode_) {
+      LogVideoPath(prefer_rgba_upload_ ? "video path: software decode + RGBA upload fallback" : "video path: software decode + SDL YUV/RGBA upload fallback");
+    }
+    if (avcodec_open2(video_decoder_ctx_, codec, nullptr) < 0) {
+      init_error = using_hardware_decode_ ? "Failed to open hardware-accelerated video decoder" : "Failed to open video decoder";
+      return false;
+    }
+    return true;
+  };
+
+  std::string hardware_attempt_error;
+  if (initialize_decoder(true, hardware_attempt_error)) {
+    return true;
   }
-  if (avcodec_open2(video_decoder_ctx_, codec, nullptr) < 0) {
-    error = using_hardware_decode_ ? "Failed to open hardware-accelerated video decoder" : "Failed to open video decoder";
-    return false;
+  if (using_hardware_decode_ || !hardware_attempt_error.empty()) {
+    Log(std::string("Retrying video decoder with software fallback after hardware init/open failure: ") + hardware_attempt_error);
   }
-  return true;
+  std::string software_attempt_error;
+  if (initialize_decoder(false, software_attempt_error)) {
+    return true;
+  }
+  error = software_attempt_error.empty() ? hardware_attempt_error : software_attempt_error;
+  cleanup_decoder();
+  return false;
 }
 
 bool MediaPipeline::EnsureAudioDecoder(std::string& error) {
@@ -444,6 +480,9 @@ void MediaPipeline::StageFrame(AVFrame* frame) {
 }
 
 bool MediaPipeline::StageFrameDirect(AVFrame* frame) {
+  if (prefer_rgba_upload_) {
+    return false;
+  }
   PendingVideoFrame pending;
   pending.width = frame->width;
   pending.height = frame->height;
@@ -540,15 +579,61 @@ void MediaPipeline::StageFrameRgba(AVFrame* frame) {
   }
 }
 
+std::optional<PendingVideoFrame> MediaPipeline::ConvertPendingFrameToRgba(const PendingVideoFrame& frame) {
+  if (frame.format == PendingVideoFormat::RGBA) {
+    return frame;
+  }
+
+  const AVPixelFormat source_format = frame.format == PendingVideoFormat::NV12 ? AV_PIX_FMT_NV12 : AV_PIX_FMT_YUV420P;
+  sws_context_ = sws_getCachedContext(
+      sws_context_,
+      frame.width,
+      frame.height,
+      source_format,
+      frame.width,
+      frame.height,
+      AV_PIX_FMT_RGBA,
+      SWS_FAST_BILINEAR,
+      nullptr,
+      nullptr,
+      nullptr);
+  if (!sws_context_) {
+    Log("Failed to create FFmpeg swscale context for YUV->RGBA fallback conversion");
+    return std::nullopt;
+  }
+
+  const std::uint8_t* src_data[4] = {
+      frame.plane0.data(),
+      frame.plane1.empty() ? nullptr : frame.plane1.data(),
+      frame.plane2.empty() ? nullptr : frame.plane2.data(),
+      nullptr,
+  };
+  int src_linesize[4] = {frame.pitch0, frame.pitch1, frame.pitch2, 0};
+
+  PendingVideoFrame rgba_frame;
+  rgba_frame.format = PendingVideoFormat::RGBA;
+  rgba_frame.width = frame.width;
+  rgba_frame.height = frame.height;
+  rgba_frame.pitch0 = frame.width * 4;
+  rgba_frame.timestamp_us = frame.timestamp_us;
+  rgba_frame.staged_at_us = TimestampUs();
+  rgba_frame.plane0.resize(static_cast<std::size_t>(rgba_frame.pitch0 * rgba_frame.height));
+  std::uint8_t* dst_data[4] = {rgba_frame.plane0.data(), nullptr, nullptr, nullptr};
+  int dst_linesize[4] = {rgba_frame.pitch0, 0, 0, 0};
+
+  sws_scale(sws_context_, src_data, src_linesize, 0, frame.height, dst_data, dst_linesize);
+  return rgba_frame;
+}
+
 void MediaPipeline::UploadPendingFrame(const PendingVideoFrame& frame) {
   if (!renderer_) {
     return;
   }
   const auto upload_started_at_us = TimestampUs();
   SDL_PixelFormat desired_format = SDL_PIXELFORMAT_RGBA32;
-  if (frame.format == PendingVideoFormat::NV12) {
+  if (!prefer_rgba_upload_ && frame.format == PendingVideoFormat::NV12) {
     desired_format = SDL_PIXELFORMAT_NV12;
-  } else if (frame.format == PendingVideoFormat::IYUV) {
+  } else if (!prefer_rgba_upload_ && frame.format == PendingVideoFormat::IYUV) {
     desired_format = SDL_PIXELFORMAT_IYUV;
   }
   if (!video_texture_ || texture_width_ != frame.width || texture_height_ != frame.height || texture_format_ != desired_format) {
@@ -561,23 +646,55 @@ void MediaPipeline::UploadPendingFrame(const PendingVideoFrame& frame) {
     texture_format_ = desired_format;
     video_texture_ = SDL_CreateTexture(renderer_, desired_format, SDL_TEXTUREACCESS_STREAMING, texture_width_, texture_height_);
     if (!video_texture_) {
+      const bool tried_yuv_format = desired_format == SDL_PIXELFORMAT_NV12 || desired_format == SDL_PIXELFORMAT_IYUV;
+      const std::string creation_error = SDL_GetError();
+      if (tried_yuv_format && !prefer_rgba_upload_) {
+        Log(std::string("YUV SDL texture creation failed; switching to sticky RGBA upload fallback: ") + creation_error);
+        prefer_rgba_upload_ = true;
+        texture_format_ = SDL_PIXELFORMAT_UNKNOWN;
+        auto rgba_frame = ConvertPendingFrameToRgba(frame);
+        if (rgba_frame) {
+          UploadPendingFrame(*rgba_frame);
+          return;
+        }
+        Log("Failed to convert YUV frame into RGBA fallback after SDL texture creation failure");
+        return;
+      }
       std::ostringstream fallback;
-      fallback << "Failed to create SDL texture for format " << static_cast<std::uint32_t>(desired_format) << ": " << SDL_GetError();
+      fallback << "Failed to create SDL texture for format " << static_cast<std::uint32_t>(desired_format) << ": " << creation_error;
       Log(fallback.str());
       return;
     }
     Log("Created/updated SDL video texture on render thread");
   }
   bool uploaded = false;
-  if (frame.format == PendingVideoFormat::NV12) {
+  if (!prefer_rgba_upload_ && frame.format == PendingVideoFormat::NV12) {
     uploaded = SDL_UpdateNVTexture(video_texture_, nullptr, frame.plane0.data(), frame.pitch0, frame.plane1.data(), frame.pitch1);
-  } else if (frame.format == PendingVideoFormat::IYUV) {
+  } else if (!prefer_rgba_upload_ && frame.format == PendingVideoFormat::IYUV) {
     uploaded = SDL_UpdateYUVTexture(video_texture_, nullptr, frame.plane0.data(), frame.pitch0, frame.plane1.data(), frame.pitch1, frame.plane2.data(), frame.pitch2);
   } else {
     uploaded = SDL_UpdateTexture(video_texture_, nullptr, frame.plane0.data(), frame.pitch0);
   }
   if (!uploaded) {
-    Log(SDL_GetError());
+    const bool tried_yuv_upload = !prefer_rgba_upload_ && (frame.format == PendingVideoFormat::NV12 || frame.format == PendingVideoFormat::IYUV);
+    const std::string upload_error = SDL_GetError();
+    if (tried_yuv_upload) {
+      Log(std::string("YUV SDL texture upload failed; switching to sticky RGBA upload fallback: ") + upload_error);
+      prefer_rgba_upload_ = true;
+      if (video_texture_) {
+        SDL_DestroyTexture(video_texture_);
+        video_texture_ = nullptr;
+      }
+      texture_format_ = SDL_PIXELFORMAT_UNKNOWN;
+      auto rgba_frame = ConvertPendingFrameToRgba(frame);
+      if (rgba_frame) {
+        UploadPendingFrame(*rgba_frame);
+        return;
+      }
+      Log("Failed to convert YUV frame into RGBA fallback after SDL upload failure");
+      return;
+    }
+    Log(upload_error);
     return;
   }
   upload_time_total_us_ += TimestampUs() - upload_started_at_us;
