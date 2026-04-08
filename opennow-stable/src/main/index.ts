@@ -1232,10 +1232,12 @@ app.whenReady().then(async () => {
   nativeStreamerManager = new NativeStreamerManager({
     workspaceRoot: resolveOpenNowRepoRoot(),
     onAnswer: async (payload) => {
+      console.log(`[Main] Native streamer requested sendAnswer (${payload.sdp.length} chars)`);
       if (!signalingClient) {
         throw new Error("Signaling is not connected");
       }
       await signalingClient.sendAnswer(payload);
+      console.log("[Main] Native streamer answer forwarded to signaling client");
     },
     onLocalIceCandidate: async (candidate) => {
       if (!signalingClient) {

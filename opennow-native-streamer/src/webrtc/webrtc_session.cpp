@@ -159,9 +159,10 @@ bool WebRtcSession::HandleOffer(const std::string& offer_sdp, std::string& error
     answer_sent_ = false;
     Log(std::string("Applying remote offer SDP (") + std::to_string(fixed_offer.size()) + " chars)");
     peer_connection_->setRemoteDescription(rtc::Description(fixed_offer, "offer"));
+    Log("setRemoteDescription completed successfully");
     EmitState("connecting", "Remote offer applied");
-    Log("Remote offer accepted; generating native SDP answer");
-    peer_connection_->setLocalDescription();
+    Log("Invoking setLocalDescription(answer)");
+    peer_connection_->setLocalDescription("answer");
     return true;
   } catch (const std::exception& ex) {
     error = ex.what();
@@ -268,7 +269,7 @@ bool WebRtcSession::EnsurePeerConnection(std::string& error) {
   }
   try {
     rtc::Configuration config;
-    config.disableAutoNegotiation = false;
+    config.disableAutoNegotiation = true;
     config.forceMediaTransport = true;
     peer_connection_ = std::make_shared<rtc::PeerConnection>(config);
     ConfigurePeerCallbacks();
@@ -316,11 +317,17 @@ void WebRtcSession::ConfigurePeerCallbacks() {
   });
 
   peer_connection_->onLocalDescription([this](rtc::Description description) {
-    if (description.typeString() != "answer" || answer_sent_) {
+    const auto raw_sdp = ExtractLocalDescriptionSdp(description);
+    Log(std::string("Native local description callback fired (type=") + description.typeString() + ", sdpLength=" + std::to_string(raw_sdp.size()) + ")");
+    if (description.typeString() != "answer") {
+      Log(std::string("Ignoring local description callback because type is ") + description.typeString());
       return;
     }
-    Log(std::string("Native local description ready (type=") + description.typeString() + ")");
-    auto answer = MungeAnswerSdp(ExtractLocalDescriptionSdp(description), max_bitrate_kbps_);
+    if (answer_sent_) {
+      Log("Ignoring duplicate answer callback because answer was already sent");
+      return;
+    }
+    auto answer = MungeAnswerSdp(raw_sdp, max_bitrate_kbps_);
     const auto credentials = ExtractIceCredentials(answer);
     const auto nvst = BuildNvstSdp(
         width_,
@@ -340,7 +347,7 @@ void WebRtcSession::ConfigurePeerCallbacks() {
   });
 
   peer_connection_->onLocalCandidate([this](rtc::Candidate candidate) {
-    Log(std::string("Emitting local ICE candidate (mid=") + candidate.mid() + "): " + candidate.candidate());
+    Log(std::string("Emitting local ICE candidate (mid=") + candidate.mid() + ", answerSent=" + (answer_sent_ ? std::string("true") : std::string("false")) + "): " + candidate.candidate());
     std::ostringstream payload;
     payload << "{\"candidate\":\"" << EscapeJson(candidate.candidate()) << "\",\"sdpMid\":";
     if (candidate.mid().empty()) {

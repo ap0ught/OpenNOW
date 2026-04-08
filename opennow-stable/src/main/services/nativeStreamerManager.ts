@@ -340,6 +340,7 @@ export class NativeStreamerManager {
         return;
       case "answer":
         if (message.payload?.sdp && typeof message.payload.sdp === "string") {
+          this.emit({ type: "log", message: `Received native answer IPC message (${message.payload.sdp.length} chars)` });
           this.emit({ type: "log", message: `Forwarding native SDP answer to signaling (${message.payload.sdp.length} chars)` });
           await this.onAnswer({
             sdp: message.payload.sdp,
