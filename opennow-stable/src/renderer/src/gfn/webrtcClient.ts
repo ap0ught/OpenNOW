@@ -630,6 +630,8 @@ export class GfnWebRtcClient {
   private micManager: MicrophoneManager | null = null;
   private micState: MicState = "uninitialized";
   private answerSent = false;
+  private remoteIceCandidateCount = 0;
+  private manualIceFallbackUsed = false;
 
   // Stream info
   private currentCodec = "";
@@ -960,10 +962,50 @@ export class GfnWebRtcClient {
   private resetInputState(): void {
     this.inputReady = false;
     this.answerSent = false;
+    this.remoteIceCandidateCount = 0;
+    this.manualIceFallbackUsed = false;
     this.inputProtocolVersion = 2;
     this.inputEncoder.setProtocolVersion(2);
     this.diagnostics.inputReady = false;
     this.emitStats();
+  }
+
+  private async logIceCandidatePairSnapshot(context: string): Promise<void> {
+    if (!this.pc) {
+      return;
+    }
+    try {
+      const report = await this.pc.getStats();
+      let selectedPair: Record<string, unknown> | null = null;
+      let localCandidate: Record<string, unknown> | null = null;
+      let remoteCandidate: Record<string, unknown> | null = null;
+
+      for (const entry of report.values()) {
+        const stats = entry as unknown as Record<string, unknown>;
+        if (entry.type === "candidate-pair" && (stats.selected === true || (stats.state === "succeeded" && stats.nominated === true))) {
+          selectedPair = stats;
+        }
+      }
+
+      if (selectedPair) {
+        const localId = selectedPair.localCandidateId as string | undefined;
+        const remoteId = selectedPair.remoteCandidateId as string | undefined;
+        if (localId) {
+          const local = report.get(localId);
+          localCandidate = local ? local as unknown as Record<string, unknown> : null;
+        }
+        if (remoteId) {
+          const remote = report.get(remoteId);
+          remoteCandidate = remote ? remote as unknown as Record<string, unknown> : null;
+        }
+      }
+
+      this.log(
+        `${context} remoteIceCount=${this.remoteIceCandidateCount} manualFallback=${this.manualIceFallbackUsed} selectedPair=${selectedPair ? `state=${selectedPair.state ?? "?"} nominated=${selectedPair.nominated ?? "?"} currentRtt=${selectedPair.currentRoundTripTime ?? "?"}` : "none"} local=${localCandidate ? `${localCandidate.candidateType ?? "?"}/${localCandidate.protocol ?? "?"}/${localCandidate.address ?? "?"}:${localCandidate.port ?? "?"}` : "none"} remote=${remoteCandidate ? `${remoteCandidate.candidateType ?? "?"}/${remoteCandidate.protocol ?? "?"}/${remoteCandidate.address ?? "?"}:${remoteCandidate.port ?? "?"}` : "none"}`,
+      );
+    } catch (error) {
+      this.log(`${context} candidate-pair snapshot failed: ${String(error)}`);
+    }
   }
 
   private closeDataChannels(): void {
@@ -3478,6 +3520,9 @@ export class GfnWebRtcClient {
 
     pc.oniceconnectionstatechange = () => {
       this.log(`ICE connection state: ${pc.iceConnectionState}`);
+      if (pc.iceConnectionState === "disconnected" || pc.iceConnectionState === "failed") {
+        void this.logIceCandidatePairSnapshot(`ICE ${pc.iceConnectionState}`);
+      }
     };
 
     pc.onicegatheringstatechange = () => {
@@ -3512,7 +3557,7 @@ export class GfnWebRtcClient {
       }
     }
 
-    // 2. Extract server's ice-ufrag BEFORE any modifications (needed for manual candidate injection)
+    // 2. Extract server's ice-ufrag for diagnostics only.
     const serverIceUfrag = extractIceUfragFromOffer(processedOffer);
     this.log(`Server ICE ufrag: "${serverIceUfrag}"`);
 
@@ -3684,43 +3729,14 @@ export class GfnWebRtcClient {
     this.answerSent = true;
     this.log("Sent SDP answer and nvstSdp");
 
-    // 5. Inject manual ICE candidate from mediaConnectionInfo AFTER answer is sent
-    //    (matches Rust reference ordering — full SDP exchange completes first)
-    //    GFN servers use ice-lite and may not trickle candidates via signaling.
-    //    The actual media endpoint comes from the session's connectionInfo array.
     if (session.mediaConnectionInfo) {
       const mci = session.mediaConnectionInfo;
       const rawIp = extractPublicIp(mci.ip);
-      if (rawIp && mci.port > 0) {
-        const candidateStr = `candidate:1 1 udp 2130706431 ${rawIp} ${mci.port} typ host`;
-        this.log(`Injecting manual ICE candidate: ${rawIp}:${mci.port}`);
-
-        // Try sdpMid "0" first, then "1", "2", "3" (matching Rust fallback)
-        const mids = ["0", "1", "2", "3"];
-        let injected = false;
-        for (const mid of mids) {
-          try {
-            await pc.addIceCandidate({
-              candidate: candidateStr,
-              sdpMid: mid,
-              sdpMLineIndex: parseInt(mid, 10),
-              usernameFragment: serverIceUfrag || undefined,
-            });
-            this.log(`Manual ICE candidate injected (sdpMid=${mid})`);
-            injected = true;
-            break;
-          } catch (error) {
-            this.log(`Manual ICE candidate failed for sdpMid=${mid}: ${String(error)}`);
-          }
-        }
-        if (!injected) {
-          this.log("Warning: Could not inject manual ICE candidate on any sdpMid");
-        }
-      } else {
-        this.log(`Warning: mediaConnectionInfo present but no valid IP (ip=${mci.ip}, port=${mci.port})`);
-      }
+      this.log(
+        `MediaConnectionInfo available for SDP/server-IP patch only: ip=${rawIp ?? mci.ip}, port=${mci.port}; synthetic remote ICE injection disabled`,
+      );
     } else {
-      this.log("No mediaConnectionInfo available — relying on trickle ICE only");
+      this.log("No mediaConnectionInfo available — relying on server-provided SDP/candidates only");
     }
 
     this.log("=== handleOffer COMPLETE — waiting for ICE connectivity and tracks ===");
@@ -3728,6 +3744,7 @@ export class GfnWebRtcClient {
 
   async addRemoteCandidate(candidate: IceCandidatePayload): Promise<void> {
     this.log(`Remote ICE candidate received: ${candidate.candidate} (sdpMid=${candidate.sdpMid})`);
+    this.remoteIceCandidateCount += 1;
     const init: RTCIceCandidateInit = {
       candidate: candidate.candidate,
       sdpMid: candidate.sdpMid ?? undefined,
@@ -3736,11 +3753,13 @@ export class GfnWebRtcClient {
     };
 
     if (!this.pc || !this.pc.remoteDescription) {
+      this.log(`Queueing remote ICE candidate until remote description is ready (count=${this.remoteIceCandidateCount})`);
       this.queuedCandidates.push(init);
       return;
     }
 
     await this.pc.addIceCandidate(init);
+    this.log(`Applied remote ICE candidate immediately (count=${this.remoteIceCandidateCount})`);
   }
 
   dispose(): void {
