@@ -1922,7 +1922,6 @@ export function App(): JSX.Element {
             }
           }
         } else if (event.type === "remote-ice") {
-          markSignalingEstablished("remote-ice");
           await clientRef.current?.addRemoteCandidate(event.candidate);
         } else if (event.type === "connected") {
           signalingStateRef.current = "connected";
