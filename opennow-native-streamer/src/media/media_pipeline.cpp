@@ -212,6 +212,18 @@ std::string MediaPipeline::DescribeCapabilities() const {
 #endif
 }
 
+DebugOverlaySnapshot MediaPipeline::GetDebugOverlaySnapshot() const {
+  DebugOverlaySnapshot snapshot;
+  snapshot.codec = video_codec_;
+  snapshot.decoder_name = decoder_name_;
+  snapshot.decode_mode = using_hardware_decode_ ? "hardware" : "software";
+  snapshot.video_path = video_path_;
+  snapshot.width = current_video_width_;
+  snapshot.height = current_video_height_;
+  snapshot.presented_fps = current_presented_fps_;
+  return snapshot;
+}
+
 void MediaPipeline::Log(const std::string& message) const {
   if (logger_) {
     logger_(message);
@@ -327,6 +339,7 @@ bool MediaPipeline::EnsureVideoDecoder(std::string& error) {
       return false;
     }
     video_decoder_ctx_->opaque = this;
+    decoder_name_ = codec->name ? codec->name : "unknown";
     if (allow_hardware) {
       std::string hardware_error;
       TryInitializeHardwareDecode(codec, hardware_error);
@@ -528,6 +541,8 @@ bool MediaPipeline::StageFrameDirect(AVFrame* frame) {
     }
     pending_video_frame_ = std::move(pending);
   }
+  current_video_width_ = pending.width;
+  current_video_height_ = pending.height;
   staged_video_frames_ += 1;
   if (!logged_stage_thread_) {
     logged_stage_thread_ = true;
@@ -571,6 +586,8 @@ void MediaPipeline::StageFrameRgba(AVFrame* frame) {
     }
     pending_video_frame_ = std::move(pending);
   }
+  current_video_width_ = pending.width;
+  current_video_height_ = pending.height;
   staged_video_frames_ += 1;
   LogVideoPath(using_hardware_decode_ ? "video path: macOS VideoToolbox decode + RGBA upload fallback" : "video path: software decode + RGBA upload fallback");
   if (!logged_stage_thread_) {
@@ -698,6 +715,19 @@ void MediaPipeline::UploadPendingFrame(const PendingVideoFrame& frame) {
     return;
   }
   upload_time_total_us_ += TimestampUs() - upload_started_at_us;
+  const auto now_us = TimestampUs();
+  if (fps_window_started_us_ == 0) {
+    fps_window_started_us_ = now_us;
+    fps_window_frames_ = 0;
+  }
+  fps_window_frames_ += 1;
+  const auto fps_window_elapsed_us = now_us - fps_window_started_us_;
+  if (fps_window_elapsed_us >= 500000) {
+    current_presented_fps_ =
+        static_cast<double>(fps_window_frames_) * 1000000.0 / static_cast<double>(fps_window_elapsed_us);
+    fps_window_started_us_ = now_us;
+    fps_window_frames_ = 0;
+  }
   if (!logged_upload_thread_) {
     logged_upload_thread_ = true;
     Log("Uploaded staged video frames on render thread");

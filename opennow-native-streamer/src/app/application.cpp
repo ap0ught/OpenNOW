@@ -7,6 +7,12 @@
 
 namespace opennow::native {
 
+namespace {
+constexpr float kDebugCharacterSize = 8.0f;
+constexpr float kDebugPadding = 12.0f;
+constexpr float kDebugLineHeight = 11.0f;
+}
+
 Application::Application(std::string ipc_host, int ipc_port, std::string session_id)
     : ipc_host_(std::move(ipc_host)), ipc_port_(ipc_port), session_id_(std::move(session_id)) {}
 
@@ -118,6 +124,7 @@ int Application::Run() {
     SDL_SetRenderDrawColor(renderer_, 8, 10, 18, 255);
     SDL_RenderClear(renderer_);
     media_pipeline_.RenderFrame();
+    RenderDebugOverlay();
     SDL_RenderPresent(renderer_);
   }
   return 0;
@@ -270,6 +277,58 @@ void Application::SetMouseCapture(bool enabled, const std::string& reason) {
 #else
   (void)enabled;
   (void)reason;
+#endif
+}
+
+void Application::RenderDebugOverlay() {
+#if defined(OPENNOW_HAS_SDL3)
+  if (!renderer_) {
+    return;
+  }
+
+  const auto snapshot = media_pipeline_.GetDebugOverlaySnapshot();
+  std::vector<std::string> lines;
+  lines.emplace_back("Codec: " + snapshot.codec);
+  lines.emplace_back("Decoder: " + snapshot.decoder_name);
+  lines.emplace_back("Mode: " + snapshot.decode_mode);
+  {
+    std::ostringstream fps;
+    fps.setf(std::ios::fixed);
+    fps.precision(1);
+    fps << "FPS: " << snapshot.presented_fps;
+    lines.emplace_back(fps.str());
+  }
+  lines.emplace_back("Resolution: " + std::to_string(snapshot.width) + "x" + std::to_string(snapshot.height));
+  lines.emplace_back("Path: " + snapshot.video_path);
+
+  std::size_t max_line_length = 0;
+  for (const auto& line : lines) {
+    max_line_length = std::max(max_line_length, line.size());
+  }
+
+  const float overlay_width = static_cast<float>(max_line_length) * kDebugCharacterSize + kDebugPadding * 2.0f;
+  const float overlay_height = static_cast<float>(lines.size()) * kDebugLineHeight + kDebugPadding * 2.0f;
+
+  int render_width = 0;
+  int render_height = 0;
+  SDL_GetCurrentRenderOutputSize(renderer_, &render_width, &render_height);
+  SDL_FRect background{
+      static_cast<float>(render_width) - overlay_width - kDebugPadding,
+      kDebugPadding,
+      overlay_width,
+      overlay_height,
+  };
+
+  SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_BLEND);
+  SDL_SetRenderDrawColor(renderer_, 0, 0, 0, 170);
+  SDL_RenderFillRect(renderer_, &background);
+  SDL_SetRenderDrawColor(renderer_, 255, 255, 255, 255);
+
+  float y = background.y + kDebugPadding;
+  for (const auto& line : lines) {
+    SDL_RenderDebugText(renderer_, background.x + kDebugPadding, y, line.c_str());
+    y += kDebugLineHeight;
+  }
 #endif
 }
 

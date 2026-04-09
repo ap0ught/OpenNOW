@@ -33,6 +33,7 @@ class Application {
   void SetStreamingActive(bool active);
   void SetFullscreen(bool enabled, const std::string& reason);
   void SetMouseCapture(bool enabled, const std::string& reason);
+  void RenderDebugOverlay();
 
   std::string ipc_host_;
   int ipc_port_;

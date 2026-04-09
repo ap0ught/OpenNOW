@@ -28,6 +28,16 @@ using SDL_PixelFormat = std::uint32_t;
 
 namespace opennow::native {
 
+struct DebugOverlaySnapshot {
+  std::string codec;
+  std::string decoder_name;
+  std::string decode_mode;
+  std::string video_path;
+  int width = 0;
+  int height = 0;
+  double presented_fps = 0.0;
+};
+
 enum class PendingVideoFormat {
   NV12,
   IYUV,
@@ -66,6 +76,7 @@ class MediaPipeline {
 
   void RenderFrame();
   std::string DescribeCapabilities() const;
+  DebugOverlaySnapshot GetDebugOverlaySnapshot() const;
 
  private:
   void Log(const std::string& message) const;
@@ -114,6 +125,12 @@ class MediaPipeline {
   bool using_hardware_decode_ = false;
   bool prefer_rgba_upload_ = false;
   std::string video_path_ = "video path: awaiting decoder initialization";
+  std::string decoder_name_ = "unknown";
+  int current_video_width_ = 0;
+  int current_video_height_ = 0;
+  std::uint64_t fps_window_started_us_ = 0;
+  std::uint64_t fps_window_frames_ = 0;
+  double current_presented_fps_ = 0.0;
   mutable std::mutex pending_video_mutex_;
   std::optional<PendingVideoFrame> pending_video_frame_;
 #if defined(OPENNOW_HAS_SDL3) && defined(OPENNOW_HAS_FFMPEG)
