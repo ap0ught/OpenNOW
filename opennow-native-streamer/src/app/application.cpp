@@ -109,7 +109,6 @@ int Application::Run() {
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
       if (event.type == main_thread_event_type_) {
-        ProcessMainThreadAction(static_cast<MainThreadAction>(event.user.code));
         continue;
       }
       if (event.type == SDL_EVENT_QUIT) {
@@ -127,6 +126,19 @@ int Application::Run() {
         SetMouseCapture(false, "window focus lost");
       }
       input_bridge_.HandleEvent(event);
+    }
+
+    while (true) {
+      MainThreadAction action;
+      {
+        std::lock_guard<std::mutex> lock(pending_actions_mutex_);
+        if (pending_actions_.empty()) {
+          break;
+        }
+        action = pending_actions_.front();
+        pending_actions_.pop_front();
+      }
+      ProcessMainThreadAction(action);
     }
 
     input_bridge_.Tick();
@@ -209,20 +221,24 @@ void Application::HandleIncomingJson(const std::string& json) {
 
 void Application::QueueMainThreadAction(MainThreadAction action) {
 #if defined(OPENNOW_HAS_SDL3)
-  if (main_thread_event_type_ == 0) {
-    ProcessMainThreadAction(action);
+  {
+    std::lock_guard<std::mutex> lock(pending_actions_mutex_);
+    pending_actions_.push_back(action);
+  }
+
+  if (main_thread_event_type_ != 0) {
+    SDL_Event event{};
+    event.type = main_thread_event_type_;
+    event.user.code = static_cast<Sint32>(action);
+    if (SDL_PushEvent(&event)) {
+      EmitLog("Marshaled native window action onto SDL thread");
+      return;
+    }
+    EmitLog("SDL event wakeup failed; queued native window action for SDL thread drain");
     return;
   }
 
-  SDL_Event event{};
-  event.type = main_thread_event_type_;
-  event.user.code = static_cast<Sint32>(action);
-  if (!SDL_PushEvent(&event)) {
-    EmitLog("Failed to marshal native window action onto SDL thread");
-    ProcessMainThreadAction(action);
-    return;
-  }
-  EmitLog("Marshaled native window action onto SDL thread");
+  EmitLog("Queued native window action for SDL thread drain");
 #else
   (void)action;
 #endif

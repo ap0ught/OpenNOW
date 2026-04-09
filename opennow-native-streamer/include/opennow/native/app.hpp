@@ -1,6 +1,8 @@
 #pragma once
 
+#include <deque>
 #include <memory>
+#include <mutex>
 #include <string>
 
 #include "opennow/native/input_bridge.hpp"
@@ -49,6 +51,8 @@ class Application {
   SDL_Window* window_{nullptr};
   SDL_Renderer* renderer_{nullptr};
   std::uint32_t main_thread_event_type_{0};
+  std::mutex pending_actions_mutex_;
+  std::deque<MainThreadAction> pending_actions_;
   bool running_{false};
   bool stream_active_{false};
   bool fullscreen_enabled_{false};
