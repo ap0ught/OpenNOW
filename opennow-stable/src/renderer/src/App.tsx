@@ -1885,13 +1885,16 @@ export function App(): JSX.Element {
 
   // Save settings when changed
   const updateSetting = useCallback(async <K extends keyof Settings>(key: K, value: Settings[K]) => {
-    const currentSettings = settings;
-    const nextSettings = { ...currentSettings, [key]: value };
-    const safeStreamPreferences = applySafeStreamPreferenceGuards(nextSettings);
-    const updates: Partial<Settings> = { [key]: value, ...safeStreamPreferences };
+    let updates: Partial<Settings> | null = null;
 
-    setSettings((prev) => ({ ...prev, ...updates }));
-    if (settingsLoaded) {
+    setSettings((prev) => {
+      const nextSettings = { ...prev, [key]: value };
+      const safeStreamPreferences = applySafeStreamPreferenceGuards(nextSettings);
+      updates = { [key]: value, ...safeStreamPreferences };
+      return { ...prev, ...updates };
+    });
+
+    if (settingsLoaded && updates) {
       await Promise.all(
         (Object.entries(updates) as Array<[keyof Settings, Settings[keyof Settings]]>).map(([updateKey, updateValue]) =>
           window.openNow.setSetting(updateKey, updateValue)
@@ -1920,7 +1923,7 @@ export function App(): JSX.Element {
         // ignore
       }
     }
-  }, [settings, settingsLoaded]);
+  }, [settingsLoaded]);
 
   const handleMouseSensitivityChange = useCallback((value: number) => {
     void updateSetting("mouseSensitivity", value);
@@ -1952,7 +1955,7 @@ export function App(): JSX.Element {
         console.warn("Failed to persist controller mode exit settings:", error);
       });
     }
-  }, [settings, settingsLoaded]);
+  }, [settingsLoaded]);
 
   const handleExitApp = useCallback(() => {
     void window.openNow.quitApp().catch((error) => {
