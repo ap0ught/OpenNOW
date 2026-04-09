@@ -456,6 +456,9 @@ void WebRtcSession::ConfigureTracksFromOffer(const std::string& offer_sdp) {
   int audio_clock = 48000;
   int audio_channels = 2;
   const auto audio_codec = ParseAudioCodecName(offer_sdp, &audio_payload, &audio_clock, &audio_channels);
+  audio_payload_type_ = audio_payload;
+  audio_clock_rate_ = audio_clock;
+  audio_channels_ = audio_channels;
   if (media_pipeline_) {
     media_pipeline_->ConfigureAudioCodec(audio_codec, audio_payload, audio_clock, audio_channels);
   }
