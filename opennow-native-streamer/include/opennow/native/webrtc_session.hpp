@@ -62,6 +62,7 @@ class WebRtcSession {
   std::string media_connection_ip_;
   int media_connection_port_ = 0;
   std::string preferred_codec_ = "H264";
+  std::string negotiated_video_codec_ = "H264";
   std::string color_quality_ = "8bit_420";
   int max_bitrate_kbps_ = 75000;
   int fps_ = 60;

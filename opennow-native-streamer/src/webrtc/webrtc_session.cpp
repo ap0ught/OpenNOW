@@ -50,6 +50,69 @@ std::string ParseAudioCodecName(const std::string& sdp, int* payload_type, int* 
 }
 
 #if defined(OPENNOW_HAS_LIBDATACHANNEL)
+std::string ParseNegotiatedVideoCodecName(const std::string& sdp) {
+  std::istringstream stream(sdp);
+  std::string line;
+  bool in_video = false;
+  std::vector<std::string> ordered_payloads;
+  std::unordered_map<std::string, std::string> codec_by_payload;
+
+  while (std::getline(stream, line)) {
+    if (!line.empty() && line.back() == '\r') {
+      line.pop_back();
+    }
+    if (line.rfind("m=video", 0) == 0) {
+      in_video = true;
+      std::istringstream line_stream(line);
+      std::string token;
+      int index = 0;
+      while (line_stream >> token) {
+        if (index >= 3) {
+          ordered_payloads.push_back(token);
+        }
+        index += 1;
+      }
+      continue;
+    }
+    if (line.rfind("m=", 0) == 0 && in_video) {
+      break;
+    }
+    if (!in_video || line.rfind("a=rtpmap:", 0) != 0) {
+      continue;
+    }
+    const auto colon = line.find(':');
+    const auto space = line.find(' ', colon + 1);
+    if (colon == std::string::npos || space == std::string::npos) {
+      continue;
+    }
+    const auto pt = line.substr(colon + 1, space - colon - 1);
+    auto codec = line.substr(space + 1);
+    const auto slash = codec.find('/');
+    codec = codec.substr(0, slash);
+    std::transform(codec.begin(), codec.end(), codec.begin(), [](unsigned char c) {
+      return static_cast<char>(std::toupper(c));
+    });
+    if (codec == "HEVC") {
+      codec = "H265";
+    }
+    codec_by_payload[pt] = codec;
+  }
+
+  for (const auto& payload : ordered_payloads) {
+    const auto it = codec_by_payload.find(payload);
+    if (it == codec_by_payload.end()) {
+      continue;
+    }
+    if (it->second == "RTX" || it->second == "RED" || it->second == "ULPFEC" || it->second == "FLEXFEC-03") {
+      continue;
+    }
+    return it->second;
+  }
+  return "H264";
+}
+#endif
+
+#if defined(OPENNOW_HAS_LIBDATACHANNEL)
 std::string ExtractLocalDescriptionSdp(const rtc::Description& description) {
   return std::string(description);
 }
@@ -147,6 +210,11 @@ bool WebRtcSession::HandleOffer(const std::string& offer_sdp, std::string& error
   fixed_offer = RewriteH265LevelIdByProfile(fixed_offer, 153, 153);
   fixed_offer = RewriteH265TierFlag(fixed_offer, 0);
   fixed_offer = PreferCodec(fixed_offer, preferred_codec_);
+  negotiated_video_codec_ = ParseNegotiatedVideoCodecName(fixed_offer);
+  Log(std::string("Negotiated video codec from active remote offer: ") + negotiated_video_codec_);
+  if (media_pipeline_) {
+    media_pipeline_->ConfigureVideoCodec(negotiated_video_codec_);
+  }
   if (const auto threshold = ParsePartialReliableThresholdMs(fixed_offer)) {
     partial_reliable_threshold_ms_ = *threshold;
   }
@@ -427,14 +495,14 @@ void WebRtcSession::ConfigureTrackHandlers() {
     const auto description = track->description();
     if (description.mid() == "video" || description.type() == "video") {
       video_track_ = track;
-      if (preferred_codec_ == "H265") {
+      if (negotiated_video_codec_ == "H265") {
         track->setMediaHandler(std::make_shared<rtc::H265RtpDepacketizer>());
-      } else if (preferred_codec_ == "H264") {
+      } else if (negotiated_video_codec_ == "H264") {
         track->setMediaHandler(std::make_shared<rtc::H264RtpDepacketizer>());
       }
       track->chainMediaHandler(std::make_shared<rtc::RtcpReceivingSession>());
-      if (preferred_codec_ == "AV1") {
-        Log("Using native AV1 RTP depacketizer path for video track");
+      if (negotiated_video_codec_ == "AV1") {
+        Log("Using native AV1 RTP depacketizer path for negotiated AV1 video track");
         track->onMessage([this](rtc::message_variant message) {
           if (!media_pipeline_) {
             return;
@@ -451,13 +519,20 @@ void WebRtcSession::ConfigureTrackHandlers() {
             media_pipeline_->PushVideoFrame(frame->bitstream, frame->timestamp_us);
           }
         });
-      } else {
+      } else if (negotiated_video_codec_ == "H264" || negotiated_video_codec_ == "H265") {
+        Log(std::string("Using libdatachannel depacketizer for negotiated ") + negotiated_video_codec_ + " video track");
         track->onFrame([this](rtc::binary frame, rtc::FrameInfo info) {
           if (media_pipeline_) {
             const auto us = static_cast<std::uint64_t>(info.timestampSeconds ? info.timestampSeconds->count() * 1000000.0 : 0.0);
             media_pipeline_->PushVideoFrame(BytesFromRtcBinary(frame), us);
           }
         });
+      } else {
+        if (!media_failure_emitted_) {
+          media_failure_emitted_ = true;
+          Log(std::string("Unsupported negotiated video codec for native streamer: ") + negotiated_video_codec_);
+          EmitState("failed", "Native video codec unsupported", negotiated_video_codec_);
+        }
       }
       return;
     }
