@@ -67,6 +67,40 @@ export function colorQualityRequiresHevc(cq: ColorQuality): boolean {
   return cq !== "8bit_420";
 }
 
+export const SAFE_VIDEO_CODEC_OPTIONS: readonly VideoCodec[] = ["H264", "AV1"];
+export const SAFE_COLOR_QUALITY_OPTIONS: readonly ColorQuality[] = ["8bit_420"];
+
+export function isSupportedUserFacingCodec(codec: VideoCodec): boolean {
+  return SAFE_VIDEO_CODEC_OPTIONS.includes(codec);
+}
+
+export function isSupportedUserFacingColorQuality(colorQuality: ColorQuality): boolean {
+  return SAFE_COLOR_QUALITY_OPTIONS.includes(colorQuality);
+}
+
+export function normalizeSafeStreamPreferences(codec: VideoCodec, colorQuality: ColorQuality): {
+  codec: VideoCodec;
+  colorQuality: ColorQuality;
+  migrated: boolean;
+} {
+  const codecSupported = isSupportedUserFacingCodec(codec);
+  const colorQualitySupported = isSupportedUserFacingColorQuality(colorQuality);
+
+  if (!codecSupported || !colorQualitySupported) {
+    return {
+      codec: "H264",
+      colorQuality: "8bit_420",
+      migrated: codec !== "H264" || colorQuality !== "8bit_420",
+    };
+  }
+
+  return {
+    codec,
+    colorQuality,
+    migrated: false,
+  };
+}
+
 /** Helper: is this a 10-bit (HDR-capable) mode? */
 export function colorQualityIs10Bit(cq: ColorQuality): boolean {
   return cq.startsWith("10bit");

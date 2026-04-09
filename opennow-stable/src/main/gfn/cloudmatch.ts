@@ -22,6 +22,7 @@ import {
   DEFAULT_KEYBOARD_LAYOUT,
   colorQualityBitDepth,
   colorQualityChromaFormat,
+  normalizeSafeStreamPreferences,
   resolveGfnKeyboardLayout,
 } from "@shared/gfn";
 
@@ -453,6 +454,9 @@ function timezoneOffsetMs(): number {
 
 function buildSessionRequestBody(input: SessionCreateRequest): CloudMatchRequest {
   const { width, height } = parseResolution(input.settings.resolution);
+  const safeStreamPreferences = normalizeSafeStreamPreferences(input.settings.codec, input.settings.colorQuality);
+  input.settings.codec = safeStreamPreferences.codec;
+  input.settings.colorQuality = safeStreamPreferences.colorQuality;
   const cq = input.settings.colorQuality;
   // IMPORTANT: hdrEnabled is a SEPARATE toggle from color quality.
   // The Rust reference (cloudmatch.rs) uses settings.hdr_enabled independently.

@@ -12,7 +12,7 @@ import type {
   PingResult,
   GameLanguage,
 } from "@shared/gfn";
-import { colorQualityRequiresHevc, keyboardLayoutOptions } from "@shared/gfn";
+import { SAFE_COLOR_QUALITY_OPTIONS, SAFE_VIDEO_CODEC_OPTIONS, keyboardLayoutOptions } from "@shared/gfn";
 import { formatShortcutForDisplay, normalizeShortcut } from "../shortcuts";
 
 interface SettingsPageProps {
@@ -21,14 +21,13 @@ interface SettingsPageProps {
   onSettingChange: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
 }
 
-const codecOptions: VideoCodec[] = ["H264", "H265", "AV1"];
+const codecOptions: VideoCodec[] = [...SAFE_VIDEO_CODEC_OPTIONS];
 
-const colorQualityOptions: { value: ColorQuality; label: string; description: string }[] = [
-  { value: "8bit_420", label: "8-bit 4:2:0", description: "Most compatible" },
-  { value: "8bit_444", label: "8-bit 4:4:4", description: "Better color" },
-  { value: "10bit_420", label: "10-bit 4:2:0", description: "HDR ready" },
-  { value: "10bit_444", label: "10-bit 4:4:4", description: "Best quality" },
-];
+const colorQualityOptions: { value: ColorQuality; label: string; description: string }[] = SAFE_COLOR_QUALITY_OPTIONS.map((value) => ({
+  value,
+  label: "8-bit 4:2:0",
+  description: "Most compatible",
+}));
 
 /* ── Static fallbacks (used when MES API is unavailable) ─────────── */
 
@@ -737,25 +736,18 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
     [onSettingChange]
   );
 
-  /** Change color quality, auto-switching codec to H265 if the mode requires HEVC */
   const handleColorQualityChange = useCallback(
     (cq: ColorQuality) => {
       handleChange("colorQuality", cq);
-      if (colorQualityRequiresHevc(cq) && settings.codec === "H264") {
-        handleChange("codec", "H265");
-      }
     },
-    [handleChange, settings.codec]
+    [handleChange]
   );
 
   const handleCodecChange = useCallback(
     (codec: VideoCodec) => {
       handleChange("codec", codec);
-      if (codec === "H264" && settings.colorQuality !== "8bit_420") {
-        handleChange("colorQuality", "8bit_420");
-      }
     },
-    [handleChange, settings.colorQuality]
+    [handleChange]
   );
 
   // Microphone devices
@@ -1282,23 +1274,17 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
             <div className="settings-row settings-row--column">
               <label className="settings-label">Color Depth</label>
               <div className="settings-chip-row">
-                {colorQualityOptions.map((opt) => {
-                  const needsHevc = colorQualityRequiresHevc(opt.value);
-                  return (
-                    <button
-                      key={opt.value}
-                      className={`settings-chip ${settings.colorQuality === opt.value ? "active" : ""}`}
-                      onClick={() => handleColorQualityChange(opt.value)}
-                      title={`${opt.description}${needsHevc ? " — requires H265/AV1" : ""}`}
-                    >
-                      <span>{opt.label}</span>
-                    </button>
-                  );
-                })}
+                {colorQualityOptions.map((opt) => (
+                  <button
+                    key={opt.value}
+                    className={`settings-chip ${settings.colorQuality === opt.value ? "active" : ""}`}
+                    onClick={() => handleColorQualityChange(opt.value)}
+                    title={opt.description}
+                  >
+                    <span>{opt.label}</span>
+                  </button>
+                ))}
               </div>
-              {colorQualityRequiresHevc(settings.colorQuality) && settings.codec === "H264" && (
-                <span className="settings-input-hint">This mode requires H265 or AV1. Codec will be auto-switched.</span>
-              )}
             </div>
 
             {/* Bitrate slider */}

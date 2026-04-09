@@ -2,7 +2,7 @@ import { app } from "electron";
 import { join } from "node:path";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import type { VideoCodec, ColorQuality, VideoAccelerationPreference, MicrophoneMode, GameLanguage, AspectRatio, KeyboardLayout } from "@shared/gfn";
-import { DEFAULT_KEYBOARD_LAYOUT } from "@shared/gfn";
+import { DEFAULT_KEYBOARD_LAYOUT, normalizeSafeStreamPreferences } from "@shared/gfn";
 
 export interface Settings {
   /** Video resolution (e.g., "1920x1080") */
@@ -170,15 +170,18 @@ export class SettingsManager {
   }
 
   private enforceCompatibility(settings: Settings): boolean {
-    if (settings.codec === "H264" && settings.colorQuality !== "8bit_420") {
-      console.warn(
-        `[Settings] colorQuality "${settings.colorQuality}" is incompatible with H264; resetting to 8bit_420`,
-      );
-      settings.colorQuality = "8bit_420";
-      return true;
+    const normalized = normalizeSafeStreamPreferences(settings.codec, settings.colorQuality);
+
+    if (!normalized.migrated) {
+      return false;
     }
 
-    return false;
+    console.warn(
+      `[Settings] Migrating unsupported stream settings codec="${settings.codec}" colorQuality="${settings.colorQuality}" to H264/8bit_420`,
+    );
+    settings.codec = normalized.codec;
+    settings.colorQuality = normalized.colorQuality;
+    return true;
   }
 
   private migrateLegacyShortcutDefaults(settings: Settings): boolean {
@@ -236,6 +239,7 @@ export class SettingsManager {
    */
   set<K extends keyof Settings>(key: K, value: Settings[K]): void {
     this.settings[key] = value;
+    this.enforceCompatibility(this.settings);
     this.save();
   }
 
@@ -247,6 +251,7 @@ export class SettingsManager {
       ...this.settings,
       ...updates,
     };
+    this.enforceCompatibility(this.settings);
     this.save();
   }
 
