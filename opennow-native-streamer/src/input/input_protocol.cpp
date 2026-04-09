@@ -225,7 +225,7 @@ std::vector<std::uint8_t> InputEncoder::EncodeMouseButton(std::uint32_t type, co
 
 std::uint16_t InputEncoder::NextGamepadSequence(int controller_id) {
   const auto current = gamepad_sequence_.contains(controller_id) ? gamepad_sequence_[controller_id] : 1;
-  gamepad_sequence_[controller_id] = static_cast<std::uint16_t>((current + 1) % 65536);
+  gamepad_sequence_[controller_id] = static_cast<std::uint16_t>((static_cast<std::uint32_t>(current) + 1U) & 0xFFFFu);
   return current;
 }
 

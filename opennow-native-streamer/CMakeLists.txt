@@ -20,6 +20,7 @@ set(OPENNOW_SOURCES
   src/platform/macos_surface_renderer_stub.cpp
   src/platform/platform_info.cpp
   src/webrtc/av1_rtp_depacketizer.cpp
+  src/webrtc/opus_rtp_depacketizer.cpp
   src/webrtc/sdp_helpers.cpp
   src/webrtc/webrtc_session.cpp
 )

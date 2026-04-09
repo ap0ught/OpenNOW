@@ -145,6 +145,7 @@ void WebRtcSession::SetEmitter(EmitJson emitter) {
 void WebRtcSession::SetLogger(LogFn logger) {
   logger_ = std::move(logger);
   av1_depacketizer_.SetLogger([this](const std::string& message) { Log(message); });
+  opus_depacketizer_.SetLogger([this](const std::string& message) { Log(message); });
 }
 
 void WebRtcSession::SetMediaPipeline(MediaPipeline* media_pipeline) {
@@ -537,12 +538,21 @@ void WebRtcSession::ConfigureTrackHandlers() {
       return;
     }
     audio_track_ = track;
-    track->setMediaHandler(std::make_shared<rtc::OpusRtpDepacketizer>());
     track->chainMediaHandler(std::make_shared<rtc::RtcpReceivingSession>());
-    track->onFrame([this](rtc::binary frame, rtc::FrameInfo info) {
+    Log("Using native Opus RTP depacketizer path for audio track");
+    track->onMessage([this](rtc::message_variant message) {
       if (media_pipeline_) {
-        const auto us = static_cast<std::uint64_t>(info.timestampSeconds ? info.timestampSeconds->count() * 1000000.0 : 0.0);
-        media_pipeline_->PushAudioFrame(BytesFromRtcBinary(frame), us);
+        std::vector<std::uint8_t> packet;
+        if (const auto* bytes = std::get_if<rtc::binary>(&message)) {
+          packet = BytesFromRtcBinary(*bytes);
+        } else if (const auto* text = std::get_if<std::string>(&message)) {
+          packet.assign(text->begin(), text->end());
+        } else {
+          return;
+        }
+        if (const auto frame = opus_depacketizer_.PushRtpPacket(packet, audio_clock_rate_)) {
+          media_pipeline_->PushAudioFrame(frame->payload, frame->timestamp_us);
+        }
       }
     });
   });

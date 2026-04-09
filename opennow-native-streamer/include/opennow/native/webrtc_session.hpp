@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "opennow/native/av1_rtp_depacketizer.hpp"
+#include "opennow/native/opus_rtp_depacketizer.hpp"
 
 #if defined(OPENNOW_HAS_LIBDATACHANNEL)
 namespace rtc {
@@ -79,6 +80,7 @@ class WebRtcSession {
   std::string pending_offer_sdp_;
   std::string last_server_ice_ufrag_;
   Av1RtpDepacketizer av1_depacketizer_;
+  OpusRtpDepacketizer opus_depacketizer_;
 
 #if defined(OPENNOW_HAS_LIBDATACHANNEL)
   std::shared_ptr<class rtc::PeerConnection> peer_connection_;
