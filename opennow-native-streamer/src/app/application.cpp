@@ -62,7 +62,7 @@ bool Application::Initialize(std::string& error) {
   }
 
   media_pipeline_.SetLogger([this](const std::string& message) { EmitLog(message); });
-  if (!media_pipeline_.Initialize(renderer_, error)) {
+  if (!media_pipeline_.Initialize(window_, renderer_, error)) {
     return false;
   }
 

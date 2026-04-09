@@ -5,6 +5,7 @@
 #include <sstream>
 
 #include "opennow/native/input_protocol.hpp"
+#include "opennow/native/macos_surface_renderer.hpp"
 
 #if defined(OPENNOW_HAS_FFMPEG)
 extern "C" {
@@ -25,6 +26,9 @@ namespace opennow::native {
 namespace {
 constexpr std::uint64_t kMaxPacketsWithoutDecodedFrameBeforeReset = 30;
 constexpr std::uint64_t kMaxHardwareDecodeResetsBeforeSoftwareFallback = 2;
+constexpr std::size_t kMinBufferedVideoFrames = 1;
+constexpr std::size_t kMaxBufferedVideoFrames = 2;
+constexpr std::uint64_t kPacingTuneIntervalUs = 500000;
 }
 
 #if defined(OPENNOW_HAS_FFMPEG)
@@ -32,7 +36,6 @@ namespace {
 std::mutex g_ffmpeg_log_mutex;
 bool g_suppressed_deprecated_pixel_format_warning = false;
 constexpr std::size_t kMaxPendingVideoFrames = 3;
-constexpr std::size_t kTargetBufferedVideoFrames = 1;
 
 void OpenNowFfmpegLogCallback(void* avcl, int level, const char* fmt, va_list args) {
   if (fmt != nullptr && std::strstr(fmt, "deprecated pixel format used") != nullptr) {
@@ -73,12 +76,26 @@ void MediaPipeline::SetLogger(LogFn logger) {
   logger_ = std::move(logger);
 }
 
-bool MediaPipeline::Initialize(SDL_Renderer* renderer, std::string& error) {
+bool MediaPipeline::Initialize(SDL_Window* window, SDL_Renderer* renderer, std::string& error) {
+  window_ = window;
   renderer_ = renderer;
 #if !defined(OPENNOW_HAS_SDL3) || !defined(OPENNOW_HAS_FFMPEG)
   (void)error;
 #endif
 #if defined(OPENNOW_HAS_SDL3)
+#if defined(__APPLE__)
+  macos_surface_renderer_ = std::make_unique<MacosSurfaceRenderer>();
+  std::string macos_surface_error;
+  if (macos_surface_renderer_ && macos_surface_renderer_->Initialize(window_, macos_surface_error)) {
+    using_native_surface_present_ = macos_surface_renderer_->SupportsNativeSurfacePath();
+    if (using_native_surface_present_) {
+      LogVideoPath("video path: macOS VideoToolbox + Metal/CVPixelBuffer direct presentation");
+    }
+  } else if (!macos_surface_error.empty()) {
+    Log(std::string("macOS native surface presenter unavailable, using staged upload fallback: ") + macos_surface_error);
+  }
+#endif
+
   SDL_AudioSpec desired{};
   desired.channels = 2;
   desired.format = SDL_AUDIO_S16;
@@ -111,6 +128,10 @@ bool MediaPipeline::Initialize(SDL_Renderer* renderer, std::string& error) {
 
 void MediaPipeline::Shutdown() {
 #if defined(OPENNOW_HAS_SDL3)
+  if (macos_surface_renderer_) {
+    macos_surface_renderer_->Shutdown();
+    macos_surface_renderer_.reset();
+  }
   if (video_texture_) {
     SDL_DestroyTexture(video_texture_);
     video_texture_ = nullptr;
@@ -155,6 +176,7 @@ void MediaPipeline::Shutdown() {
 void MediaPipeline::ConfigureVideoCodec(const std::string& codec) {
   video_codec_ = codec;
   prefer_rgba_upload_ = false;
+  target_buffered_video_frames_ = kMinBufferedVideoFrames;
 }
 
 void MediaPipeline::ConfigureAudioCodec(const std::string& codec, int payload_type, int clock_rate, int channels) {
@@ -188,11 +210,12 @@ void MediaPipeline::PushAudioFrame(std::vector<std::uint8_t> encoded_frame, std:
 void MediaPipeline::RenderFrame() {
 #if defined(OPENNOW_HAS_SDL3)
   const auto render_started_at_us = TimestampUs();
+  TuneFramePacingTarget(render_started_at_us);
   std::optional<PendingVideoFrame> pending_frame;
   std::size_t pending_queue_depth = 0;
   {
     std::lock_guard<std::mutex> lock(pending_video_mutex_);
-    while (pending_video_frames_.size() > kTargetBufferedVideoFrames + 1) {
+    while (pending_video_frames_.size() > TargetBufferedVideoFrames() + 1) {
       pending_video_frames_.pop_front();
       dropped_pending_video_frames_ += 1;
       dropped_catchup_video_frames_ += 1;
@@ -209,7 +232,15 @@ void MediaPipeline::RenderFrame() {
   if (pending_frame) {
     uploaded_new_frame = UploadPendingFrame(*pending_frame);
   }
-  if (video_texture_ && renderer_) {
+  if (using_native_surface_present_) {
+    const auto presented_at_us = TimestampUs();
+    if (uploaded_new_frame) {
+      presented_video_frames_ += 1;
+      last_presented_at_us_ = presented_at_us;
+    } else {
+      duplicate_present_cycles_ += 1;
+    }
+  } else if (video_texture_ && renderer_) {
     SDL_RenderTexture(renderer_, video_texture_, nullptr, nullptr);
     const auto presented_at_us = TimestampUs();
     if (uploaded_new_frame) {
@@ -397,6 +428,24 @@ void MediaPipeline::HandleVideoDecodeFailure(const std::string& reason) {
 #endif
 }
 
+void MediaPipeline::TuneFramePacingTarget(std::uint64_t now_us) {
+  if (now_us < last_pacing_tune_us_ + kPacingTuneIntervalUs) {
+    return;
+  }
+  last_pacing_tune_us_ = now_us;
+  const auto render_cycles = presented_video_frames_ + duplicate_present_cycles_;
+  const auto duplicate_ratio = render_cycles == 0 ? 0.0 : static_cast<double>(duplicate_present_cycles_) / static_cast<double>(render_cycles);
+  const auto drop_ratio =
+      received_video_frames_ == 0 ? 0.0 : static_cast<double>(dropped_pending_video_frames_ + dropped_catchup_video_frames_) /
+                                        static_cast<double>(received_video_frames_);
+  target_buffered_video_frames_ =
+      (using_native_surface_present_ || duplicate_ratio > 0.35 || drop_ratio > 0.015) ? kMaxBufferedVideoFrames : kMinBufferedVideoFrames;
+}
+
+std::size_t MediaPipeline::TargetBufferedVideoFrames() const {
+  return std::clamp(target_buffered_video_frames_, kMinBufferedVideoFrames, kMaxBufferedVideoFrames);
+}
+
 #if defined(OPENNOW_HAS_SDL3) && defined(OPENNOW_HAS_FFMPEG)
 enum AVPixelFormat MediaPipeline::SelectHardwarePixelFormat(AVCodecContext* context, const enum AVPixelFormat* pixel_formats) {
   auto* self = static_cast<MediaPipeline*>(context->opaque);
@@ -478,7 +527,11 @@ bool MediaPipeline::EnsureVideoDecoder(std::string& error) {
       if (using_hardware_decode_) {
         video_decoder_ctx_->get_format = &MediaPipeline::SelectHardwarePixelFormat;
         video_decoder_ctx_->hw_device_ctx = av_buffer_ref(hw_device_ctx_);
-        LogVideoPath("video path: macOS VideoToolbox hardware decode + SDL YUV GPU upload");
+        if (using_native_surface_present_) {
+          LogVideoPath("video path: macOS VideoToolbox + Metal/CVPixelBuffer direct presentation");
+        } else {
+          LogVideoPath("video path: macOS VideoToolbox hardware decode + SDL YUV GPU upload");
+        }
       } else if (!hardware_error.empty()) {
         Log(std::string("VideoToolbox initialization unavailable, using fallback path: ") + hardware_error);
       }
@@ -625,6 +678,9 @@ void MediaPipeline::StageFrame(AVFrame* frame) {
   if (!renderer_) {
     return;
   }
+  if (StageFrameNativeSurface(frame)) {
+    return;
+  }
   AVFrame* source = frame;
   if (using_hardware_decode_ && frame->format == hw_pixel_format_) {
     if (!EnsureTransferFrame()) {
@@ -641,6 +697,42 @@ void MediaPipeline::StageFrame(AVFrame* frame) {
   if (!StageFrameDirect(source)) {
     StageFrameRgba(source);
   }
+}
+
+bool MediaPipeline::StageFrameNativeSurface(AVFrame* frame) {
+#if defined(__APPLE__)
+  if (!using_hardware_decode_ || !using_native_surface_present_ || !macos_surface_renderer_ || frame->format != hw_pixel_format_) {
+    return false;
+  }
+  void* native_surface = frame->data[3];
+  auto retained_surface = macos_surface_renderer_->RetainNativeSurface(native_surface);
+  if (!retained_surface) {
+    return false;
+  }
+  PendingVideoFrame pending;
+  pending.format = PendingVideoFormat::NativeSurface;
+  pending.native_surface = std::move(retained_surface);
+  pending.width = frame->width;
+  pending.height = frame->height;
+  pending.timestamp_us = TimestampUs();
+  pending.staged_at_us = pending.timestamp_us;
+  {
+    std::lock_guard<std::mutex> lock(pending_video_mutex_);
+    if (pending_video_frames_.size() >= kMaxPendingVideoFrames) {
+      pending_video_frames_.pop_front();
+      dropped_pending_video_frames_ += 1;
+    }
+    pending_video_frames_.push_back(std::move(pending));
+  }
+  current_video_width_ = frame->width;
+  current_video_height_ = frame->height;
+  staged_video_frames_ += 1;
+  LogVideoPath("video path: macOS VideoToolbox + Metal/CVPixelBuffer direct presentation");
+  return true;
+#else
+  (void)frame;
+  return false;
+#endif
 }
 
 bool MediaPipeline::StageFrameDirect(AVFrame* frame) {
@@ -800,6 +892,32 @@ bool MediaPipeline::UploadPendingFrame(const PendingVideoFrame& frame) {
     return false;
   }
   const auto upload_started_at_us = TimestampUs();
+  if (frame.format == PendingVideoFormat::NativeSurface) {
+    if (!macos_surface_renderer_) {
+      return false;
+    }
+    std::string error;
+    if (!macos_surface_renderer_->PresentNativeSurface(frame.native_surface, frame.width, frame.height, error)) {
+      Log(std::string("Native-surface present failed; falling back to staged upload path: ") + error);
+      using_native_surface_present_ = false;
+      return false;
+    }
+    upload_time_total_us_ += TimestampUs() - upload_started_at_us;
+    const auto now_us = TimestampUs();
+    uploaded_video_frames_ += 1;
+    if (fps_window_started_us_ == 0) {
+      fps_window_started_us_ = now_us;
+      fps_window_frames_ = 0;
+    }
+    fps_window_frames_ += 1;
+    const auto fps_window_elapsed_us = now_us - fps_window_started_us_;
+    if (fps_window_elapsed_us >= 500000) {
+      current_presented_fps_ = static_cast<double>(fps_window_frames_) * 1000000.0 / static_cast<double>(fps_window_elapsed_us);
+      fps_window_started_us_ = now_us;
+      fps_window_frames_ = 0;
+    }
+    return true;
+  }
   SDL_PixelFormat desired_format = SDL_PIXELFORMAT_RGBA32;
   if (!prefer_rgba_upload_ && frame.format == PendingVideoFormat::NV12) {
     desired_format = SDL_PIXELFORMAT_NV12;

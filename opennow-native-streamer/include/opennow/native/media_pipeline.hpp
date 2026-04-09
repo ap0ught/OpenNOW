@@ -3,10 +3,13 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
+
+#include "opennow/native/macos_surface_renderer.hpp"
 
 #if defined(OPENNOW_HAS_FFMPEG)
 extern "C" {
@@ -21,6 +24,7 @@ extern "C" {
 #if defined(OPENNOW_HAS_SDL3)
 #include <SDL3/SDL.h>
 #else
+struct SDL_Window;
 struct SDL_Renderer;
 struct SDL_Texture;
 typedef void* SDL_AudioStream;
@@ -43,6 +47,7 @@ struct DebugOverlaySnapshot {
 };
 
 enum class PendingVideoFormat {
+  NativeSurface,
   NV12,
   IYUV,
   RGBA,
@@ -50,6 +55,7 @@ enum class PendingVideoFormat {
 
 struct PendingVideoFrame {
   PendingVideoFormat format = PendingVideoFormat::RGBA;
+  std::shared_ptr<void> native_surface;
   std::vector<std::uint8_t> plane0;
   std::vector<std::uint8_t> plane1;
   std::vector<std::uint8_t> plane2;
@@ -69,7 +75,7 @@ class MediaPipeline {
   ~MediaPipeline();
 
   void SetLogger(LogFn logger);
-  bool Initialize(SDL_Renderer* renderer, std::string& error);
+  bool Initialize(SDL_Window* window, SDL_Renderer* renderer, std::string& error);
   void Shutdown();
 
   void ConfigureVideoCodec(const std::string& codec);
@@ -90,6 +96,8 @@ class MediaPipeline {
   void ResetVideoDecoder(const std::string& reason, bool force_software);
   void NoteDecodedVideoFrame();
   void HandleVideoDecodeFailure(const std::string& reason);
+  void TuneFramePacingTarget(std::uint64_t now_us);
+  std::size_t TargetBufferedVideoFrames() const;
 
 #if defined(OPENNOW_HAS_SDL3) && defined(OPENNOW_HAS_FFMPEG)
   bool EnsureVideoDecoder(std::string& error);
@@ -100,6 +108,7 @@ class MediaPipeline {
   bool UploadPendingFrame(const PendingVideoFrame& frame);
   bool StageFrameDirect(::AVFrame* frame);
   void StageFrameRgba(::AVFrame* frame);
+  bool StageFrameNativeSurface(::AVFrame* frame);
   std::optional<PendingVideoFrame> ConvertPendingFrameToRgba(const PendingVideoFrame& frame);
   bool EnsureTransferFrame();
   bool TryInitializeHardwareDecode(const ::AVCodec* codec, std::string& error);
@@ -107,6 +116,7 @@ class MediaPipeline {
 #endif
 
   LogFn logger_;
+  SDL_Window* window_ = nullptr;
   SDL_Renderer* renderer_ = nullptr;
 #if defined(OPENNOW_HAS_SDL3)
   SDL_Texture* video_texture_ = nullptr;
@@ -131,6 +141,7 @@ class MediaPipeline {
   std::uint64_t queue_depth_total_ = 0;
   std::uint64_t last_diagnostics_log_us_ = 0;
   std::uint64_t last_presented_at_us_ = 0;
+  std::uint64_t last_pacing_tune_us_ = 0;
   std::uint64_t consecutive_video_packets_without_frame_ = 0;
   std::uint64_t decoder_flushes_ = 0;
   std::uint64_t hardware_decode_resets_ = 0;
@@ -141,6 +152,7 @@ class MediaPipeline {
   bool using_hardware_decode_ = false;
   bool force_software_decode_ = false;
   bool decode_stall_flush_attempted_ = false;
+  bool using_native_surface_present_ = false;
   bool prefer_rgba_upload_ = false;
   std::string video_path_ = "video path: awaiting decoder initialization";
   std::string decoder_name_ = "unknown";
@@ -149,8 +161,10 @@ class MediaPipeline {
   std::uint64_t fps_window_started_us_ = 0;
   std::uint64_t fps_window_frames_ = 0;
   double current_presented_fps_ = 0.0;
+  std::size_t target_buffered_video_frames_ = 1;
   mutable std::mutex pending_video_mutex_;
   std::deque<PendingVideoFrame> pending_video_frames_;
+  std::unique_ptr<MacosSurfaceRenderer> macos_surface_renderer_;
 #if defined(OPENNOW_HAS_SDL3) && defined(OPENNOW_HAS_FFMPEG)
   ::AVCodecContext* video_decoder_ctx_ = nullptr;
   ::AVCodecContext* audio_decoder_ctx_ = nullptr;

@@ -17,11 +17,18 @@ set(OPENNOW_SOURCES
   src/input/input_protocol.cpp
   src/input/input_bridge.cpp
   src/media/media_pipeline.cpp
+  src/platform/macos_surface_renderer_stub.cpp
   src/platform/platform_info.cpp
   src/webrtc/av1_rtp_depacketizer.cpp
   src/webrtc/sdp_helpers.cpp
   src/webrtc/webrtc_session.cpp
 )
+
+if(APPLE)
+  enable_language(OBJCXX)
+  list(REMOVE_ITEM OPENNOW_SOURCES src/platform/macos_surface_renderer_stub.cpp)
+  list(APPEND OPENNOW_SOURCES src/platform/macos_surface_renderer.mm)
+endif()
 
 add_executable(opennow-native-streamer ${OPENNOW_SOURCES})
 target_include_directories(opennow-native-streamer PRIVATE include)
@@ -128,4 +135,21 @@ endif()
 if(WIN32)
   target_compile_definitions(opennow-native-streamer PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_link_libraries(opennow-native-streamer PRIVATE ws2_32)
+endif()
+
+if(APPLE)
+  find_library(COCOA_FRAMEWORK Cocoa REQUIRED)
+  find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
+  find_library(METAL_FRAMEWORK Metal REQUIRED)
+  find_library(QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)
+  find_library(COREVIDEO_FRAMEWORK CoreVideo REQUIRED)
+  target_link_libraries(
+    opennow-native-streamer
+    PRIVATE
+      ${COCOA_FRAMEWORK}
+      ${FOUNDATION_FRAMEWORK}
+      ${METAL_FRAMEWORK}
+      ${QUARTZCORE_FRAMEWORK}
+      ${COREVIDEO_FRAMEWORK}
+  )
 endif()

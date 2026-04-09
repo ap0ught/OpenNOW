@@ -83,6 +83,13 @@ This project now owns a minimum viable native stream path when `SDL3`, `FFmpeg`,
 - SDL3 mouse, keyboard, wheel, and controller input is encoded with the same packet framing semantics as the Chromium `inputProtocol.ts` path
 - the Chromium/WebRTC renderer backend remains the default fallback when the setting is off
 
+macOS presentation paths now prefer:
+- `VideoToolbox + Metal/CVPixelBuffer direct presentation` when VideoToolbox surfaces can stay GPU/native-surface backed through the final present path
+- `VideoToolbox hardware decode + SDL YUV GPU upload` as the cross-platform hardware fallback when direct native-surface presentation is unavailable
+- `software decode + SDL YUV/RGBA upload fallback` if hardware decode or native-surface presentation cannot be sustained
+
+The macOS direct path removes the previous mandatory `av_hwframe_transfer_data(...) -> CPU plane staging -> SDL_UpdateNVTexture/SDL_UpdateYUVTexture(...)` hot path for VideoToolbox-backed frames. The remaining fallback paths are still retained for Windows/Linux/Linux ARM portability and for recovery if native-surface presentation fails at runtime.
+
 Still intentionally partial in this task:
 - decoder/hwaccel selection is conservative and software-first
 - microphone parity is not migrated yet
