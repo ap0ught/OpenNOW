@@ -20,8 +20,8 @@ import type {
 } from "@shared/gfn";
 import {
   DEFAULT_KEYBOARD_LAYOUT,
-  SAFE_VIDEO_CODEC_OPTIONS,
-  normalizeSafeStreamPreferences,
+  USER_FACING_VIDEO_CODEC_OPTIONS,
+  normalizeStreamPreferences,
   getPreferredSessionAdMediaUrl,
   getSessionAdDurationMs,
   getSessionAdItems,
@@ -53,7 +53,7 @@ import { ControllerStreamLoading } from "./components/ControllerStreamLoading";
 import type { QueueAdPlaybackEvent, QueueAdPreviewHandle } from "./components/QueueAdPreview";
 import { StreamView } from "./components/StreamView";
 
-const codecOptions: VideoCodec[] = [...SAFE_VIDEO_CODEC_OPTIONS];
+const codecOptions: VideoCodec[] = [...USER_FACING_VIDEO_CODEC_OPTIONS];
 const allResolutionOptions = ["1280x720", "1280x800", "1440x900", "1680x1050", "1920x1080", "1920x1200", "2560x1080", "2560x1440", "2560x1600", "3440x1440", "3840x2160", "3840x2400"];
 const fpsOptions = [30, 60, 120, 144, 240];
 const aspectRatioOptions = ["16:9", "16:10", "21:9", "32:9"] as const;
@@ -130,8 +130,8 @@ const DEFAULT_SHORTCUTS = {
   shortcutToggleRecording: "F12",
 } as const;
 
-function applySafeStreamPreferenceGuards(settings: Pick<Settings, "codec" | "colorQuality">): { codec: Settings["codec"]; colorQuality: Settings["colorQuality"] } {
-  const normalized = normalizeSafeStreamPreferences(settings.codec, settings.colorQuality);
+function applyCompatibleStreamPreferenceGuards(settings: Pick<Settings, "codec" | "colorQuality">): { codec: Settings["codec"]; colorQuality: Settings["colorQuality"] } {
+  const normalized = normalizeStreamPreferences(settings.codec, settings.colorQuality);
   return {
     codec: normalized.codec,
     colorQuality: normalized.colorQuality,
@@ -643,7 +643,12 @@ export function App(): JSX.Element {
     gameLanguage: "en_US",
     enableL4S: false,
   });
+  const settingsRef = useRef<Settings>(settings);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
+
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
   const [regions, setRegions] = useState<StreamRegion[]>([]);
   const [subscriptionInfo, setSubscriptionInfo] = useState<SubscriptionInfo | null>(null);
   const diagnosticsStoreRef = useRef<ReturnType<typeof createStreamDiagnosticsStore> | null>(null);
@@ -1481,10 +1486,12 @@ export function App(): JSX.Element {
       try {
         // Load settings first
         const loadedSettings = await window.openNow.getSettings();
-        setSettings({
+        const normalizedLoadedSettings = {
           ...loadedSettings,
-          ...applySafeStreamPreferenceGuards(loadedSettings),
-        });
+          ...applyCompatibleStreamPreferenceGuards(loadedSettings),
+        };
+        settingsRef.current = normalizedLoadedSettings;
+        setSettings(normalizedLoadedSettings);
         setSettingsLoaded(true);
 
         // Load providers and session (refresh only if token is near expiry)
@@ -1848,7 +1855,7 @@ export function App(): JSX.Element {
 
           if (clientRef.current) {
             await clientRef.current.handleOffer(event.sdp, activeSession, {
-              ...applySafeStreamPreferenceGuards(settings),
+              ...applyCompatibleStreamPreferenceGuards(settings),
               resolution: settings.resolution,
               fps: settings.fps,
               maxBitrateKbps: settings.maxBitrateMbps * 1000,
@@ -1885,16 +1892,27 @@ export function App(): JSX.Element {
 
   // Save settings when changed
   const updateSetting = useCallback(async <K extends keyof Settings>(key: K, value: Settings[K]) => {
-    let updates: Partial<Settings> | null = null;
+    const currentSettings = settingsRef.current;
+    const nextSettings = { ...currentSettings, [key]: value };
+    const normalizedStreamPreferences = applyCompatibleStreamPreferenceGuards(nextSettings);
+    const normalizedSettings: Settings = {
+      ...nextSettings,
+      ...normalizedStreamPreferences,
+    };
+    const updates = Object.fromEntries(
+      (Object.entries(normalizedSettings) as Array<[keyof Settings, Settings[keyof Settings]]>).filter(
+        ([updateKey, updateValue]) => currentSettings[updateKey] !== updateValue
+      )
+    ) as Partial<Settings>;
 
-    setSettings((prev) => {
-      const nextSettings = { ...prev, [key]: value };
-      const safeStreamPreferences = applySafeStreamPreferenceGuards(nextSettings);
-      updates = { [key]: value, ...safeStreamPreferences };
-      return { ...prev, ...updates };
-    });
+    if (Object.keys(updates).length === 0) {
+      return;
+    }
 
-    if (settingsLoaded && updates) {
+    settingsRef.current = normalizedSettings;
+    setSettings(normalizedSettings);
+
+    if (settingsLoaded) {
       await Promise.all(
         (Object.entries(updates) as Array<[keyof Settings, Settings[keyof Settings]]>).map(([updateKey, updateValue]) =>
           window.openNow.setSetting(updateKey, updateValue)
@@ -1941,11 +1959,13 @@ export function App(): JSX.Element {
   }, [updateSetting]);
 
   const handleExitControllerMode = useCallback(() => {
-    setSettings((prev) => ({
-      ...prev,
+    const nextSettings = {
+      ...settingsRef.current,
       controllerMode: false,
       autoLoadControllerLibrary: false,
-    }));
+    };
+    settingsRef.current = nextSettings;
+    setSettings(nextSettings);
 
     if (settingsLoaded) {
       void Promise.all([
@@ -2106,7 +2126,7 @@ export function App(): JSX.Element {
         resolution: settings.resolution,
         fps: settings.fps,
         maxBitrateMbps: settings.maxBitrateMbps,
-        ...applySafeStreamPreferenceGuards(settings),
+        ...applyCompatibleStreamPreferenceGuards(settings),
         keyboardLayout: settings.keyboardLayout,
         gameLanguage: settings.gameLanguage,
         enableL4S: settings.enableL4S,
@@ -2256,7 +2276,7 @@ export function App(): JSX.Element {
           resolution: settings.resolution,
           fps: settings.fps,
           maxBitrateMbps: settings.maxBitrateMbps,
-          ...applySafeStreamPreferenceGuards(settings),
+          ...applyCompatibleStreamPreferenceGuards(settings),
           keyboardLayout: settings.keyboardLayout,
           gameLanguage: settings.gameLanguage,
           enableL4S: settings.enableL4S,

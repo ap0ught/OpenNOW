@@ -67,37 +67,40 @@ export function colorQualityRequiresHevc(cq: ColorQuality): boolean {
   return cq !== "8bit_420";
 }
 
-export const SAFE_VIDEO_CODEC_OPTIONS: readonly VideoCodec[] = ["H264", "AV1"];
-export const SAFE_COLOR_QUALITY_OPTIONS: readonly ColorQuality[] = ["8bit_420"];
+export const USER_FACING_VIDEO_CODEC_OPTIONS: readonly VideoCodec[] = ["H264", "H265", "AV1"];
+export const USER_FACING_COLOR_QUALITY_OPTIONS: readonly ColorQuality[] = ["8bit_420", "8bit_444", "10bit_420", "10bit_444"];
+
+const ALLOWED_COLOR_QUALITIES_BY_CODEC: Record<VideoCodec, readonly ColorQuality[]> = {
+  H264: ["8bit_420"],
+  H265: USER_FACING_COLOR_QUALITY_OPTIONS,
+  AV1: USER_FACING_COLOR_QUALITY_OPTIONS,
+};
 
 export function isSupportedUserFacingCodec(codec: VideoCodec): boolean {
-  return SAFE_VIDEO_CODEC_OPTIONS.includes(codec);
+  return USER_FACING_VIDEO_CODEC_OPTIONS.includes(codec);
 }
 
-export function isSupportedUserFacingColorQuality(colorQuality: ColorQuality): boolean {
-  return SAFE_COLOR_QUALITY_OPTIONS.includes(colorQuality);
+export function getAllowedColorQualitiesForCodec(codec: VideoCodec): readonly ColorQuality[] {
+  return ALLOWED_COLOR_QUALITIES_BY_CODEC[codec] ?? ALLOWED_COLOR_QUALITIES_BY_CODEC.H264;
 }
 
-export function normalizeSafeStreamPreferences(codec: VideoCodec, colorQuality: ColorQuality): {
+export function isAllowedColorQualityForCodec(codec: VideoCodec, colorQuality: ColorQuality): boolean {
+  return getAllowedColorQualitiesForCodec(codec).includes(colorQuality);
+}
+
+export function normalizeStreamPreferences(codec: VideoCodec, colorQuality: ColorQuality): {
   codec: VideoCodec;
   colorQuality: ColorQuality;
   migrated: boolean;
 } {
-  const codecSupported = isSupportedUserFacingCodec(codec);
-  const colorQualitySupported = isSupportedUserFacingColorQuality(colorQuality);
-
-  if (!codecSupported || !colorQualitySupported) {
-    return {
-      codec: "H264",
-      colorQuality: "8bit_420",
-      migrated: codec !== "H264" || colorQuality !== "8bit_420",
-    };
-  }
+  const normalizedCodec = isSupportedUserFacingCodec(codec) ? codec : "H264";
+  const allowedColorQualities = getAllowedColorQualitiesForCodec(normalizedCodec);
+  const normalizedColorQuality = allowedColorQualities.includes(colorQuality) ? colorQuality : allowedColorQualities[0];
 
   return {
-    codec,
-    colorQuality,
-    migrated: false,
+    codec: normalizedCodec,
+    colorQuality: normalizedColorQuality,
+    migrated: normalizedCodec !== codec || normalizedColorQuality !== colorQuality,
   };
 }
 

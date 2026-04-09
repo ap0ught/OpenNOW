@@ -2,7 +2,7 @@ import { app } from "electron";
 import { join } from "node:path";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import type { VideoCodec, ColorQuality, VideoAccelerationPreference, MicrophoneMode, GameLanguage, AspectRatio, KeyboardLayout } from "@shared/gfn";
-import { DEFAULT_KEYBOARD_LAYOUT, normalizeSafeStreamPreferences } from "@shared/gfn";
+import { DEFAULT_KEYBOARD_LAYOUT, normalizeStreamPreferences } from "@shared/gfn";
 
 export interface Settings {
   /** Video resolution (e.g., "1920x1080") */
@@ -170,14 +170,14 @@ export class SettingsManager {
   }
 
   private enforceCompatibility(settings: Settings): boolean {
-    const normalized = normalizeSafeStreamPreferences(settings.codec, settings.colorQuality);
+    const normalized = normalizeStreamPreferences(settings.codec, settings.colorQuality);
 
     if (!normalized.migrated) {
       return false;
     }
 
     console.warn(
-      `[Settings] Migrating unsupported stream settings codec="${settings.codec}" colorQuality="${settings.colorQuality}" to H264/8bit_420`,
+      `[Settings] Migrating unsupported stream settings codec="${settings.codec}" colorQuality="${settings.colorQuality}" to ${normalized.codec}/${normalized.colorQuality}`,
     );
     settings.codec = normalized.codec;
     settings.colorQuality = normalized.colorQuality;

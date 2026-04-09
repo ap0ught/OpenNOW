@@ -12,7 +12,7 @@ import type {
   PingResult,
   GameLanguage,
 } from "@shared/gfn";
-import { SAFE_COLOR_QUALITY_OPTIONS, SAFE_VIDEO_CODEC_OPTIONS, keyboardLayoutOptions } from "@shared/gfn";
+import { USER_FACING_VIDEO_CODEC_OPTIONS, getAllowedColorQualitiesForCodec, normalizeStreamPreferences, keyboardLayoutOptions } from "@shared/gfn";
 import { formatShortcutForDisplay, normalizeShortcut } from "../shortcuts";
 
 interface SettingsPageProps {
@@ -21,13 +21,14 @@ interface SettingsPageProps {
   onSettingChange: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
 }
 
-const codecOptions: VideoCodec[] = [...SAFE_VIDEO_CODEC_OPTIONS];
+const codecOptions: VideoCodec[] = [...USER_FACING_VIDEO_CODEC_OPTIONS];
 
-const colorQualityOptions: { value: ColorQuality; label: string; description: string }[] = SAFE_COLOR_QUALITY_OPTIONS.map((value) => ({
-  value,
-  label: "8-bit 4:2:0",
-  description: "Most compatible",
-}));
+const colorQualityOptionDetails: Record<ColorQuality, { label: string; description: string }> = {
+  "8bit_420": { label: "8-bit 4:2:0", description: "Most compatible" },
+  "8bit_444": { label: "8-bit 4:4:4", description: "Better color" },
+  "10bit_420": { label: "10-bit 4:2:0", description: "HDR ready" },
+  "10bit_444": { label: "10-bit 4:4:4", description: "Best quality" },
+};
 
 /* ── Static fallbacks (used when MES API is unavailable) ─────────── */
 
@@ -736,6 +737,19 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
     [onSettingChange]
   );
 
+  const normalizedStreamPreferences = useMemo(
+    () => normalizeStreamPreferences(settings.codec, settings.colorQuality),
+    [settings.codec, settings.colorQuality]
+  );
+
+  const colorQualityOptions = useMemo(
+    () => getAllowedColorQualitiesForCodec(normalizedStreamPreferences.codec).map((value) => ({
+      value,
+      ...colorQualityOptionDetails[value],
+    })),
+    [normalizedStreamPreferences.codec]
+  );
+
   const handleColorQualityChange = useCallback(
     (cq: ColorQuality) => {
       handleChange("colorQuality", cq);
@@ -1261,7 +1275,7 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
                 {codecOptions.map((codec) => (
                   <button
                     key={codec}
-                    className={`settings-chip ${settings.codec === codec ? "active" : ""}`}
+                    className={`settings-chip ${normalizedStreamPreferences.codec === codec ? "active" : ""}`}
                     onClick={() => handleCodecChange(codec)}
                   >
                     {codec}
@@ -1277,7 +1291,7 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
                 {colorQualityOptions.map((opt) => (
                   <button
                     key={opt.value}
-                    className={`settings-chip ${settings.colorQuality === opt.value ? "active" : ""}`}
+                    className={`settings-chip ${normalizedStreamPreferences.colorQuality === opt.value ? "active" : ""}`}
                     onClick={() => handleColorQualityChange(opt.value)}
                     title={opt.description}
                   >
