@@ -176,6 +176,13 @@ export class GfnSignalingClient {
     return `gen=${this.socketGeneration} attempt=${this.reconnectAttempt} phase=${this.sessionPhase} lastInAck=${this.lastInboundAckId} lastOutAck=${this.nextOutboundAckId} queued=${this.queuedOutbound.length} unacked=${this.unackedOutbound.size}`;
   }
 
+  private describeOutboundList(items: OutboundEnvelope[]): string {
+    if (items.length === 0) {
+      return "none";
+    }
+    return items.map((item) => `${item.label}#${item.ackId}`).join(", ");
+  }
+
   private sendImmediate(payload: SignalingMessage): boolean {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       return false;
@@ -191,11 +198,16 @@ export class GfnSignalingClient {
 
     const queued = [...this.queuedOutbound];
     this.queuedOutbound = [];
+    const flushed: OutboundEnvelope[] = [];
     for (const item of queued) {
       if (skipAckIdsInReplayStore && this.unackedOutbound.has(item.ackId)) {
         continue;
       }
       this.sendEnvelope(item, false);
+      flushed.push(item);
+    }
+    if (flushed.length > 0) {
+      this.log(`Flushed queued outbound: ${this.describeOutboundList(flushed)} ${this.describeState()}`);
     }
   }
 
@@ -208,6 +220,7 @@ export class GfnSignalingClient {
     for (const item of replayList) {
       this.sendEnvelope(item, false);
     }
+    this.log(`Replayed unacked outbound: ${this.describeOutboundList(replayList)} ${this.describeState()}`);
     return replayList.length;
   }
 
@@ -217,6 +230,7 @@ export class GfnSignalingClient {
       if (envelope.replayable) {
         this.unackedOutbound.set(envelope.ackId, envelope);
       }
+      this.log(`Sent outbound ${envelope.label} ackid=${envelope.ackId} replayable=${envelope.replayable} ${this.describeState()}`);
       return;
     }
 
@@ -354,12 +368,12 @@ export class GfnSignalingClient {
         replayedCount = this.replayUnackedOutbound();
       }
       this.flushQueuedOutbound(isReconnect);
-      if (!isReconnect || replayedCount === 0) {
+      if (!isReconnect) {
         this.sendPeerInfo();
       }
 
       this.log(
-        `Socket open gen=${generation} reconnect=${isReconnect} replayed=${replayedCount} queuedFlushed=${this.queuedOutbound.length === 0} ${this.describeState()}`,
+        `Socket open gen=${generation} reconnect=${isReconnect} replayed=${replayedCount} queuedFlushed=${this.queuedOutbound.length === 0} pendingReplay=${this.describeOutboundList([...this.unackedOutbound.values()].sort((a, b) => a.ackId - b.ackId))} ${this.describeState()}`,
       );
 
       if (isReconnect) {
@@ -466,7 +480,9 @@ export class GfnSignalingClient {
       queuedReplayCount: replayCount,
       sessionPhase: this.sessionPhase,
     });
-    this.log(`Scheduling reconnect attempt=${this.reconnectAttempt} replay=${replayCount} ${this.describeState()}`);
+    this.log(
+      `Scheduling reconnect attempt=${this.reconnectAttempt} replay=${replayCount} replayItems=${this.describeOutboundList([...this.unackedOutbound.values()].sort((a, b) => a.ackId - b.ackId))} ${this.describeState()}`,
+    );
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       if (this.isDisconnecting) {
