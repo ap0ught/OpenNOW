@@ -25,6 +25,7 @@ const __dirname = dirname(__filename);
 const REPO_ROOT = resolve(__dirname, "../../../../..");
 const NATIVE_PROJECT_ROOT = join(REPO_ROOT, "opennow-native-streamer");
 const IPC_VERSION = 1;
+const STARTUP_TIMEOUT_MS = 15000;
 
 type Envelope = {
   type: string;
@@ -55,6 +56,8 @@ export class NativeStreamerManager {
   private stopPromise: Promise<void> | null = null;
   private pendingSocketResolve: ((socket: Socket) => void) | null = null;
   private pendingHelloResolver: ((env: Envelope) => void) | null = null;
+  private pendingStartupReject: ((error: Error) => void) | null = null;
+  private startupTimer: NodeJS.Timeout | null = null;
 
   constructor(options: NativeStreamerManagerOptions) {
     this.options = options;
@@ -80,52 +83,51 @@ export class NativeStreamerManager {
     this.options.onEvent({ type: "starting", message: "Launching OpenNOW Native Streamer" });
     const endpoint = await this.prepareServer();
     const descriptor = await this.resolveProcessDescriptor();
+    try {
+      const env = {
+        ...process.env,
+        OPENNOW_NATIVE_STREAMER_ENDPOINT: endpoint,
+      };
+      this.child = spawn(descriptor.command, descriptor.args, {
+        cwd: descriptor.cwd ?? REPO_ROOT,
+        env,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      this.child.stdout.on("data", (chunk) => {
+        console.log(`[NativeStreamer] ${String(chunk).trimEnd()}`);
+      });
+      this.child.stderr.on("data", (chunk) => {
+        console.warn(`[NativeStreamer] ${String(chunk).trimEnd()}`);
+      });
 
-    const env = {
-      ...process.env,
-      OPENNOW_NATIVE_STREAMER_ENDPOINT: endpoint,
-    };
-    this.child = spawn(descriptor.command, descriptor.args, {
-      cwd: descriptor.cwd ?? REPO_ROOT,
-      env,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    this.child?.stdout.on("data", (chunk) => {
-      console.log(`[NativeStreamer] ${String(chunk).trimEnd()}`);
-    });
-    this.child?.stderr.on("data", (chunk) => {
-      console.warn(`[NativeStreamer] ${String(chunk).trimEnd()}`);
-    });
-    this.child?.once("exit", (code, signal) => {
-      const reason = `process exited (${signal ?? code ?? "unknown"})`;
-      this.connected = false;
-      this.socket = null;
-      this.options.onEvent({ type: "stopped", reason });
-    });
+      const socket = await this.waitForSocketConnection();
+      this.socket = socket;
+      this.installSocket(socket);
+      await this.waitForHello(socket);
+      this.clearStartupWaiters();
 
-    const socket = await new Promise<Socket>((resolve) => {
-      this.pendingSocketResolve = resolve;
-    });
-    this.pendingSocketResolve = null;
-    this.socket = socket;
-    this.installSocket(socket);
-    await this.waitForHello(socket);
-    await this.send("hello-ack", {
-      accepted: true,
-      version: IPC_VERSION,
-      message: "Electron main is ready",
-    });
-    await this.send("start-session", {
-      session: request.session,
-      settings: request.settings,
-      window: {
-        title: request.window?.title ?? "OpenNOW Native Streamer",
-        width: request.window?.width ?? 1280,
-        height: request.window?.height ?? 720,
-      },
-    });
-    this.connected = true;
-    this.options.onEvent({ type: "ready", message: "OpenNOW Native Streamer connected" });
+      await this.send("hello-ack", {
+        accepted: true,
+        version: IPC_VERSION,
+        message: "Electron main is ready",
+      });
+      await this.send("start-session", {
+        session: request.session,
+        settings: request.settings,
+        window: {
+          title: request.window?.title ?? "OpenNOW Native Streamer",
+          width: request.window?.width ?? 1280,
+          height: request.window?.height ?? 720,
+        },
+      });
+      this.connected = true;
+      this.options.onEvent({ type: "ready", message: "OpenNOW Native Streamer connected" });
+    } catch (error) {
+      const failure = error instanceof Error ? error : new Error(String(error));
+      this.options.onEvent({ type: "error", code: "native-startup", message: failure.message, fatal: true });
+      await this.abortStartup(failure);
+      throw failure;
+    }
   }
 
   async stop(): Promise<void> {
@@ -140,6 +142,7 @@ export class NativeStreamerManager {
 
   private async doStop(): Promise<void> {
     this.connected = false;
+    this.clearStartupWaiters();
     const socket = this.socket;
     this.socket = null;
     if (socket && !socket.destroyed) {
@@ -161,7 +164,6 @@ export class NativeStreamerManager {
       await rm(this.socketPath, { force: true }).catch(() => {});
     }
     this.socketPath = null;
-    this.pendingHelloResolver = null;
     this.currentStartRequest = null;
   }
 
@@ -260,7 +262,27 @@ export class NativeStreamerManager {
         this.connected = false;
         this.socket = null;
       }
+      if (!this.connected && this.pendingStartupReject) {
+        this.pendingStartupReject(new Error("Native streamer IPC socket closed during startup"));
+      }
       reader.close();
+    });
+  }
+
+  private async waitForSocketConnection(): Promise<Socket> {
+    return await new Promise<Socket>((resolve, reject) => {
+      this.pendingSocketResolve = resolve;
+      this.pendingStartupReject = reject;
+      this.startupTimer = setTimeout(() => {
+        reject(new Error(`Native streamer did not connect within ${STARTUP_TIMEOUT_MS}ms`));
+      }, STARTUP_TIMEOUT_MS);
+
+      this.child?.once("error", (error) => {
+        reject(new Error(`Failed to spawn native streamer: ${error.message}`));
+      });
+      this.child?.once("exit", (code, signal) => {
+        reject(new Error(`Native streamer exited before IPC connect (${signal ?? code ?? "unknown"})`));
+      });
     });
   }
 
@@ -274,6 +296,40 @@ export class NativeStreamerManager {
     if (envelope.type !== "hello") {
       throw new Error(`Expected native hello, received ${envelope.type}`);
     }
+  }
+
+  private clearStartupWaiters(): void {
+    this.pendingSocketResolve = null;
+    this.pendingHelloResolver = null;
+    this.pendingStartupReject = null;
+    if (this.startupTimer) {
+      clearTimeout(this.startupTimer);
+      this.startupTimer = null;
+    }
+  }
+
+  private async abortStartup(error: Error): Promise<void> {
+    this.clearStartupWaiters();
+    const socket = this.socket;
+    this.socket = null;
+    if (socket && !socket.destroyed) {
+      socket.destroy();
+    }
+    if (this.child) {
+      this.child.kill();
+      this.child = null;
+    }
+    if (this.server) {
+      this.server.close();
+      this.server = null;
+    }
+    if (this.socketPath && process.platform !== "win32") {
+      await rm(this.socketPath, { force: true }).catch(() => {});
+    }
+    this.socketPath = null;
+    this.connected = false;
+    this.currentStartRequest = null;
+    this.options.onEvent({ type: "stopped", reason: error.message });
   }
 
   private async handleIncoming(line: string): Promise<void> {

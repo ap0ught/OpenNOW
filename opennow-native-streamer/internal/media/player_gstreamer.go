@@ -47,14 +47,15 @@ type controllerState struct {
 }
 
 type gstreamerPlayer struct {
-	mu          sync.Mutex
-	pipe        *gst.Pipeline
-	videoIn     *app.Source
-	audioIn     *app.Source
-	window      *sdl.Window
-	cancel      context.CancelFunc
-	controllers map[uint32]*controllerState
-	inputSink   func(protocol.InputMessage) error
+	mu                sync.Mutex
+	pipe              *gst.Pipeline
+	videoIn           *app.Source
+	audioIn           *app.Source
+	window            *sdl.Window
+	cancel            context.CancelFunc
+	controllers       map[uint32]*controllerState
+	controllerHandles map[uint32]*sdl.GameController
+	inputSink         func(protocol.InputMessage) error
 }
 
 func init() {
@@ -70,6 +71,7 @@ func (p *gstreamerPlayer) Start(ctx context.Context, cfg Config) error {
 	}
 	p.inputSink = cfg.InputSink
 	p.controllers = map[uint32]*controllerState{}
+	p.controllerHandles = map[uint32]*sdl.GameController{}
 	if _, err := sdl.GameControllerEventState(sdl.ENABLE); err != nil {
 		return err
 	}
@@ -187,6 +189,10 @@ func (p *gstreamerPlayer) Close() error {
 		p.pipe.SetState(gst.StateNull)
 		p.pipe = nil
 	}
+	for instanceID, controller := range p.controllerHandles {
+		controller.Close()
+		delete(p.controllerHandles, instanceID)
+	}
 	if p.window != nil {
 		p.window.Destroy()
 		p.window = nil
@@ -264,8 +270,13 @@ func (p *gstreamerPlayer) handleControllerAdded(event *sdl.ControllerDeviceAdded
 	if err != nil {
 		return
 	}
-	defer controller.Close()
 	instanceID := uint32(controller.Joystick().InstanceID())
+	p.mu.Lock()
+	if previous := p.controllerHandles[instanceID]; previous != nil {
+		previous.Close()
+	}
+	p.controllerHandles[instanceID] = controller
+	p.mu.Unlock()
 	state := p.ensureControllerState(instanceID)
 	state.connected = true
 	p.emitControllerState(instanceID, state)
@@ -273,6 +284,12 @@ func (p *gstreamerPlayer) handleControllerAdded(event *sdl.ControllerDeviceAdded
 
 func (p *gstreamerPlayer) handleControllerRemoved(event *sdl.ControllerDeviceRemovedEvent) {
 	instanceID := uint32(event.Which)
+	p.mu.Lock()
+	if controller := p.controllerHandles[instanceID]; controller != nil {
+		controller.Close()
+		delete(p.controllerHandles, instanceID)
+	}
+	p.mu.Unlock()
 	state := p.ensureControllerState(instanceID)
 	state.connected = false
 	state.buttons = 0
