@@ -9,6 +9,7 @@ import type {
   GameVariant,
   LoginProvider,
   MainToRendererSignalingEvent,
+  NativeStreamerEvent,
   SessionAdAction,
   SessionAdInfo,
   SessionAdState,
@@ -33,6 +34,15 @@ import {
   type StreamDiagnostics,
   type StreamTimeWarning,
 } from "./gfn/webrtcClient";
+import {
+  mapKeyboardEvent,
+  modifierFlags,
+  toMouseButton,
+  mapGamepadButtons,
+  readGamepadAxes,
+  normalizeToInt16,
+  normalizeToUint8,
+} from "./gfn/inputProtocol";
 import { formatShortcutForDisplay, isShortcutMatch, normalizeShortcut } from "./shortcuts";
 import { useControllerNavigation } from "./controllerNavigation";
 import { useElapsedSeconds } from "./utils/useElapsedSeconds";
@@ -258,6 +268,23 @@ function defaultDiagnostics(): StreamDiagnostics {
     decoderRecoveryAction: "none",
     micState: "uninitialized",
     micEnabled: false,
+  };
+}
+
+function applyNativeStreamerStats(event: Extract<NativeStreamerEvent, { type: "stats" }>, current: StreamDiagnostics): StreamDiagnostics {
+  const packetsReceived = event.stats.packetsReceived ?? current.packetsReceived;
+  const packetsLost = event.stats.packetsLost ?? current.packetsLost;
+  const totalPackets = Math.max(1, packetsReceived + packetsLost);
+  return {
+    ...current,
+    connectionState: event.stats.connectionState as StreamDiagnostics["connectionState"],
+    codec: event.stats.videoCodec ?? current.codec,
+    bitrateKbps: event.stats.bitrateKbps ?? current.bitrateKbps,
+    packetsReceived,
+    packetsLost,
+    packetLossPercent: totalPackets > 0 ? (packetsLost / totalPackets) * 100 : 0,
+    rttMs: event.stats.rttMs ?? current.rttMs,
+    inputReady: true,
   };
 }
 
@@ -633,6 +660,7 @@ export function App(): JSX.Element {
     keyboardLayout: DEFAULT_KEYBOARD_LAYOUT,
     gameLanguage: "en_US",
     enableL4S: false,
+    enableNativeStreamer: false,
   });
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [regions, setRegions] = useState<StreamRegion[]>([]);
@@ -660,6 +688,7 @@ export function App(): JSX.Element {
   const [sessionStartedAtMs, setSessionStartedAtMs] = useState<number | null>(null);
   const [streamWarning, setStreamWarning] = useState<StreamWarningState | null>(null);
   const [activeQueueAdId, setActiveQueueAdId] = useState<string | null>(null);
+  const [nativeStreamerActive, setNativeStreamerActive] = useState(false);
 
   const { playtime, startSession: startPlaytimeSession, endSession: endPlaytimeSession } = usePlaytime();
   const sessionElapsedSeconds = useElapsedSeconds(sessionStartedAtMs, streamStatus === "streaming");
@@ -1793,6 +1822,16 @@ export function App(): JSX.Element {
   // Signaling events
   useEffect(() => {
     const unsubscribe = window.openNow.onSignalingEvent(async (event: MainToRendererSignalingEvent) => {
+      if (settings.enableNativeStreamer) {
+        if (event.type === "disconnected") {
+          setNativeStreamerActive(false);
+          resetLaunchRuntime();
+          launchInFlightRef.current = false;
+        } else if (event.type === "error") {
+          console.error("Signaling error:", event.message);
+        }
+        return;
+      }
       console.log(`[App] Signaling event: ${event.type}`, event.type === "offer" ? `(SDP ${event.sdp.length} chars)` : "", event.type === "remote-ice" ? event.candidate : "");
       try {
         if (event.type === "offer") {
@@ -1878,11 +1917,61 @@ export function App(): JSX.Element {
     return () => unsubscribe();
   }, [resetLaunchRuntime, settings]);
 
+  useEffect(() => {
+    const unsubscribe = window.openNow.onNativeStreamerEvent((event) => {
+      if (event.type === "ready") {
+        setNativeStreamerActive(true);
+        setLaunchError(null);
+        setStreamStatus("streaming");
+        diagnosticsStore.set({
+          ...defaultDiagnostics(),
+          connectionState: "connecting",
+          inputReady: true,
+        });
+        return;
+      }
+      if (event.type === "state") {
+        if (event.status === "connected") {
+          setStreamStatus("streaming");
+        } else if (event.status === "connecting") {
+          setStreamStatus("connecting");
+        }
+        return;
+      }
+      if (event.type === "stats") {
+        diagnosticsStore.set(applyNativeStreamerStats(event, diagnosticsStore.getSnapshot()));
+        return;
+      }
+      if (event.type === "error") {
+        console.error("Native streamer error:", event.message);
+        setLaunchError({
+          title: "Native streamer failed",
+          description: event.message,
+          stage: "connecting",
+          codeLabel: event.code.toUpperCase(),
+        });
+        if (event.fatal) {
+          setNativeStreamerActive(false);
+          void window.openNow.stopNativeStreamer().catch(() => {});
+        }
+        return;
+      }
+      if (event.type === "stopped") {
+        setNativeStreamerActive(false);
+      }
+    });
+    return () => unsubscribe();
+  }, [diagnosticsStore]);
+
   // Save settings when changed
   const updateSetting = useCallback(async <K extends keyof Settings>(key: K, value: Settings[K]) => {
     setSettings((prev) => ({ ...prev, [key]: value }));
     if (settingsLoaded) {
       await window.openNow.setSetting(key, value);
+    }
+    if (key === "enableNativeStreamer" && value === false) {
+      setNativeStreamerActive(false);
+      await window.openNow.stopNativeStreamer().catch(() => {});
     }
     // If a running client exists, push certain settings live
     if (key === "mouseSensitivity") {
@@ -2110,6 +2199,26 @@ export function App(): JSX.Element {
     sessionRef.current = claimed;
     setQueuePosition(undefined);
     setStreamStatus("connecting");
+    if (settings.enableNativeStreamer) {
+      await window.openNow.startNativeStreamer({
+        session: claimed,
+        settings: {
+          resolution: settings.resolution,
+          fps: settings.fps,
+          maxBitrateMbps: settings.maxBitrateMbps,
+          codec: settings.codec,
+          colorQuality: settings.colorQuality,
+          mouseSensitivity: settings.mouseSensitivity,
+          mouseAcceleration: settings.mouseAcceleration,
+        },
+        window: {
+          width: Math.max(window.innerWidth, 1280),
+          height: Math.max(window.innerHeight, 720),
+          title: "OpenNOW Native Streamer",
+        },
+      });
+      setNativeStreamerActive(true);
+    }
     await window.openNow.connectSignaling({
       sessionId: claimed.sessionId,
       signalingServer: claimed.signalingServer,
@@ -2380,6 +2489,27 @@ export function App(): JSX.Element {
         status: sessionToConnect.status,
       });
 
+      if (settings.enableNativeStreamer) {
+        await window.openNow.startNativeStreamer({
+          session: sessionToConnect,
+          settings: {
+            resolution: settings.resolution,
+            fps: settings.fps,
+            maxBitrateMbps: settings.maxBitrateMbps,
+            codec: settings.codec,
+            colorQuality: settings.colorQuality,
+            mouseSensitivity: settings.mouseSensitivity,
+            mouseAcceleration: settings.mouseAcceleration,
+          },
+          window: {
+            width: Math.max(window.innerWidth, 1280),
+            height: Math.max(window.innerHeight, 720),
+            title: "OpenNOW Native Streamer",
+          },
+        });
+        setNativeStreamerActive(true);
+      }
+
       await window.openNow.connectSignaling({
         sessionId: sessionToConnect.sessionId,
         signalingServer: sessionToConnect.signalingServer,
@@ -2391,9 +2521,11 @@ export function App(): JSX.Element {
       }
       console.error("Launch failed:", error);
       setLaunchError(toLaunchErrorState(error, loadingStep));
+      await window.openNow.stopNativeStreamer().catch(() => {});
       await window.openNow.disconnectSignaling().catch(() => {});
       clientRef.current?.dispose();
       clientRef.current = null;
+      setNativeStreamerActive(false);
       resetLaunchRuntime({ keepLaunchError: true, keepStreamingContext: true });
       void refreshNavbarActiveSession();
     } finally {
@@ -2449,9 +2581,11 @@ export function App(): JSX.Element {
     } catch (error) {
       console.error("Navbar resume failed:", error);
       setLaunchError(toLaunchErrorState(error, loadingStep));
+      await window.openNow.stopNativeStreamer().catch(() => {});
       await window.openNow.disconnectSignaling().catch(() => {});
       clientRef.current?.dispose();
       clientRef.current = null;
+      setNativeStreamerActive(false);
       resetLaunchRuntime({ keepLaunchError: true });
       void refreshNavbarActiveSession();
     } finally {
@@ -2478,6 +2612,7 @@ export function App(): JSX.Element {
       if (status !== "idle" && status !== "streaming") {
         launchAbortRef.current = true;
       }
+      await window.openNow.stopNativeStreamer().catch(() => {});
       await window.openNow.disconnectSignaling();
 
       const current = sessionRef.current;
@@ -2496,6 +2631,7 @@ export function App(): JSX.Element {
 
       clientRef.current?.dispose();
       clientRef.current = null;
+      setNativeStreamerActive(false);
       setNavbarActiveSession(null);
       if (streamingGame) endPlaytimeSession(streamingGame.id);
       resetLaunchRuntime();
@@ -2554,12 +2690,132 @@ export function App(): JSX.Element {
   }, [handleStopStream, handlePlayGame]);
 
   const handleDismissLaunchError = useCallback(async () => {
+    await window.openNow.stopNativeStreamer().catch(() => {});
     await window.openNow.disconnectSignaling().catch(() => {});
     clientRef.current?.dispose();
     clientRef.current = null;
+    setNativeStreamerActive(false);
     resetLaunchRuntime();
     void refreshNavbarActiveSession();
   }, [refreshNavbarActiveSession, resetLaunchRuntime]);
+
+  useEffect(() => {
+    if (!settings.enableNativeStreamer || !nativeStreamerActive || streamStatus !== "streaming") {
+      return;
+    }
+
+    const activeKeys = new Set<string>();
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      const mapped = mapKeyboardEvent(event);
+      if (!mapped || activeKeys.has(event.code)) {
+        return;
+      }
+      activeKeys.add(event.code);
+      void window.openNow.sendNativeStreamerInput({
+        kind: "keyboard",
+        payload: {
+          keycode: mapped.vk,
+          scancode: mapped.scancode,
+          modifiers: modifierFlags(event),
+          down: true,
+        },
+      }).catch(() => {});
+    };
+
+    const handleKeyUp = (event: KeyboardEvent): void => {
+      const mapped = mapKeyboardEvent(event);
+      if (!mapped) {
+        return;
+      }
+      activeKeys.delete(event.code);
+      void window.openNow.sendNativeStreamerInput({
+        kind: "keyboard",
+        payload: {
+          keycode: mapped.vk,
+          scancode: mapped.scancode,
+          modifiers: modifierFlags(event),
+          down: false,
+        },
+      }).catch(() => {});
+    };
+
+    const handleMouseMove = (event: MouseEvent): void => {
+      void window.openNow.sendNativeStreamerInput({
+        kind: "mouse-move",
+        payload: {
+          dx: Math.max(-32768, Math.min(32767, Math.round(event.movementX * settings.mouseSensitivity))),
+          dy: Math.max(-32768, Math.min(32767, Math.round(event.movementY * settings.mouseSensitivity))),
+        },
+      }).catch(() => {});
+    };
+
+    const handleMouseButton = (event: MouseEvent, down: boolean): void => {
+      const button = toMouseButton(event.button);
+      if (button <= 0) {
+        return;
+      }
+      void window.openNow.sendNativeStreamerInput({
+        kind: "mouse-button",
+        payload: {
+          button,
+          down,
+        },
+      }).catch(() => {});
+    };
+
+    const handleWheel = (event: WheelEvent): void => {
+      void window.openNow.sendNativeStreamerInput({
+        kind: "mouse-wheel",
+        payload: {
+          delta: Math.max(-32768, Math.min(32767, Math.round(event.deltaY))),
+        },
+      }).catch(() => {});
+    };
+
+    const gamepadTimer = window.setInterval(() => {
+      const pads = navigator.getGamepads?.() ?? [];
+      pads.slice(0, 4).forEach((pad, index) => {
+        if (!pad) {
+          return;
+        }
+        const axes = readGamepadAxes(pad);
+        void window.openNow.sendNativeStreamerInput({
+          kind: "gamepad",
+          payload: {
+            controllerId: index,
+            buttons: mapGamepadButtons(pad),
+            leftTrigger: normalizeToUint8(axes.leftTrigger),
+            rightTrigger: normalizeToUint8(axes.rightTrigger),
+            leftStickX: normalizeToInt16(axes.leftStickX),
+            leftStickY: normalizeToInt16(axes.leftStickY),
+            rightStickX: normalizeToInt16(axes.rightStickX),
+            rightStickY: normalizeToInt16(axes.rightStickY),
+            connected: true,
+          },
+        }).catch(() => {});
+      });
+    }, 16);
+
+    const handleMouseDown = (event: MouseEvent): void => handleMouseButton(event, true);
+    const handleMouseUp = (event: MouseEvent): void => handleMouseButton(event, false);
+
+    window.addEventListener("keydown", handleKeyDown, true);
+    window.addEventListener("keyup", handleKeyUp, true);
+    window.addEventListener("mousemove", handleMouseMove, true);
+    window.addEventListener("mousedown", handleMouseDown, true);
+    window.addEventListener("mouseup", handleMouseUp, true);
+    window.addEventListener("wheel", handleWheel, { capture: true });
+
+    return () => {
+      window.clearInterval(gamepadTimer);
+      window.removeEventListener("keydown", handleKeyDown, true);
+      window.removeEventListener("keyup", handleKeyUp, true);
+      window.removeEventListener("mousemove", handleMouseMove, true);
+      window.removeEventListener("mousedown", handleMouseDown, true);
+      window.removeEventListener("mouseup", handleMouseUp, true);
+      window.removeEventListener("wheel", handleWheel, true);
+    };
+  }, [nativeStreamerActive, settings.enableNativeStreamer, settings.mouseSensitivity, streamStatus]);
 
   const releasePointerLockIfNeeded = useCallback(async () => {
     if (document.pointerLockElement) {
@@ -2706,6 +2962,9 @@ export function App(): JSX.Element {
         e.stopPropagation();
         e.stopImmediatePropagation();
         if (streamStatus === "streaming") {
+          if (settings.enableNativeStreamer) {
+            return;
+          }
           clientRef.current?.toggleMicrophone();
         }
       }
@@ -2813,7 +3072,7 @@ export function App(): JSX.Element {
   }
 
   const showLaunchOverlay = streamStatus !== "idle" || launchError !== null || isSwitchingGame;
-  const hasActiveStreamView = streamStatus !== "idle";
+  const hasActiveStreamView = streamStatus !== "idle" && !settings.enableNativeStreamer;
   const showLaunchErrorOverlay = launchError !== null;
   const showControllerLaunchLoading =
     !isSwitchingGame
@@ -2876,6 +3135,9 @@ export function App(): JSX.Element {
               void handlePromptedStopStream();
             }}
             onToggleMicrophone={() => {
+              if (settings.enableNativeStreamer) {
+                return;
+              }
               clientRef.current?.toggleMicrophone();
             }}
             mouseSensitivity={settings.mouseSensitivity}
@@ -2891,7 +3153,7 @@ export function App(): JSX.Element {
               void updateSetting("shortcutToggleRecording", value);
             }}
             subscriptionInfo={subscriptionInfo}
-            micTrack={clientRef.current?.getMicTrack() ?? null}
+            micTrack={settings.enableNativeStreamer ? null : (clientRef.current?.getMicTrack() ?? null)}
             onRequestPointerLock={handleRequestPointerLock}
             onReleasePointerLock={() => {
               void releasePointerLockIfNeeded();

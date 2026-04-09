@@ -107,6 +107,7 @@ For a fuller setup guide, see [docs/development.md](docs/development.md).
 
 ```text
 .
+├── opennow-native-streamer/   Go native streamer foundation
 ├── opennow-stable/   Electron app workspace
 ├── docs/             Local project documentation
 ├── .github/          Workflows, templates, contributing docs
@@ -131,6 +132,8 @@ OpenNOW is split into three Electron layers:
 | Renderer | React + TypeScript | Login flow, browsing, settings, WebRTC playback, diagnostics, controls |
 
 The code lives under [`opennow-stable/src/`](opennow-stable/src), with shared TypeScript types and IPC contracts in [`opennow-stable/src/shared/`](opennow-stable/src/shared).
+
+The repository now also contains [`opennow-native-streamer/`](opennow-native-streamer), a separate Go-based native streamer foundation. Electron main still owns CloudMatch and signaling, while the native process is responsible for the native window, Pion-based WebRTC endpoint, GStreamer-backed media layer, and native input path. The browser/Chromium path remains the default fallback and is controlled by the `Native Streamer` beta toggle in Settings.
 
 ## Contributing
 

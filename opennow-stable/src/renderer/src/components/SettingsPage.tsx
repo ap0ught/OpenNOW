@@ -1833,6 +1833,24 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
             <div className="settings-row">
               <label className="settings-label">
                 <span className="settings-label-title">
+                  Native Streamer
+                  <span className="settings-inline-badge settings-inline-badge--beta">Beta</span>
+                </span>
+                <span className="settings-hint">Launch the separate OpenNOW Native Streamer backend/window for native playback and input. Disable to keep the existing browser-based streamer path.</span>
+              </label>
+              <label className="settings-toggle">
+                <input
+                  type="checkbox"
+                  checked={settings.enableNativeStreamer}
+                  onChange={(e) => handleChange("enableNativeStreamer", e.target.checked)}
+                />
+                <span className="settings-toggle-track" />
+              </label>
+            </div>
+
+            <div className="settings-row">
+              <label className="settings-label">
+                <span className="settings-label-title">
                   Controller Mode Library
                   <span className="settings-inline-badge settings-inline-badge--beta">Beta</span>
                 </span>

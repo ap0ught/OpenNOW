@@ -18,6 +18,9 @@ import type {
   SendAnswerRequest,
   IceCandidatePayload,
   KeyframeRequest,
+  NativeStreamerEvent,
+  NativeStreamerInputEnvelope,
+  NativeStreamerStartRequest,
   Settings,
   SubscriptionFetchRequest,
   StreamRegion,
@@ -72,6 +75,21 @@ const api: OpenNowApi = {
     ipcRenderer.on(IPC_CHANNELS.SIGNALING_EVENT, wrapped);
     return () => {
       ipcRenderer.off(IPC_CHANNELS.SIGNALING_EVENT, wrapped);
+    };
+  },
+  startNativeStreamer: (input: NativeStreamerStartRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.NATIVE_STREAMER_START, input),
+  stopNativeStreamer: () => ipcRenderer.invoke(IPC_CHANNELS.NATIVE_STREAMER_STOP),
+  sendNativeStreamerInput: (input: NativeStreamerInputEnvelope) =>
+    ipcRenderer.invoke(IPC_CHANNELS.NATIVE_STREAMER_INPUT, input),
+  onNativeStreamerEvent: (listener: (event: NativeStreamerEvent) => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, payload: NativeStreamerEvent) => {
+      listener(payload);
+    };
+
+    ipcRenderer.on(IPC_CHANNELS.NATIVE_STREAMER_EVENT, wrapped);
+    return () => {
+      ipcRenderer.off(IPC_CHANNELS.NATIVE_STREAMER_EVENT, wrapped);
     };
   },
   onToggleFullscreen: (listener: () => void) => {

@@ -25,6 +25,8 @@ import {
 } from "./gfn/games";
 import type {
   MainToRendererSignalingEvent,
+  NativeStreamerInputEnvelope,
+  NativeStreamerStartRequest,
   AuthLoginRequest,
   SessionInfo,
   AuthSessionRequest,
@@ -73,6 +75,7 @@ import {
 import { fetchSubscription, fetchDynamicRegions } from "./gfn/subscription";
 import { GfnSignalingClient } from "./gfn/signaling";
 import { isSessionError, SessionError, GfnErrorCode } from "./gfn/errorCodes";
+import { NativeStreamerManager, emitNativeStreamerEvent } from "./services/nativeStreamerManager";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -187,6 +190,7 @@ app.commandLine.appendSwitch("max-gum-fps", "999");
 let mainWindow: BrowserWindow | null = null;
 let signalingClient: GfnSignalingClient | null = null;
 let signalingClientKey: string | null = null;
+let nativeStreamerManager: NativeStreamerManager | null = null;
 let authService: AuthService;
 let settingsManager: SettingsManager;
 const SCREENSHOT_LIMIT = 60;
@@ -486,6 +490,20 @@ function emitToRenderer(event: MainToRendererSignalingEvent): void {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send(IPC_CHANNELS.SIGNALING_EVENT, event);
   }
+}
+
+async function sendAnswerToSignaling(payload: SendAnswerRequest): Promise<void> {
+  if (!signalingClient) {
+    throw new Error("Signaling is not connected");
+  }
+  await signalingClient.sendAnswer(payload);
+}
+
+async function sendIceCandidateToSignaling(payload: IceCandidatePayload): Promise<void> {
+  if (!signalingClient) {
+    throw new Error("Signaling is not connected");
+  }
+  await signalingClient.sendIceCandidate(payload);
 }
 
 async function createMainWindow(): Promise<void> {
@@ -844,29 +862,27 @@ function registerIpcHandlers(): void {
         payload.signalingUrl,
       );
       signalingClientKey = nextKey;
-      signalingClient.onEvent(emitToRenderer);
+      signalingClient.onEvent((event) => {
+        emitToRenderer(event);
+        void nativeStreamerManager?.handleSignalingEvent(event);
+      });
       await signalingClient.connect();
     },
   );
 
   ipcMain.handle(IPC_CHANNELS.DISCONNECT_SIGNALING, async (): Promise<void> => {
+    await nativeStreamerManager?.stop().catch(() => {});
     signalingClient?.disconnect();
     signalingClient = null;
     signalingClientKey = null;
   });
 
   ipcMain.handle(IPC_CHANNELS.SEND_ANSWER, async (_event, payload: SendAnswerRequest) => {
-    if (!signalingClient) {
-      throw new Error("Signaling is not connected");
-    }
-    return signalingClient.sendAnswer(payload);
+    return sendAnswerToSignaling(payload);
   });
 
   ipcMain.handle(IPC_CHANNELS.SEND_ICE_CANDIDATE, async (_event, payload: IceCandidatePayload) => {
-    if (!signalingClient) {
-      throw new Error("Signaling is not connected");
-    }
-    return signalingClient.sendIceCandidate(payload);
+    return sendIceCandidateToSignaling(payload);
   });
 
   ipcMain.handle(IPC_CHANNELS.REQUEST_KEYFRAME, async (_event, payload: KeyframeRequest) => {
@@ -874,6 +890,24 @@ function registerIpcHandlers(): void {
       throw new Error("Signaling is not connected");
     }
     return signalingClient.requestKeyframe(payload);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.NATIVE_STREAMER_START, async (_event, payload: NativeStreamerStartRequest) => {
+    if (!nativeStreamerManager) {
+      throw new Error("Native streamer manager is not initialized");
+    }
+    await nativeStreamerManager.start(payload);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.NATIVE_STREAMER_STOP, async () => {
+    await nativeStreamerManager?.stop();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.NATIVE_STREAMER_INPUT, async (_event, payload: NativeStreamerInputEnvelope) => {
+    if (!nativeStreamerManager) {
+      throw new Error("Native streamer manager is not initialized");
+    }
+    await nativeStreamerManager.sendInput(payload);
   });
 
   // Toggle fullscreen via IPC (for completeness)
@@ -1264,6 +1298,11 @@ app.whenReady().then(async () => {
   await authService.initialize();
 
   settingsManager = getSettingsManager();
+  nativeStreamerManager = new NativeStreamerManager({
+    onEvent: (event) => emitNativeStreamerEvent(mainWindow, event),
+    onSendAnswer: sendAnswerToSignaling,
+    onSendIceCandidate: sendIceCandidateToSignaling,
+  });
 
   // Request microphone permission on macOS at startup
   if (process.platform === "darwin") {
@@ -1354,9 +1393,11 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", () => {
   refreshScheduler.stop();
+  void nativeStreamerManager?.stop().catch(() => {});
   signalingClient?.disconnect();
   signalingClient = null;
   signalingClientKey = null;
+  nativeStreamerManager = null;
 });
 
 // Export for use by other modules

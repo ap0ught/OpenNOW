@@ -1,6 +1,7 @@
 # Development Guide
 
 This guide covers the active Electron-based OpenNOW client in [`opennow-stable/`](../opennow-stable).
+The repository also contains the separate Go native streamer foundation in [`opennow-native-streamer/`](../opennow-native-streamer).
 
 ## Prerequisites
 
@@ -58,6 +59,17 @@ opennow-stable/
 └── tsconfig*.json
 ```
 
+```text
+opennow-native-streamer/
+├── cmd/opennow-native-streamer/  Native process entrypoint
+├── internal/ipc/                Versioned main↔native control protocol
+├── internal/webrtc/             SDP/NVST helpers and Pion endpoint
+├── internal/media/              GStreamer-backed playback abstraction
+├── internal/input/              GFN-compatible input encoding
+├── internal/platform/           Platform and decoder probing
+└── pkg/protocol/                Shared IPC message contracts
+```
+
 ## Architecture
 
 ### Main process
@@ -67,7 +79,7 @@ The main process handles platform and system responsibilities:
 - OAuth and session bootstrap
 - Game catalog fetches and cache refresh
 - CloudMatch session creation, polling, claiming, and stopping
-- Signaling and low-level Electron integration
+- Signaling, native streamer supervision, and low-level Electron integration
 - Local media management for screenshots and recordings
 - Persistent settings storage
 
@@ -91,7 +103,18 @@ The renderer is a React app responsible for:
 - Browsing the catalog and public listings
 - Managing stream launch state and session recovery
 - Rendering the WebRTC stream
+- Switching between Chromium/WebRTC and the native streamer backend
 - Handling controller input, shortcuts, stats overlay, screenshots, recordings, and settings UI
+
+### Native streamer foundation
+
+The native streamer is a separate process and window, not an embedded browser surface. In the current foundation:
+
+- Electron main continues to own session lifecycle and the signaling WebSocket
+- Electron main spawns the Go process and communicates over a local versioned socket protocol
+- The Go process handles SDP/NVST munging, Pion `PeerConnection` setup, native input encoding, and the media abstraction
+- GStreamer is the intended media/rendering backbone; non-`gstreamer` builds keep the control plane compilable for CI and development environments that do not have GStreamer installed
+- Linux ARM / Raspberry Pi are first-class in the module layout through platform probing and decoder fallback structure
 
 Key entry points:
 

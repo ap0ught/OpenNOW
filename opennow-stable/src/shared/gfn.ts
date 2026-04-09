@@ -116,6 +116,8 @@ export interface Settings {
   gameLanguage: GameLanguage;
   /** Experimental request for Low Latency, Low Loss, Scalable throughput on new sessions */
   enableL4S: boolean;
+  /** Launch the separate Go native streamer backend/window instead of Chromium WebRTC */
+  enableNativeStreamer: boolean;
 }
 
 export interface LoginProvider {
@@ -496,6 +498,29 @@ export interface KeyframeRequest {
   attempt: number;
 }
 
+export interface NativeStreamerStartRequest {
+  session: SessionInfo;
+  settings: Pick<Settings, "resolution" | "fps" | "maxBitrateMbps" | "codec" | "colorQuality" | "mouseSensitivity" | "mouseAcceleration">;
+  window?: {
+    width?: number;
+    height?: number;
+    title?: string;
+  };
+}
+
+export interface NativeStreamerInputEnvelope {
+  kind: "keyboard" | "mouse-move" | "mouse-button" | "mouse-wheel" | "gamepad";
+  payload: Record<string, unknown>;
+}
+
+export type NativeStreamerEvent =
+  | { type: "starting"; message?: string }
+  | { type: "ready"; message?: string }
+  | { type: "state"; status: string; message?: string }
+  | { type: "stats"; stats: { connectionState: string; videoCodec?: string; audioCodec?: string; bitrateKbps: number; packetsLost: number; packetsReceived: number; rttMs: number } }
+  | { type: "error"; code: string; message: string; fatal: boolean }
+  | { type: "stopped"; reason?: string };
+
 export type MainToRendererSignalingEvent =
   | { type: "connected" }
   | { type: "disconnected"; reason: string }
@@ -534,6 +559,10 @@ export interface OpenNowApi {
   sendIceCandidate(input: IceCandidatePayload): Promise<void>;
   requestKeyframe(input: KeyframeRequest): Promise<void>;
   onSignalingEvent(listener: (event: MainToRendererSignalingEvent) => void): () => void;
+  startNativeStreamer(input: NativeStreamerStartRequest): Promise<void>;
+  stopNativeStreamer(): Promise<void>;
+  sendNativeStreamerInput(input: NativeStreamerInputEnvelope): Promise<void>;
+  onNativeStreamerEvent(listener: (event: NativeStreamerEvent) => void): () => void;
   /** Listen for F11 fullscreen toggle from main process */
   onToggleFullscreen(listener: () => void): () => void;
   quitApp(): Promise<void>;
