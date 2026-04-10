@@ -87,7 +87,7 @@ Current CI caveats:
 
 - Linux arm64 / Raspberry Pi is intentionally not greenwashed in CI yet. The codebase treats it as a real target, but the workflow leaves it disabled until runner and dependency provisioning are reproducible.
 - The workflow installs native GStreamer / SDL2 development dependencies per platform before building.
-- Windows builds use MSYS2 UCRT64 packages for the CGO compiler, `pkg-config`, GStreamer, and SDL2, and the workflow now bundles the matching runtime DLLs and GStreamer plugin tree into the artifact so end users do not need a separate MSYS2 installation.
+- Windows builds use MSYS2 UCRT64 packages for the CGO compiler, `pkg-config`, GStreamer, SDL2, and the required GStreamer plugin sets for the shipped RTP media paths, and the workflow bundles the matching runtime DLLs and plugin tree into the artifact so end users do not need a separate MSYS2 installation.
 - A separately installed official GStreamer MSVC runtime does not satisfy the MSYS2/UCRT build produced by CI. Use the bundled Windows artifact contents as-is.
 
 ## Platform notes

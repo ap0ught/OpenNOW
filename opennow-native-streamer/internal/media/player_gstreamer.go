@@ -120,6 +120,9 @@ func verifyRuntimeElements(codec string) error {
 	for _, name := range required {
 		element, err := gst.NewElement(name)
 		if err != nil {
+			if codec == "AV1" && name == "rtpav1depay" {
+				return fmt.Errorf("gstreamer runtime does not provide AV1 RTP support (missing %q): %w", name, err)
+			}
 			return fmt.Errorf("gstreamer runtime missing required element %q: %w", name, err)
 		}
 		element.Unref()
