@@ -141,7 +141,7 @@ The code lives under [`opennow-stable/src/`](opennow-stable/src), with shared Ty
 The Android target is an initial pass intended to run the core OpenNOW flow inside a Capacitor WebView. Current Android support includes:
 
 - auth session restore
-- login via external browser + deep-link callback
+- login via external browser + localhost callback matching the desktop redirect contract
 - provider and region loading
 - main/library/public game catalog fetches
 - session create, poll, claim, and stop
@@ -157,6 +157,8 @@ Known Android limitations in this pass:
 - no show-in-folder integration for media
 - screenshot export/save-as remains desktop-only
 - some desktop shortcut UX is hidden or non-applicable on touch devices
+
+Android auth now mirrors the desktop localhost callback flow by opening the browser externally and receiving the OAuth code on a temporary localhost listener inside the Android shell.
 
 CI also produces a testable Android APK artifact from the Capacitor target so reviewers can install and validate the current branch without making a release build.
 

@@ -1,6 +1,6 @@
 import { App as CapacitorApp } from "@capacitor/app";
 import { Browser } from "@capacitor/browser";
-import { Capacitor, CapacitorHttp, type PluginListenerHandle } from "@capacitor/core";
+import { CapacitorHttp, registerPlugin, type PluginListenerHandle } from "@capacitor/core";
 import { Device } from "@capacitor/device";
 import { Directory, Filesystem } from "@capacitor/filesystem";
 import { Preferences } from "@capacitor/preferences";
@@ -81,7 +81,6 @@ import { DEFAULT_SETTINGS } from "@shared/settings";
 import type { OpenNowPlatform } from "../types";
 import { BrowserSignalingClient } from "./browserSignaling";
 
-const APP_SCHEME = "com.opencloudgaming.opennow";
 const AUTH_STATE_KEY = "opennow.android.auth-state.v1";
 const SETTINGS_KEY = "opennow.android.settings.v1";
 const RECORDINGS_KEY = "opennow.android.recordings.v1";
@@ -91,6 +90,14 @@ const PUBLIC_GAMES_URL = "https://static.nvidiagrid.net/supported-public-game-li
 const PANELS_QUERY_HASH = "f8e26265a5db5c20e1334a6872cf04b6e3970507697f6ae55a6ddefa5420daf0";
 const APP_METADATA_QUERY_HASH = "39187e85b6dcf60b7279a5f233288b0a8b69a8b1dbcfb5b25555afdcb988f0d7";
 const DEFAULT_LOCALE = "en_US";
+
+interface LocalhostAuthPlugin {
+  startServer(): Promise<{ port: number }>;
+  waitForCode(options: { timeoutMs?: number }): Promise<{ code: string }>;
+  stopServer(): Promise<void>;
+}
+
+const LocalhostAuth = registerPlugin<LocalhostAuthPlugin>("LocalhostAuth");
 
 interface PersistedAuthState { session: AuthSession | null; selectedProvider: LoginProvider | null; }
 interface TokenResponse { access_token: string; refresh_token?: string; id_token?: string; client_token?: string; expires_in?: number; }
@@ -119,10 +126,10 @@ function mergeAppMetaIntoGame(game: GameInfo, app: AppData): GameInfo { const va
 async function readPreferenceJson<T>(key: string, fallback: T): Promise<T> { const { value } = await Preferences.get({ key }); if (!value) return fallback; try { return JSON.parse(value) as T; } catch { return fallback; } }
 async function writePreferenceJson<T>(key: string, value: T): Promise<void> { await Preferences.set({ key, value: JSON.stringify(value) }); }
 async function httpRequest<T>(url: string, options: { method?: string; headers?: Record<string, string>; data?: unknown; responseType?: "json" | "text" } = {}): Promise<T> { const response = await CapacitorHttp.request({ url, method: options.method ?? "GET", headers: options.headers, data: options.data, responseType: options.responseType ?? "json", readTimeout: 120000, connectTimeout: 30000 }); if (response.status < 200 || response.status >= 300) { const body = typeof response.data === "string" ? response.data : JSON.stringify(response.data); throw new Error(`HTTP ${response.status}: ${body.slice(0, 500)}`); } return response.data as T; }
-function authRedirectUri(): string { return `${APP_SCHEME}://auth/callback`; }
+function authRedirectUri(port: number): string { return `http://localhost:${port}`; }
 async function createPkce(): Promise<{ verifier: string; challenge: string }> { const bytes = new Uint8Array(64); crypto.getRandomValues(bytes); let binary = ""; for (const value of bytes) binary += String.fromCharCode(value); const verifier = btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "").slice(0, 86); const challengeBuffer = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)); let challengeBinary = ""; for (const value of new Uint8Array(challengeBuffer)) challengeBinary += String.fromCharCode(value); const challenge = btoa(challengeBinary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, ""); return { verifier, challenge }; }
-function buildAuthUrl(provider: LoginProvider, challenge: string, deviceId: string): string { const nonce = `${Math.random().toString(16).slice(2)}${Math.random().toString(16).slice(2)}`; const params = new URLSearchParams({ response_type: "code", device_id: deviceId, scope: SCOPES, client_id: CLIENT_ID, redirect_uri: authRedirectUri(), ui_locales: "en_US", nonce, prompt: "select_account", code_challenge: challenge, code_challenge_method: "S256", idp_id: provider.idpId }); return `${AUTH_ENDPOINT}?${params.toString()}`; }
-async function exchangeAuthorizationCode(code: string, verifier: string): Promise<AuthTokens> { const body = new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: authRedirectUri(), code_verifier: verifier }); const payload = await httpRequest<TokenResponse>(TOKEN_ENDPOINT, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", Origin: "https://nvfile", Referer: "https://nvfile/", Accept: "application/json, text/plain, */*", "User-Agent": GFN_USER_AGENT }, data: body.toString() }); return { accessToken: payload.access_token, refreshToken: payload.refresh_token, idToken: payload.id_token, expiresAt: toExpiresAt(payload.expires_in) }; }
+function buildAuthUrl(provider: LoginProvider, challenge: string, deviceId: string, port: number): string { const nonce = `${Math.random().toString(16).slice(2)}${Math.random().toString(16).slice(2)}`; const params = new URLSearchParams({ response_type: "code", device_id: deviceId, scope: SCOPES, client_id: CLIENT_ID, redirect_uri: authRedirectUri(port), ui_locales: "en_US", nonce, prompt: "select_account", code_challenge: challenge, code_challenge_method: "S256", idp_id: provider.idpId }); return `${AUTH_ENDPOINT}?${params.toString()}`; }
+async function exchangeAuthorizationCode(code: string, verifier: string, port: number): Promise<AuthTokens> { const body = new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: authRedirectUri(port), code_verifier: verifier }); const payload = await httpRequest<TokenResponse>(TOKEN_ENDPOINT, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", Origin: "https://nvfile", Referer: "https://nvfile/", Accept: "application/json, text/plain, */*", "User-Agent": GFN_USER_AGENT }, data: body.toString() }); return { accessToken: payload.access_token, refreshToken: payload.refresh_token, idToken: payload.id_token, expiresAt: toExpiresAt(payload.expires_in) }; }
 async function refreshAuthTokens(refreshToken: string): Promise<AuthTokens> { const body = new URLSearchParams({ grant_type: "refresh_token", refresh_token: refreshToken, client_id: CLIENT_ID }); const payload = await httpRequest<TokenResponse>(TOKEN_ENDPOINT, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", Origin: "https://nvfile", Accept: "application/json, text/plain, */*", "User-Agent": GFN_USER_AGENT }, data: body.toString() }); return { accessToken: payload.access_token, refreshToken: payload.refresh_token ?? refreshToken, idToken: payload.id_token, expiresAt: toExpiresAt(payload.expires_in) }; }
 async function requestClientToken(accessToken: string): Promise<{ token: string; expiresAt: number; lifetimeMs: number }> { const payload = await httpRequest<ClientTokenResponse>(CLIENT_TOKEN_ENDPOINT, { headers: { Authorization: `Bearer ${accessToken}`, Origin: "https://nvfile", Accept: "application/json, text/plain, */*", "User-Agent": GFN_USER_AGENT } }); const expiresAt = toExpiresAt(payload.expires_in); return { token: payload.client_token, expiresAt, lifetimeMs: Math.max(0, expiresAt - Date.now()) }; }
 async function refreshWithClientToken(clientToken: string, userId: string): Promise<TokenResponse> { const body = new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:client_token", client_token: clientToken, client_id: CLIENT_ID, sub: userId }); return httpRequest<TokenResponse>(TOKEN_ENDPOINT, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", Origin: "https://nvfile", Accept: "application/json, text/plain, */*", "User-Agent": GFN_USER_AGENT }, data: body.toString() }); }
@@ -144,60 +151,41 @@ class AndroidAuthService {
     await writePreferenceJson(AUTH_STATE_KEY, { session: this.session, selectedProvider: this.selectedProvider });
   }
 
-  private async waitForAuthorizationCode(authUrl: string): Promise<string> {
-    let timeoutId: number | null = null;
-    let appUrlListener: PluginListenerHandle | null = null;
+  private async waitForAuthorizationCodeWithPort(authUrlTemplate: string, timeoutMs = 180000): Promise<{ code: string; port: number }> {
     let browserFinishedListener: PluginListenerHandle | null = null;
     let settled = false;
 
     const cleanup = async (): Promise<void> => {
-      if (timeoutId !== null) {
-        window.clearTimeout(timeoutId);
-        timeoutId = null;
-      }
       await Promise.allSettled([
-        appUrlListener?.remove() ?? Promise.resolve(),
         browserFinishedListener?.remove() ?? Promise.resolve(),
+        LocalhostAuth.stopServer().catch(() => undefined),
         Browser.close().catch(() => undefined),
       ]);
-      appUrlListener = null;
       browserFinishedListener = null;
     };
 
     try {
-      return await new Promise<string>(async (resolve, reject) => {
+      const { port } = await LocalhostAuth.startServer();
+      const authUrl = authUrlTemplate.replace("__PORT__", String(port));
+      return await new Promise<{ code: string; port: number }>(async (resolve, reject) => {
         const settle = (fn: () => void): void => {
           if (settled) return;
           settled = true;
           fn();
         };
 
-        timeoutId = window.setTimeout(() => {
-          settle(() => reject(new Error("Timed out waiting for OAuth callback")));
-        }, 180000);
-
-        appUrlListener = await CapacitorApp.addListener("appUrlOpen", ({ url }) => {
-          let parsed: URL;
-          try {
-            parsed = new URL(url);
-          } catch {
-            return;
-          }
-          if (parsed.protocol !== `${APP_SCHEME}:`) return;
-          const error = parsed.searchParams.get("error");
-          const code = parsed.searchParams.get("code");
-          settle(() => {
-            if (error) reject(new Error(error));
-            else if (!code) reject(new Error("Authorization failed"));
-            else resolve(code);
-          });
+        browserFinishedListener = await Browser.addListener("browserFinished", () => {
+          settle(() => reject(new Error("Login was cancelled before the OAuth callback completed")));
         });
 
-        if (Capacitor.getPlatform() === "android") {
-          browserFinishedListener = await Browser.addListener("browserFinished", () => {
-            settle(() => reject(new Error("Login was cancelled before the OAuth callback completed")));
+        void LocalhostAuth.waitForCode({ timeoutMs })
+          .then(({ code }) => {
+            settle(() => resolve({ code, port }));
+          })
+          .catch((error) => {
+            const message = error instanceof Error ? error.message : String(error);
+            settle(() => reject(new Error(message)));
           });
-        }
 
         try {
           await Browser.open({ url: authUrl, presentationStyle: "fullscreen" });
@@ -239,9 +227,10 @@ class AndroidAuthService {
     const { identifier } = await Device.getId();
     const deviceId = identifier || `android-${Math.random().toString(16).slice(2)}`;
     const { verifier, challenge } = await createPkce();
-    const authUrl = buildAuthUrl(this.selectedProvider, challenge, deviceId);
-    const code = await this.waitForAuthorizationCode(authUrl);
-    const initialTokens = await exchangeAuthorizationCode(code, verifier);
+    const portPlaceholder = "__PORT__";
+    const authUrl = buildAuthUrl(this.selectedProvider, challenge, deviceId, 0).replace(":0", `:${portPlaceholder}`);
+    const { code, port } = await this.waitForAuthorizationCodeWithPort(authUrl);
+    const initialTokens = await exchangeAuthorizationCode(code, verifier, port);
     const user = await fetchUserInfo(initialTokens);
     let tokens = initialTokens;
     try { tokens = await this.ensureClientToken(tokens, user.userId); } catch {}

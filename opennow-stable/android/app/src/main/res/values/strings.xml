@@ -3,5 +3,4 @@
     <string name="app_name">OpenNOW</string>
     <string name="title_activity_main">OpenNOW</string>
     <string name="package_name">com.opencloudgaming.opennow</string>
-    <string name="custom_url_scheme">com.opencloudgaming.opennow</string>
 </resources>
