@@ -2,7 +2,7 @@ import { app } from "electron";
 import { join } from "node:path";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import type { VideoCodec, ColorQuality, VideoAccelerationPreference, MicrophoneMode, GameLanguage, AspectRatio, KeyboardLayout } from "@shared/gfn";
-import { DEFAULT_KEYBOARD_LAYOUT } from "@shared/gfn";
+import { normalizeStreamPreferences } from "@shared/gfn";
 import { DEFAULT_SETTINGS as SHARED_DEFAULT_SETTINGS } from "@shared/settings";
 
 export interface Settings {
@@ -16,6 +16,10 @@ export interface Settings {
   maxBitrateMbps: number;
   /** Preferred video codec */
   codec: VideoCodec;
+  /** Preferred video decode acceleration mode */
+  decoderPreference: VideoAccelerationPreference;
+  /** Preferred video encode acceleration mode */
+  encoderPreference: VideoAccelerationPreference;
   /** Color quality (bit depth + chroma subsampling) */
   colorQuality: ColorQuality;
   /** Preferred region URL (empty = auto) */
@@ -82,7 +86,6 @@ const defaultAntiAfkShortcut = "Ctrl+Shift+K";
 const defaultMicShortcut = "Ctrl+Shift+M";
 const LEGACY_STOP_SHORTCUTS = new Set(["META+SHIFT+Q", "CMD+SHIFT+Q"]);
 const LEGACY_ANTI_AFK_SHORTCUTS = new Set(["META+SHIFT+F10", "CMD+SHIFT+F10", "CTRL+SHIFT+F10"]);
-
 const DEFAULT_SETTINGS: Settings = { ...SHARED_DEFAULT_SETTINGS };
 
 export class SettingsManager {
@@ -138,15 +141,17 @@ export class SettingsManager {
   }
 
   private enforceCompatibility(settings: Settings): boolean {
-    if (settings.codec === "H264" && settings.colorQuality !== "8bit_420") {
-      console.warn(
-        `[Settings] colorQuality "${settings.colorQuality}" is incompatible with H264; resetting to 8bit_420`,
-      );
-      settings.colorQuality = "8bit_420";
-      return true;
+    const normalized = normalizeStreamPreferences(settings.codec, settings.colorQuality);
+    if (!normalized.migrated) {
+      return false;
     }
 
-    return false;
+    console.warn(
+      `[Settings] Migrating unsupported stream settings codec="${settings.codec}" colorQuality="${settings.colorQuality}" to ${normalized.codec}/${normalized.colorQuality}`,
+    );
+    settings.codec = normalized.codec;
+    settings.colorQuality = normalized.colorQuality;
+    return true;
   }
 
   private migrateLegacyShortcutDefaults(settings: Settings): boolean {
@@ -204,6 +209,7 @@ export class SettingsManager {
    */
   set<K extends keyof Settings>(key: K, value: Settings[K]): void {
     this.settings[key] = value;
+    this.enforceCompatibility(this.settings);
     this.save();
   }
 
@@ -215,6 +221,7 @@ export class SettingsManager {
       ...this.settings,
       ...updates,
     };
+    this.enforceCompatibility(this.settings);
     this.save();
   }
 

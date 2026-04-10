@@ -1,12 +1,17 @@
 import type { Settings } from "./gfn";
+import { DEFAULT_KEYBOARD_LAYOUT, getDefaultStreamPreferences } from "./gfn";
+
+const DEFAULT_STREAM_PREFERENCES = getDefaultStreamPreferences();
 
 export const DEFAULT_SETTINGS: Settings = {
   resolution: "1920x1080",
   aspectRatio: "16:9",
   fps: 60,
   maxBitrateMbps: 75,
-  codec: "H264",
-  colorQuality: "8bit_420",
+  codec: DEFAULT_STREAM_PREFERENCES.codec,
+  decoderPreference: "auto",
+  encoderPreference: "auto",
+  colorQuality: DEFAULT_STREAM_PREFERENCES.colorQuality,
   region: "",
   clipboardPaste: false,
   mouseSensitivity: 1,
@@ -33,7 +38,7 @@ export const DEFAULT_SETTINGS: Settings = {
   sessionClockShowDurationSeconds: 30,
   windowWidth: 1400,
   windowHeight: 900,
-  keyboardLayout: "en-US",
+  keyboardLayout: DEFAULT_KEYBOARD_LAYOUT,
   gameLanguage: "en_US",
   enableL4S: false,
 };
