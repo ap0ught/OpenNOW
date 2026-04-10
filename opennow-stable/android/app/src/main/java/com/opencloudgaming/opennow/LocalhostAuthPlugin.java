@@ -66,7 +66,7 @@ public class LocalhostAuthPlugin extends Plugin {
             future = callbackFuture;
         }
         if (future == null) {
-            call.reject("Localhost OAuth callback server is not running");
+            rejectCall(call, "Localhost OAuth callback server is not running", null);
             return;
         }
 
@@ -84,7 +84,7 @@ public class LocalhostAuthPlugin extends Plugin {
             if (throwable == null && result != null) {
                 JSObject payload = new JSObject();
                 payload.put("code", result.code);
-                call.resolve(payload);
+                resolveCall(call, payload);
                 return;
             }
 
@@ -92,15 +92,11 @@ public class LocalhostAuthPlugin extends Plugin {
                 ? throwable.getCause()
                 : throwable;
             if (cause instanceof TimeoutException) {
-                call.reject("Timed out waiting for OAuth callback", (Exception) cause);
+                rejectCall(call, "Timed out waiting for OAuth callback", cause);
                 return;
             }
-            if (cause instanceof Exception) {
-                String message = cause.getMessage() != null ? cause.getMessage() : cause.toString();
-                call.reject(message, (Exception) cause);
-                return;
-            }
-            call.reject(cause != null && cause.getMessage() != null ? cause.getMessage() : "Authorization failed");
+            String message = cause != null && cause.getMessage() != null ? cause.getMessage() : "Authorization failed";
+            rejectCall(call, message, cause);
         });
     }
 
@@ -125,7 +121,7 @@ public class LocalhostAuthPlugin extends Plugin {
             } catch (IOException ignored) {
             }
         }
-        return createServerSocket(0);
+        throw new IOException("No available OAuth callback ports");
     }
 
     private ServerSocket createServerSocket(int port) throws IOException {
@@ -148,10 +144,13 @@ public class LocalhostAuthPlugin extends Plugin {
 
         try (Socket client = socket.accept()) {
             handleClient(client, future);
-        } catch (IOException error) {
+        } catch (Throwable error) {
             synchronized (lock) {
                 if (callbackFuture == future && !future.isDone()) {
-                    closeServerLocked(true, new IOException("Localhost OAuth callback failed", error));
+                    Throwable wrapped = error instanceof IOException
+                        ? new IOException("Localhost OAuth callback failed", error)
+                        : new IllegalStateException("Localhost OAuth callback failed", error);
+                    closeServerLocked(true, wrapped);
                 }
             }
         } finally {
@@ -219,6 +218,25 @@ public class LocalhostAuthPlugin extends Plugin {
             closeServerLocked(true, new IllegalStateException("OAuth callback server stopped before a code was received"));
         }
     }
+
+    private void resolveCall(PluginCall call, JSObject payload) {
+        getActivity().runOnUiThread(() -> call.resolve(payload));
+    }
+
+    private void rejectCall(PluginCall call, String message, Throwable cause) {
+        getActivity().runOnUiThread(() -> {
+            if (cause instanceof Exception) {
+                call.reject(message, (Exception) cause);
+                return;
+            }
+            if (cause != null) {
+                call.reject(message + ": " + cause);
+                return;
+            }
+            call.reject(message);
+        });
+    }
+
 
     private void closeServerLocked(boolean completePending, Throwable cause) {
         if (serverSocket != null) {

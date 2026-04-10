@@ -153,9 +153,14 @@ class AndroidAuthService {
 
   private async waitForAuthorizationCode(authUrl: string, port: number, timeoutMs = 180000): Promise<string> {
     let browserFinishedListener: PluginListenerHandle | null = null;
+    let browserFinishedTimeout: ReturnType<typeof setTimeout> | null = null;
     let settled = false;
 
     const cleanup = async (): Promise<void> => {
+      if (browserFinishedTimeout) {
+        clearTimeout(browserFinishedTimeout);
+        browserFinishedTimeout = null;
+      }
       await Promise.allSettled([
         browserFinishedListener?.remove() ?? Promise.resolve(),
         LocalhostAuth.stopServer().catch(() => undefined),
@@ -169,11 +174,18 @@ class AndroidAuthService {
         const settle = (fn: () => void): void => {
           if (settled) return;
           settled = true;
+          if (browserFinishedTimeout) {
+            clearTimeout(browserFinishedTimeout);
+            browserFinishedTimeout = null;
+          }
           fn();
         };
 
         browserFinishedListener = await Browser.addListener("browserFinished", () => {
-          settle(() => reject(new Error("Login was cancelled before the OAuth callback completed")));
+          if (browserFinishedTimeout) return;
+          browserFinishedTimeout = setTimeout(() => {
+            settle(() => reject(new Error("Login was cancelled before the OAuth callback completed")));
+          }, 750);
         });
 
         void LocalhostAuth.waitForCode({ timeoutMs })
