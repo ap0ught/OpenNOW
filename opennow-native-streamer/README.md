@@ -62,6 +62,23 @@ To build the native window + GStreamer backend:
 go build -tags gstreamer ./cmd/opennow-native-streamer
 ```
 
+
+## GitHub Actions artifacts
+
+A dedicated GitHub Actions workflow builds downloadable native-streamer binaries with the `gstreamer` build tag:
+
+- workflow: `.github/workflows/native-streamer-build.yml`
+- triggers: `workflow_dispatch`, matching `pull_request`, and matching pushes to `dev` / `main`
+- artifacts: Windows x64, macOS x64, macOS arm64, Linux x64
+
+From the Actions tab, open the `native-streamer-build` workflow run and download the artifact for your target platform. Each artifact contains the built `opennow-native-streamer` binary for that runner/architecture.
+
+Current CI caveats:
+
+- Linux arm64 / Raspberry Pi is intentionally not greenwashed in CI yet. The codebase treats it as a real target, but the workflow leaves it disabled until runner and dependency provisioning are reproducible.
+- The workflow installs native GStreamer / SDL2 development dependencies per platform before building. These artifacts are build outputs only; they do not bundle full platform runtime installers for GStreamer.
+- Windows builds use MSYS2 UCRT64 packages for the CGO compiler, `pkg-config`, GStreamer, and SDL2.
+
 ## Platform notes
 
 - Windows: intended decoder path is Media Foundation / D3D11-backed GStreamer plugins when available.
