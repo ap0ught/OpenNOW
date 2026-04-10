@@ -67,13 +67,13 @@ export function colorQualityRequiresHevc(cq: ColorQuality): boolean {
   return cq !== "8bit_420";
 }
 
-export const USER_FACING_VIDEO_CODEC_OPTIONS: readonly VideoCodec[] = ["H264"];
-export const USER_FACING_COLOR_QUALITY_OPTIONS: readonly ColorQuality[] = ["8bit_420"];
+export const USER_FACING_VIDEO_CODEC_OPTIONS: readonly VideoCodec[] = ["H264", "H265", "AV1"];
+export const USER_FACING_COLOR_QUALITY_OPTIONS: readonly ColorQuality[] = ["8bit_420", "8bit_444", "10bit_420", "10bit_444"];
 
 const ALLOWED_COLOR_QUALITIES_BY_CODEC: Record<VideoCodec, readonly ColorQuality[]> = {
-  H264: USER_FACING_COLOR_QUALITY_OPTIONS,
-  H265: USER_FACING_COLOR_QUALITY_OPTIONS,
-  AV1: USER_FACING_COLOR_QUALITY_OPTIONS,
+  H264: ["8bit_420"],
+  H265: ["8bit_420", "8bit_444", "10bit_420", "10bit_444"],
+  AV1: ["8bit_420", "10bit_420"],
 };
 
 export function isSupportedUserFacingCodec(codec: VideoCodec): boolean {

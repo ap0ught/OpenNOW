@@ -37,6 +37,9 @@ const codecOptions: VideoCodec[] = [...USER_FACING_VIDEO_CODEC_OPTIONS];
 
 const allColorQualityOptions: { value: ColorQuality; label: string; description: string }[] = [
   { value: "8bit_420", label: "8-bit 4:2:0", description: "Most compatible" },
+  { value: "8bit_444", label: "8-bit 4:4:4", description: "Sharper chroma" },
+  { value: "10bit_420", label: "10-bit 4:2:0", description: "Higher bit depth" },
+  { value: "10bit_444", label: "10-bit 4:4:4", description: "Highest chroma and bit depth" },
 ];
 
 const colorQualityOptions: { value: ColorQuality; label: string; description: string }[] = allColorQualityOptions
