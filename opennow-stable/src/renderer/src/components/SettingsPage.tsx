@@ -8,6 +8,7 @@ import type {
   VideoCodec,
   ColorQuality,
   EntitledResolution,
+  VideoAccelerationPreference,
   MicrophoneMode,
   PingResult,
   GameLanguage,
@@ -17,9 +18,8 @@ import type {
   ThankYouSupporter,
 } from "@shared/gfn";
 import {
-  getAllowedColorQualitiesForCodec,
+  colorQualityRequiresHevc,
   keyboardLayoutOptions,
-  normalizeStreamPreferences,
   USER_FACING_COLOR_QUALITY_OPTIONS,
   USER_FACING_VIDEO_CODEC_OPTIONS,
 } from "@shared/gfn";
@@ -34,6 +34,12 @@ interface SettingsPageProps {
 type ThanksLoadState = "idle" | "loading" | "loaded" | "error";
 
 const codecOptions: VideoCodec[] = [...USER_FACING_VIDEO_CODEC_OPTIONS];
+
+const accelerationOptions: { value: VideoAccelerationPreference; label: string }[] = [
+  { value: "auto", label: "Auto" },
+  { value: "hardware", label: "Hardware" },
+  { value: "software", label: "Software (CPU)" },
+];
 
 const allColorQualityOptions: { value: ColorQuality; label: string; description: string }[] = [
   { value: "8bit_420", label: "8-bit 4:2:0", description: "Most compatible" },
@@ -771,14 +777,25 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
     [onSettingChange]
   );
 
-  const normalizedStreamPreferences = useMemo(
-    () => normalizeStreamPreferences(settings.codec, settings.colorQuality),
-    [settings.codec, settings.colorQuality]
+  const handleColorQualityChange = useCallback(
+    (cq: ColorQuality) => {
+      handleChange("colorQuality", cq);
+      if (colorQualityRequiresHevc(cq) && settings.codec === "H264") {
+        handleChange("codec", "H265");
+      }
+    },
+    [handleChange, settings.codec]
   );
-  const availableColorQualityOptions = useMemo(() => {
-    const allowed = new Set(getAllowedColorQualitiesForCodec(normalizedStreamPreferences.codec));
-    return colorQualityOptions.filter((option) => allowed.has(option.value));
-  }, [normalizedStreamPreferences.codec]);
+
+  const handleCodecChange = useCallback(
+    (codec: VideoCodec) => {
+      handleChange("codec", codec);
+      if (codec === "H264" && settings.colorQuality !== "8bit_420") {
+        handleChange("colorQuality", "8bit_420");
+      }
+    },
+    [handleChange, settings.colorQuality]
+  );
 
   // Microphone devices
   const [microphoneDevices, setMicrophoneDevices] = useState<MediaDeviceInfo[]>([]);
@@ -1582,8 +1599,8 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
                 {codecOptions.map((codec) => (
                   <button
                     key={codec}
-                    className={`settings-chip ${normalizedStreamPreferences.codec === codec ? "active" : ""}`}
-                    onClick={() => handleChange("codec", codec)}
+                    className={`settings-chip ${settings.codec === codec ? "active" : ""}`}
+                    onClick={() => handleCodecChange(codec)}
                   >
                     {codec}
                   </button>
@@ -1591,21 +1608,59 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
               </div>
             </div>
 
+            <div className="settings-row settings-row--column">
+              <label className="settings-label">Decoder</label>
+              <div className="settings-chip-row">
+                {accelerationOptions.map((option) => (
+                  <button
+                    key={`decoder-${option.value}`}
+                    className={`settings-chip ${settings.decoderPreference === option.value ? "active" : ""}`}
+                    onClick={() => handleChange("decoderPreference", option.value)}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+              <span className="settings-subtle-hint">Applies after app restart.</span>
+            </div>
+
+            <div className="settings-row settings-row--column">
+              <label className="settings-label">Encoder</label>
+              <div className="settings-chip-row">
+                {accelerationOptions.map((option) => (
+                  <button
+                    key={`encoder-${option.value}`}
+                    className={`settings-chip ${settings.encoderPreference === option.value ? "active" : ""}`}
+                    onClick={() => handleChange("encoderPreference", option.value)}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+              <span className="settings-subtle-hint">Applies after app restart.</span>
+            </div>
+
             {/* Color Quality */}
             <div className="settings-row settings-row--column">
               <label className="settings-label">Color Depth</label>
               <div className="settings-chip-row">
-                {availableColorQualityOptions.map((opt) => (
-                  <button
-                    key={opt.value}
-                    className={`settings-chip ${normalizedStreamPreferences.colorQuality === opt.value ? "active" : ""}`}
-                    onClick={() => handleChange("colorQuality", opt.value)}
-                    title={opt.description}
-                  >
-                    <span>{opt.label}</span>
-                  </button>
-                ))}
+                {colorQualityOptions.map((opt) => {
+                  const needsHevc = colorQualityRequiresHevc(opt.value);
+                  return (
+                    <button
+                      key={opt.value}
+                      className={`settings-chip ${settings.colorQuality === opt.value ? "active" : ""}`}
+                      onClick={() => handleColorQualityChange(opt.value)}
+                      title={`${opt.description}${needsHevc ? " — requires H265/AV1" : ""}`}
+                    >
+                      <span>{opt.label}</span>
+                    </button>
+                  );
+                })}
               </div>
+              {colorQualityRequiresHevc(settings.colorQuality) && settings.codec === "H264" && (
+                <span className="settings-input-hint">This mode requires H265 or AV1. Codec will be auto-switched.</span>
+              )}
             </div>
 
             {/* Bitrate slider */}

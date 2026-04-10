@@ -21,7 +21,6 @@ import type {
 import {
   DEFAULT_KEYBOARD_LAYOUT,
   getDefaultStreamPreferences,
-  normalizeStreamPreferences,
   USER_FACING_VIDEO_CODEC_OPTIONS,
   getPreferredSessionAdMediaUrl,
   getSessionAdDurationMs,
@@ -132,16 +131,6 @@ const DEFAULT_SHORTCUTS = {
   shortcutToggleRecording: "F12",
 } as const;
 
-function applyNormalizedStreamPreferences(settings: Pick<Settings, "codec" | "colorQuality">): {
-  codec: Settings["codec"];
-  colorQuality: Settings["colorQuality"];
-} {
-  const normalized = normalizeStreamPreferences(settings.codec, settings.colorQuality);
-  return {
-    codec: normalized.codec,
-    colorQuality: normalized.colorQuality,
-  };
-}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
@@ -618,6 +607,8 @@ export function App(): JSX.Element {
     fps: 60,
     maxBitrateMbps: 75,
     codec: DEFAULT_STREAM_PREFERENCES.codec,
+    decoderPreference: "auto",
+    encoderPreference: "auto",
     colorQuality: DEFAULT_STREAM_PREFERENCES.colorQuality,
     region: "",
     clipboardPaste: false,
@@ -1492,10 +1483,7 @@ export function App(): JSX.Element {
       try {
         // Load settings first
         const loadedSettings = await window.openNow.getSettings();
-        setSettings({
-          ...loadedSettings,
-          ...applyNormalizedStreamPreferences(loadedSettings),
-        });
+        setSettings(loadedSettings);
         setShowStatsOverlay(loadedSettings.showStatsOnLaunch);
         setSettingsLoaded(true);
 
@@ -1859,10 +1847,9 @@ export function App(): JSX.Element {
           }
 
           if (clientRef.current) {
-            const normalizedStreamPreferences = applyNormalizedStreamPreferences(settings);
             await clientRef.current.handleOffer(event.sdp, activeSession, {
-              codec: normalizedStreamPreferences.codec,
-              colorQuality: normalizedStreamPreferences.colorQuality,
+              codec: settings.codec,
+              colorQuality: settings.colorQuality,
               resolution: settings.resolution,
               fps: settings.fps,
               maxBitrateKbps: settings.maxBitrateMbps * 1000,
@@ -1899,21 +1886,9 @@ export function App(): JSX.Element {
 
   // Save settings when changed
   const updateSetting = useCallback(async <K extends keyof Settings>(key: K, value: Settings[K]) => {
-    const nextSettings = { ...settings, [key]: value };
-    const normalizedStreamPreferences = applyNormalizedStreamPreferences(nextSettings);
-    const updates: Partial<Settings> = {
-      [key]: value,
-      codec: normalizedStreamPreferences.codec,
-      colorQuality: normalizedStreamPreferences.colorQuality,
-    };
-
-    setSettings((prev) => ({ ...prev, ...updates }));
+    setSettings((prev) => ({ ...prev, [key]: value }));
     if (settingsLoaded) {
-      await Promise.all(
-        (Object.entries(updates) as Array<[keyof Settings, Settings[keyof Settings]]>).map(([updateKey, updateValue]) =>
-          window.openNow.setSetting(updateKey, updateValue),
-        ),
-      );
+      await window.openNow.setSetting(key, value);
     }
     // If a running client exists, push certain settings live
     if (key === "mouseSensitivity") {
@@ -1937,7 +1912,7 @@ export function App(): JSX.Element {
         // ignore
       }
     }
-  }, [settings, settingsLoaded]);
+  }, [settingsLoaded]);
 
   const handleMouseSensitivityChange = useCallback((value: number) => {
     void updateSetting("mouseSensitivity", value);
@@ -2120,7 +2095,8 @@ export function App(): JSX.Element {
         resolution: settings.resolution,
         fps: settings.fps,
         maxBitrateMbps: settings.maxBitrateMbps,
-        ...applyNormalizedStreamPreferences(settings),
+        codec: settings.codec,
+        colorQuality: settings.colorQuality,
         keyboardLayout: settings.keyboardLayout,
         gameLanguage: settings.gameLanguage,
         enableL4S: settings.enableL4S,
@@ -2271,7 +2247,8 @@ export function App(): JSX.Element {
           resolution: settings.resolution,
           fps: settings.fps,
           maxBitrateMbps: settings.maxBitrateMbps,
-          ...applyNormalizedStreamPreferences(settings),
+          codec: settings.codec,
+          colorQuality: settings.colorQuality,
           keyboardLayout: settings.keyboardLayout,
           gameLanguage: settings.gameLanguage,
           enableL4S: settings.enableL4S,

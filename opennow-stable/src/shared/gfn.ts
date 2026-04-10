@@ -71,9 +71,9 @@ export const USER_FACING_VIDEO_CODEC_OPTIONS: readonly VideoCodec[] = ["H264", "
 export const USER_FACING_COLOR_QUALITY_OPTIONS: readonly ColorQuality[] = ["8bit_420", "8bit_444", "10bit_420", "10bit_444"];
 
 const ALLOWED_COLOR_QUALITIES_BY_CODEC: Record<VideoCodec, readonly ColorQuality[]> = {
-  H264: ["8bit_420"],
-  H265: ["8bit_420", "8bit_444", "10bit_420", "10bit_444"],
-  AV1: ["8bit_420", "10bit_420"],
+  H264: USER_FACING_COLOR_QUALITY_OPTIONS,
+  H265: USER_FACING_COLOR_QUALITY_OPTIONS,
+  AV1: USER_FACING_COLOR_QUALITY_OPTIONS,
 };
 
 export function isSupportedUserFacingCodec(codec: VideoCodec): boolean {
@@ -146,6 +146,8 @@ export interface Settings {
   fps: number;
   maxBitrateMbps: number;
   codec: VideoCodec;
+  decoderPreference: VideoAccelerationPreference;
+  encoderPreference: VideoAccelerationPreference;
   colorQuality: ColorQuality;
   region: string;
   clipboardPaste: boolean;
@@ -185,7 +187,7 @@ export interface Settings {
 
 export const DEFAULT_STREAM_PREFERENCES: Readonly<Pick<Settings, "codec" | "colorQuality">> = Object.freeze({
   codec: "H264",
-  colorQuality: "8bit_420",
+  colorQuality: "10bit_420",
 });
 
 export function getDefaultStreamPreferences(): Pick<Settings, "codec" | "colorQuality"> {

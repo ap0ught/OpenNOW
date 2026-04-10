@@ -15,6 +15,10 @@ export interface Settings {
   maxBitrateMbps: number;
   /** Preferred video codec */
   codec: VideoCodec;
+  /** Preferred video decode acceleration mode */
+  decoderPreference: VideoAccelerationPreference;
+  /** Preferred video encode acceleration mode */
+  encoderPreference: VideoAccelerationPreference;
   /** Color quality (bit depth + chroma subsampling) */
   colorQuality: ColorQuality;
   /** Preferred region URL (empty = auto) */
@@ -89,6 +93,8 @@ const DEFAULT_SETTINGS: Settings = {
   fps: 60,
   maxBitrateMbps: 75,
   codec: DEFAULT_STREAM_PREFERENCES.codec,
+  decoderPreference: "auto",
+  encoderPreference: "auto",
   colorQuality: DEFAULT_STREAM_PREFERENCES.colorQuality,
   region: "",
   clipboardPaste: false,
