@@ -1,4 +1,4 @@
-import { Globe, Check, Search, X, Loader, Zap, Mic, FileDown, Wifi, Trash2 } from "lucide-react";
+import { Globe, Check, Search, X, Loader, Zap, Mic, FileDown, Wifi, Trash2, Heart, Users, ExternalLink } from "lucide-react";
 import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import type { JSX } from "react";
 
@@ -11,6 +11,9 @@ import type {
   MicrophoneMode,
   PingResult,
   GameLanguage,
+  ThankYouDataResult,
+  ThankYouContributor,
+  ThankYouSupporter,
 } from "@shared/gfn";
 import { colorQualityRequiresHevc, keyboardLayoutOptions } from "@shared/gfn";
 import { formatShortcutForDisplay, normalizeShortcut } from "../shortcuts";
@@ -516,6 +519,11 @@ async function testCodecSupport(): Promise<CodecTestResult[]> {
 
 export function SettingsPage({ settings, regions, onSettingChange }: SettingsPageProps): JSX.Element {
   const [savedIndicator, setSavedIndicator] = useState(false);
+  const [activeTab, setActiveTab] = useState<"preferences" | "thanks">("preferences");
+  const [thanksData, setThanksData] = useState<ThankYouDataResult | null>(null);
+  const [thanksLoading, setThanksLoading] = useState(false);
+  const [thanksFetchError, setThanksFetchError] = useState<string | null>(null);
+  const [thanksRequested, setThanksRequested] = useState(false);
   const [regionSearch, setRegionSearch] = useState("");
   const [regionDropdownOpen, setRegionDropdownOpen] = useState(false);
 
@@ -950,6 +958,182 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
     }
   }, [handleChange, settings]);
 
+  useEffect(() => {
+    if (activeTab !== "thanks" || thanksData || thanksLoading || thanksRequested) {
+      return;
+    }
+
+    let cancelled = false;
+
+    async function loadThanks(): Promise<void> {
+      setThanksLoading(true);
+      setThanksFetchError(null);
+      setThanksRequested(true);
+      try {
+        const data = await window.openNow.getThanksData();
+        if (!cancelled) {
+          setThanksData(data);
+        }
+      } catch (error) {
+        console.error("[SettingsPage] Failed to load thanks data:", error);
+        if (!cancelled) {
+          setThanksFetchError("Unable to load community acknowledgements right now.");
+        }
+      } finally {
+        if (!cancelled) {
+          setThanksLoading(false);
+        }
+      }
+    }
+
+    void loadThanks();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, thanksData, thanksLoading, thanksRequested]);
+
+  const renderPersonLink = useCallback((person: ThankYouContributor | ThankYouSupporter, content: JSX.Element) => {
+    if (!person.profileUrl) {
+      return <div className="settings-person-card">{content}</div>;
+    }
+
+    return (
+      <a className="settings-person-card settings-person-card--link" href={person.profileUrl} target="_blank" rel="noreferrer">
+        {content}
+      </a>
+    );
+  }, []);
+
+  const thanksContributors = thanksData?.contributors ?? [];
+  const thanksSupporters = thanksData?.supporters ?? [];
+  const hasThanksError = Boolean(thanksFetchError || thanksData?.contributorsError || thanksData?.supportersError);
+
+  const renderContributorCard = useCallback((contributor: ThankYouContributor) => {
+    return renderPersonLink(
+      contributor,
+      <>
+        <img className="settings-person-avatar" src={contributor.avatarUrl} alt={contributor.login} loading="lazy" />
+        <div className="settings-person-body">
+          <div className="settings-person-title-row">
+            <span className="settings-person-name">{contributor.login}</span>
+            <span className="settings-person-badge">Contributor</span>
+          </div>
+          <div className="settings-person-meta">
+            <span>{contributor.contributions} contribution{contributor.contributions === 1 ? "" : "s"}</span>
+            <ExternalLink size={14} />
+          </div>
+        </div>
+      </>,
+    );
+  }, [renderPersonLink]);
+
+  const renderSupporterCard = useCallback((supporter: ThankYouSupporter) => {
+    return renderPersonLink(
+      supporter,
+      <>
+        <div className={`settings-person-avatar settings-person-avatar--fallback ${supporter.avatarUrl ? "" : "is-placeholder"}`.trim()}>
+          {supporter.avatarUrl ? (
+            <img className="settings-person-avatar" src={supporter.avatarUrl} alt={supporter.name} loading="lazy" />
+          ) : (
+            <Heart size={18} />
+          )}
+        </div>
+        <div className="settings-person-body">
+          <div className="settings-person-title-row">
+            <span className="settings-person-name">{supporter.name || "Private"}</span>
+            <span className="settings-person-badge settings-person-badge--supporter">Supporter</span>
+          </div>
+          <div className="settings-person-meta">
+            <span>{supporter.isPrivate ? "Private sponsor" : "GitHub Sponsors"}</span>
+            {supporter.profileUrl && <ExternalLink size={14} />}
+          </div>
+        </div>
+      </>,
+    );
+  }, [renderPersonLink]);
+
+  const thanksTabContent = (
+    <div className="settings-thanks-layout">
+      <section className="settings-section settings-thanks-hero">
+        <div className="settings-thanks-hero-icon">
+          <Heart size={18} />
+        </div>
+        <div className="settings-thanks-hero-copy">
+          <h2>Thanks for helping OpenNOW grow</h2>
+          <p>OpenNOW is shaped by contributors building the client and supporters backing the project behind the scenes.</p>
+        </div>
+      </section>
+
+      {thanksFetchError && (
+        <section className="settings-section settings-thanks-status settings-thanks-status--error">
+          <strong>Community data unavailable</strong>
+          <span>{thanksFetchError}</span>
+        </section>
+      )}
+
+      <div className="settings-thanks-grid">
+        <section className="settings-section">
+          <div className="settings-section-header settings-section-header--thanks">
+            <Users size={18} />
+            <div>
+              <h2>Contributors</h2>
+              <p className="settings-section-subtitle">People improving OpenNOW in code, fixes, and features.</p>
+            </div>
+          </div>
+          {thanksLoading && !thanksData ? (
+            <div className="settings-thanks-state">
+              <Loader size={16} className="settings-loading-icon" />
+              <span>Loading contributors from GitHub…</span>
+            </div>
+          ) : thanksContributors.length > 0 ? (
+            <div className="settings-people-grid">
+              {thanksContributors.map((contributor) => (
+                <div key={contributor.login}>{renderContributorCard(contributor)}</div>
+              ))}
+            </div>
+          ) : (
+            <div className="settings-thanks-state settings-thanks-state--muted">
+              <span>{thanksData?.contributorsError ?? "No contributors could be shown right now."}</span>
+            </div>
+          )}
+        </section>
+
+        <section className="settings-section">
+          <div className="settings-section-header settings-section-header--thanks">
+            <Heart size={18} />
+            <div>
+              <h2>Supporters</h2>
+              <p className="settings-section-subtitle">Public GitHub Sponsors backing the work, plus private supporters when available.</p>
+            </div>
+          </div>
+          {thanksLoading && !thanksData ? (
+            <div className="settings-thanks-state">
+              <Loader size={16} className="settings-loading-icon" />
+              <span>Loading supporters from GitHub Sponsors…</span>
+            </div>
+          ) : thanksSupporters.length > 0 ? (
+            <div className="settings-people-grid">
+              {thanksSupporters.map((supporter, index) => (
+                <div key={`${supporter.name}-${supporter.profileUrl ?? index}`}>{renderSupporterCard(supporter)}</div>
+              ))}
+            </div>
+          ) : (
+            <div className="settings-thanks-state settings-thanks-state--muted">
+              <span>{thanksData?.supportersError ?? "No supporters could be shown right now."}</span>
+            </div>
+          )}
+        </section>
+      </div>
+
+      {hasThanksError && thanksData && (
+        <section className="settings-section settings-thanks-status">
+          {thanksData.contributorsError && <span>Contributors: {thanksData.contributorsError}</span>}
+          {thanksData.supportersError && <span>Supporters: {thanksData.supportersError}</span>}
+        </section>
+      )}
+    </div>
+  );
+
   return (
     <div className="settings-page">
       <header className="settings-header">
@@ -960,8 +1144,30 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
         </div>
       </header>
 
-      <div className="settings-sections">
-        {/* ── Region ────────────────────────────────────── */}
+      <div className="settings-tab-row settings-chip-row" role="tablist" aria-label="Settings sections">
+        <button
+          type="button"
+          className={`settings-chip settings-tab-chip ${activeTab === "preferences" ? "active" : ""}`}
+          onClick={() => setActiveTab("preferences")}
+          role="tab"
+          aria-selected={activeTab === "preferences"}
+        >
+          Preferences
+        </button>
+        <button
+          type="button"
+          className={`settings-chip settings-tab-chip ${activeTab === "thanks" ? "active" : ""}`}
+          onClick={() => setActiveTab("thanks")}
+          role="tab"
+          aria-selected={activeTab === "thanks"}
+        >
+          Thanks
+        </button>
+      </div>
+
+      {activeTab === "preferences" ? (
+        <div className="settings-sections">
+          {/* ── Region ────────────────────────────────────── */}
         <section className="settings-section">
           <div className="settings-section-header">
             <h2>Region</h2>
@@ -2045,7 +2251,12 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
             </div>
           </div>
         </section>
-      </div>
+        </div>
+
+      ) : (
+        thanksTabContent
+      )}
+
 
     </div>
   );

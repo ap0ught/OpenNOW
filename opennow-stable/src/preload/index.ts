@@ -32,6 +32,7 @@ import type {
   RecordingEntry,
   RecordingDeleteRequest,
   MediaListingResult,
+  ThankYouDataResult,
 } from "@shared/gfn";
 import { parseSerializedSessionErrorTransport } from "@shared/sessionError";
 
@@ -139,6 +140,8 @@ const api: OpenNowApi = {
     ipcRenderer.invoke(IPC_CHANNELS.MEDIA_SHOW_IN_FOLDER, input),
   deleteCache: (): Promise<void> =>
     ipcRenderer.invoke(IPC_CHANNELS.CACHE_DELETE_ALL),
+  getThanksData: (): Promise<ThankYouDataResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.COMMUNITY_GET_THANKS),
 };
 
 contextBridge.exposeInMainWorld("openNow", api);
