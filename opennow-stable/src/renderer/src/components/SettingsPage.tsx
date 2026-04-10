@@ -18,6 +18,7 @@ import type {
 } from "@shared/gfn";
 import { colorQualityRequiresHevc, keyboardLayoutOptions } from "@shared/gfn";
 import { formatShortcutForDisplay, normalizeShortcut } from "../shortcuts";
+import { openNow, platformCapabilities } from "../platform";
 
 interface SettingsPageProps {
   settings: Settings;
@@ -571,7 +572,7 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
     if (regions.length === 0) return;
     setIsPinging(true);
     try {
-      const results = await window.openNow.pingRegions(regions);
+      const results = await openNow.pingRegions(regions);
       const pingMap = new Map<string, number | null>();
       let bestUrl: string | null = null;
       let bestPing = Infinity;
@@ -698,7 +699,7 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
 
     async function load(): Promise<void> {
       try {
-        const sessionResult = await window.openNow.getAuthSession();
+        const sessionResult = await openNow.getAuthSession();
         const session = sessionResult.session;
         if (!session || cancelled) {
           setEntitledResolutions([]);
@@ -714,7 +715,7 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
           return;
         }
 
-        const sub = await window.openNow.fetchSubscription({
+        const sub = await openNow.fetchSubscription({
           userId,
         });
 
@@ -824,8 +825,8 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
       };
 
       try {
-        if (typeof window.openNow?.getMicrophonePermission === "function") {
-          const permission = await window.openNow.getMicrophonePermission();
+        if (typeof openNow?.getMicrophonePermission === "function") {
+          const permission = await openNow.getMicrophonePermission();
           if (cancelled) {
             return;
           }
@@ -1055,7 +1056,7 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
     let requestPromise: Promise<ThankYouDataResult>;
 
     try {
-      const getThanksData = window.openNow?.getThanksData;
+      const getThanksData = openNow?.getThanksData;
       if (typeof getThanksData !== "function") {
         throw new Error("openNow.getThanksData is unavailable");
       }
@@ -2302,63 +2303,73 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
             <h2>Miscellaneous</h2>
           </div>
           <div className="settings-rows">
-            {/* Export Logs */}
-            <div className="settings-row">
-              <label className="settings-label">
-                Export Logs
-                <span className="settings-hint">Download debug logs with sensitive data redacted for privacy</span>
-              </label>
-              <button
-                type="button"
-                className="settings-export-logs-btn"
-                onClick={async () => {
-                  try {
-                    const logs = await window.openNow.exportLogs("text");
-                    const blob = new Blob([logs], { type: "text/plain" });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement("a");
-                    a.href = url;
-                    a.download = `opennow-logs-${new Date().toISOString().replace(/[:.]/g, "-")}.txt`;
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                    URL.revokeObjectURL(url);
-                  } catch (err) {
-                    console.error("[Settings] Failed to export logs:", err);
-                    alert("Failed to export logs. Please try again.");
-                  }
-                }}
-              >
-                <FileDown size={16} />
-                Export Logs
-              </button>
-            </div>
+            {platformCapabilities.supportsLogExport && (
+              <div className="settings-row">
+                <label className="settings-label">
+                  Export Logs
+                  <span className="settings-hint">Download debug logs with sensitive data redacted for privacy</span>
+                </label>
+                <button
+                  type="button"
+                  className="settings-export-logs-btn"
+                  onClick={async () => {
+                    try {
+                      const logs = await openNow.exportLogs("text");
+                      const blob = new Blob([logs], { type: "text/plain" });
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement("a");
+                      a.href = url;
+                      a.download = `opennow-logs-${new Date().toISOString().replace(/[:.]/g, "-")}.txt`;
+                      document.body.appendChild(a);
+                      a.click();
+                      document.body.removeChild(a);
+                      URL.revokeObjectURL(url);
+                    } catch (err) {
+                      console.error("[Settings] Failed to export logs:", err);
+                      alert("Failed to export logs. Please try again.");
+                    }
+                  }}
+                >
+                  <FileDown size={16} />
+                  Export Logs
+                </button>
+              </div>
+            )}
 
-            <div className="settings-row">
-              <label className="settings-label">
-                Delete Cache
-                <span className="settings-hint">Clear all cached game data, images, and metadata</span>
-              </label>
-              <button
-                type="button"
-                className="settings-delete-cache-btn"
-                onClick={async () => {
-                  if (!window.confirm("Are you sure you want to delete all cached data? This will clear all game metadata, images, and library information.")) {
-                    return;
-                  }
-                  try {
-                    await window.openNow.deleteCache();
-                    alert("Cache cleared successfully. The app will refresh on next startup.");
-                  } catch (err) {
-                    console.error("[Settings] Failed to delete cache:", err);
-                    alert("Failed to delete cache. Please try again.");
-                  }
-                }}
-              >
-                <Trash2 size={16} />
-                Delete Cache
-              </button>
-            </div>
+            {platformCapabilities.supportsCacheDeletion && (
+              <div className="settings-row">
+                <label className="settings-label">
+                  Delete Cache
+                  <span className="settings-hint">Clear all cached game data, images, and metadata</span>
+                </label>
+                <button
+                  type="button"
+                  className="settings-delete-cache-btn"
+                  onClick={async () => {
+                    if (!window.confirm("Are you sure you want to delete all cached data? This will clear all game metadata, images, and library information.")) {
+                      return;
+                    }
+                    try {
+                      await openNow.deleteCache();
+                      alert("Cache cleared successfully. The app will refresh on next startup.");
+                    } catch (err) {
+                      console.error("[Settings] Failed to delete cache:", err);
+                      alert("Failed to delete cache. Please try again.");
+                    }
+                  }}
+                >
+                  <Trash2 size={16} />
+                  Delete Cache
+                </button>
+              </div>
+            )}
+
+            {!platformCapabilities.supportsLogExport && !platformCapabilities.supportsCacheDeletion && (
+              <div className="settings-row settings-row--column">
+                <label className="settings-label">Android limitations</label>
+                <span className="settings-subtle-hint">Local log export and Electron cache management are not available on Android in this pass.</span>
+              </div>
+            )}
           </div>
         </section>
         </div>

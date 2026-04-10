@@ -33,6 +33,7 @@ import {
   rewriteH265TierFlag,
 } from "./sdp";
 import { MicrophoneManager, type MicState, type MicStateChange } from "./microphoneManager";
+import { openNow } from "../platform";
 
 interface OfferSettings {
   codec: VideoCodec;
@@ -1182,7 +1183,7 @@ export class GfnWebRtcClient {
 
     if (!requestedViaSender) {
       try {
-        await window.openNow.requestKeyframe({
+        await openNow.requestKeyframe({
           reason,
           backlogFrames,
           attempt: this.decoderRecoveryAttemptCount + 1,
@@ -3399,7 +3400,7 @@ export class GfnWebRtcClient {
         sdpMLineIndex: payload.sdpMLineIndex,
         usernameFragment: payload.usernameFragment,
       };
-      window.openNow.sendIceCandidate(candidate).catch((error) => {
+      openNow.sendIceCandidate(candidate).catch((error) => {
         this.log(`Failed to send local ICE candidate: ${String(error)}`);
       });
     };
@@ -3642,7 +3643,7 @@ export class GfnWebRtcClient {
       credentials,
     });
 
-    await window.openNow.sendAnswer({
+    await openNow.sendAnswer({
       sdp: finalSdp,
       nvstSdp,
     });
@@ -3758,7 +3759,7 @@ export class GfnWebRtcClient {
             sdpMLineIndex: payload.sdpMLineIndex,
             usernameFragment: payload.usernameFragment,
           };
-          window.openNow.sendIceCandidate(candidate).catch((error) => {
+          openNow.sendIceCandidate(candidate).catch((error) => {
             this.log(`Relay PC failed to send local ICE candidate: ${String(error)}`);
           });
         };
@@ -3815,7 +3816,7 @@ export class GfnWebRtcClient {
           credentials: relayCredentials,
         });
 
-        await window.openNow.sendAnswer({ sdp: finalRelaySdp, nvstSdp: nvstSdpRelay });
+        await openNow.sendAnswer({ sdp: finalRelaySdp, nvstSdp: nvstSdpRelay });
         this.log("Relay fallback: sent relay answer to signaling");
 
         // Attempt manual mediaConnectionInfo injection again (UDP/TCP) — server may

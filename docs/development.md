@@ -1,6 +1,6 @@
 # Development Guide
 
-This guide covers the active Electron-based OpenNOW client in [`opennow-stable/`](../opennow-stable).
+This guide covers the active OpenNOW app in [`opennow-stable/`](../opennow-stable), including the existing Electron desktop target and the new Capacitor Android target.
 
 ## Prerequisites
 
@@ -35,11 +35,17 @@ npm run dev
 npm run preview
 npm run typecheck
 npm run build
+npm run build:web
+npm run cap:sync:android
+npm run cap:open:android
 npm run dist
 npm run dist:signed
 ```
 
 ## Workspace Layout
+
+The Android shell lives in [`opennow-stable/android/`](../opennow-stable/android), Capacitor config lives in [`opennow-stable/capacitor.config.ts`](../opennow-stable/capacitor.config.ts), and the renderer platform abstraction lives in [`opennow-stable/src/renderer/src/platform/`](../opennow-stable/src/renderer/src/platform/).
+
 
 ```text
 opennow-stable/
@@ -91,7 +97,8 @@ The renderer is a React app responsible for:
 - Browsing the catalog and public listings
 - Managing stream launch state and session recovery
 - Rendering the WebRTC stream
-- Handling controller input, shortcuts, stats overlay, screenshots, recordings, and settings UI
+- Handling controller input, stats overlay, screenshots, recordings, and settings UI
+- Choosing the active runtime implementation through `src/renderer/src/platform/`
 
 Key entry points:
 
@@ -162,3 +169,22 @@ Current build matrix:
 - Before opening a PR, run `npm run typecheck` and `npm run build`.
 
 For contribution workflow details, see [`.github/CONTRIBUTING.md`](../.github/CONTRIBUTING.md).
+
+
+## Android Workflow
+
+Build and sync web assets into the Android project:
+
+```bash
+cd opennow-stable
+npm run cap:sync:android
+```
+
+Open the Android project in Android Studio:
+
+```bash
+cd opennow-stable
+npm run cap:open:android
+```
+
+Current Android support is limited to the core cloud-gaming path. Desktop-specific features such as quit app, pointer-lock toggles, log export, cache deletion, show-in-folder actions, and screenshot save-as are intentionally gated or unavailable on Android in this pass.

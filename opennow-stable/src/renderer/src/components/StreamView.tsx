@@ -11,6 +11,7 @@ import { getStoreDisplayName, getStoreIconComponent } from "./GameCard";
 import { RemainingPlaytimeIndicator, SessionElapsedIndicator } from "./ElapsedSessionIndicators";
 import type { MicrophoneMode, ScreenshotEntry, RecordingEntry, SubscriptionInfo } from "@shared/gfn";
 import { isShortcutMatch, normalizeShortcut } from "../shortcuts";
+import { openNow, platformCapabilities } from "../platform";
 
 interface StreamViewProps {
   videoRef: React.Ref<HTMLVideoElement>;
@@ -679,10 +680,10 @@ export function StreamView({
   const [screenshotShortcutError, setScreenshotShortcutError] = useState<string | null>(null);
   const [activeSidebarTab, setActiveSidebarTab] = useState<"preferences" | "shortcuts">("preferences");
   const screenshotApiAvailable =
-    typeof window.openNow?.saveScreenshot === "function" &&
-    typeof window.openNow?.listScreenshots === "function" &&
-    typeof window.openNow?.deleteScreenshot === "function" &&
-    typeof window.openNow?.saveScreenshotAs === "function";
+    typeof openNow?.saveScreenshot === "function" &&
+    typeof openNow?.listScreenshots === "function" &&
+    typeof openNow?.deleteScreenshot === "function" &&
+    typeof openNow?.saveScreenshotAs === "function";
 
   // Recording state
   const [isRecording, setIsRecording] = useState(false);
@@ -699,12 +700,12 @@ export function StreamView({
   const thumbnailDataUrlRef = useRef<string | null>(null);
   const recCarouselRef = useRef<HTMLDivElement | null>(null);
   const recordingApiAvailable =
-    typeof window.openNow?.beginRecording === "function" &&
-    typeof window.openNow?.sendRecordingChunk === "function" &&
-    typeof window.openNow?.finishRecording === "function" &&
-    typeof window.openNow?.abortRecording === "function" &&
-    typeof window.openNow?.listRecordings === "function" &&
-    typeof window.openNow?.deleteRecording === "function";
+    typeof openNow?.beginRecording === "function" &&
+    typeof openNow?.sendRecordingChunk === "function" &&
+    typeof openNow?.finishRecording === "function" &&
+    typeof openNow?.abortRecording === "function" &&
+    typeof openNow?.listRecordings === "function" &&
+    typeof openNow?.deleteRecording === "function";
 
   const microphoneModes = useMemo(
     () => [
@@ -899,7 +900,7 @@ export function StreamView({
       return;
     }
     try {
-      const items = await window.openNow.listScreenshots();
+      const items = await openNow.listScreenshots();
       setScreenshots(items);
     } catch (error) {
       console.error("[StreamView] Failed to load screenshots:", error);
@@ -935,7 +936,7 @@ export function StreamView({
 
       context.drawImage(video, 0, 0, canvas.width, canvas.height);
       const dataUrl = canvas.toDataURL("image/png");
-      const saved = await window.openNow.saveScreenshot({ dataUrl, gameTitle });
+      const saved = await openNow.saveScreenshot({ dataUrl, gameTitle });
       setScreenshots((prev) => [saved, ...prev.filter((item) => item.id !== saved.id)].slice(0, 60));
     } catch (error) {
       console.error("[StreamView] Failed to capture screenshot:", error);
@@ -961,7 +962,7 @@ export function StreamView({
     if (!selectedScreenshot) return;
 
     try {
-      await window.openNow.deleteScreenshot({ id: selectedScreenshot.id });
+      await openNow.deleteScreenshot({ id: selectedScreenshot.id });
       setScreenshots((prev) => prev.filter((item) => item.id !== selectedScreenshot.id));
       setSelectedScreenshotId(null);
     } catch (error) {
@@ -979,7 +980,7 @@ export function StreamView({
     if (!selectedScreenshot) return;
 
     try {
-      await window.openNow.saveScreenshotAs({ id: selectedScreenshot.id });
+      await openNow.saveScreenshotAs({ id: selectedScreenshot.id });
     } catch (error) {
       console.error("[StreamView] Failed to save screenshot as:", error);
       setGalleryError("Unable to save screenshot.");
@@ -990,7 +991,7 @@ export function StreamView({
     setRecordingError(null);
     if (!recordingApiAvailable) return;
     try {
-      const items = await window.openNow.listRecordings();
+      const items = await openNow.listRecordings();
       setRecordings(items);
     } catch (error) {
       console.error("[StreamView] Failed to load recordings:", error);
@@ -1002,7 +1003,7 @@ export function StreamView({
     setRecordingError(null);
     if (!recordingApiAvailable) return;
     try {
-      await window.openNow.deleteRecording({ id });
+      await openNow.deleteRecording({ id });
       setRecordings((prev) => prev.filter((r) => r.id !== id));
     } catch (error) {
       console.error("[StreamView] Failed to delete recording:", error);
@@ -1073,7 +1074,7 @@ export function StreamView({
 
     let recordingId: string;
     try {
-      const result = await window.openNow.beginRecording({ mimeType });
+      const result = await openNow.beginRecording({ mimeType });
       recordingId = result.recordingId;
     } catch (error) {
       console.error("[StreamView] Failed to begin recording:", error);
@@ -1136,7 +1137,7 @@ export function StreamView({
       void e.data.arrayBuffer().then((buf) => {
         const id = recordingIdRef.current;
         if (!id) return;
-        window.openNow.sendRecordingChunk({ recordingId: id, chunk: buf }).catch((err: unknown) => {
+        openNow.sendRecordingChunk({ recordingId: id, chunk: buf }).catch((err: unknown) => {
           console.error("[StreamView] Failed to send recording chunk:", err);
         });
       });
@@ -1154,7 +1155,7 @@ export function StreamView({
       if (!id) return;
 
       const durationMs = Date.now() - recordingStartTimeRef.current;
-      void window.openNow
+      void openNow
         .finishRecording({
           recordingId: id,
           durationMs,
@@ -1181,7 +1182,7 @@ export function StreamView({
       setIsRecording(false);
       thumbnailDataUrlRef.current = null;
       if (id) {
-        window.openNow.abortRecording({ recordingId: id }).catch(() => undefined);
+        openNow.abortRecording({ recordingId: id }).catch(() => undefined);
       }
       setRecordingError("Recording encountered an error.");
     };
@@ -1200,7 +1201,7 @@ export function StreamView({
         recorder.stop();
       }
       if (id) {
-        window.openNow.abortRecording({ recordingId: id }).catch(() => undefined);
+        openNow.abortRecording({ recordingId: id }).catch(() => undefined);
         recordingIdRef.current = null;
       }
       audioCtxRef.current?.close().catch(() => undefined);
@@ -1598,10 +1599,10 @@ export function StreamView({
                                 className="sidebar-rec-card-action"
                                 aria-label="Show in folder"
                                 title="Show in folder"
-                                onClick={() => { void window.openNow.showRecordingInFolder(rec.id); }}
-                                disabled={typeof window.openNow?.showRecordingInFolder !== "function"}
+                                onClick={() => { void openNow.showRecordingInFolder(rec.id); }}
+                                disabled={!platformCapabilities.supportsMediaFolderAccess}
                               >
-                                <FolderOpen size={11} />
+                                {platformCapabilities.supportsMediaFolderAccess ? <FolderOpen size={11} /> : <X size={11} />}
                               </button>
                               <button
                                 type="button"

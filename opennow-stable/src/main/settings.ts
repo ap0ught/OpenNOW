@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import type { VideoCodec, ColorQuality, VideoAccelerationPreference, MicrophoneMode, GameLanguage, AspectRatio, KeyboardLayout } from "@shared/gfn";
 import { DEFAULT_KEYBOARD_LAYOUT } from "@shared/gfn";
+import { DEFAULT_SETTINGS as SHARED_DEFAULT_SETTINGS } from "@shared/settings";
 
 export interface Settings {
   /** Video resolution (e.g., "1920x1080") */
@@ -82,43 +83,7 @@ const defaultMicShortcut = "Ctrl+Shift+M";
 const LEGACY_STOP_SHORTCUTS = new Set(["META+SHIFT+Q", "CMD+SHIFT+Q"]);
 const LEGACY_ANTI_AFK_SHORTCUTS = new Set(["META+SHIFT+F10", "CMD+SHIFT+F10", "CTRL+SHIFT+F10"]);
 
-const DEFAULT_SETTINGS: Settings = {
-  resolution: "1920x1080",
-  aspectRatio: "16:9",
-  fps: 60,
-  maxBitrateMbps: 75,
-  codec: "H264",
-  colorQuality: "8bit_420",
-  region: "",
-  clipboardPaste: false,
-  mouseSensitivity: 1,
-  mouseAcceleration: 1,
-  shortcutToggleStats: "F3",
-  shortcutTogglePointerLock: "F8",
-  shortcutStopStream: defaultStopShortcut,
-  shortcutToggleAntiAfk: defaultAntiAfkShortcut,
-  shortcutToggleMicrophone: defaultMicShortcut,
-  shortcutScreenshot: "F11",
-  shortcutToggleRecording: "F12",
-  microphoneMode: "disabled",
-  microphoneDeviceId: "",
-  hideStreamButtons: false,
-  showStatsOnLaunch: false,
-  controllerMode: false,
-  controllerUiSounds: false,
-  controllerBackgroundAnimations: false,
-  autoLoadControllerLibrary: false,
-  autoFullScreen: false,
-  favoriteGameIds: [],
-  sessionCounterEnabled: false,
-  sessionClockShowEveryMinutes: 60,
-  sessionClockShowDurationSeconds: 30,
-  windowWidth: 1400,
-  windowHeight: 900,
-  keyboardLayout: DEFAULT_KEYBOARD_LAYOUT,
-  gameLanguage: "en_US",
-  enableL4S: false,
-};
+const DEFAULT_SETTINGS: Settings = { ...SHARED_DEFAULT_SETTINGS };
 
 export class SettingsManager {
   private settings: Settings;
