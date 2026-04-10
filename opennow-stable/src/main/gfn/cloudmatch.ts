@@ -22,6 +22,8 @@ import {
   DEFAULT_KEYBOARD_LAYOUT,
   colorQualityBitDepth,
   colorQualityChromaFormat,
+  getDefaultStreamPreferences,
+  normalizeStreamPreferences,
   resolveGfnKeyboardLayout,
 } from "@shared/gfn";
 
@@ -452,8 +454,12 @@ function timezoneOffsetMs(): number {
 }
 
 function buildSessionRequestBody(input: SessionCreateRequest): CloudMatchRequest {
+  const normalizedStreamPreferences = normalizeStreamPreferences(
+    input.settings.codec,
+    input.settings.colorQuality,
+  );
   const { width, height } = parseResolution(input.settings.resolution);
-  const cq = input.settings.colorQuality;
+  const cq = normalizedStreamPreferences.colorQuality;
   // IMPORTANT: hdrEnabled is a SEPARATE toggle from color quality.
   // The Rust reference (cloudmatch.rs) uses settings.hdr_enabled independently.
   // 10-bit color depth does NOT mean HDR — you can have 10-bit SDR.
@@ -1273,16 +1279,20 @@ export async function claimSession(input: SessionClaimRequest): Promise<SessionI
 
   // Provide default values for optional parameters
   const appId = input.appId ?? "0";
+  const defaultStreamPreferences = getDefaultStreamPreferences();
   const settings = input.settings ?? {
     resolution: "1920x1080",
     fps: 60,
     maxBitrateMbps: 75,
-    codec: "H264",
-    colorQuality: "8bit_420",
+    codec: defaultStreamPreferences.codec,
+    colorQuality: defaultStreamPreferences.colorQuality,
     keyboardLayout: DEFAULT_KEYBOARD_LAYOUT,
     gameLanguage: "en_US",
     enableL4S: false,
   };
+  const normalizedStreamPreferences = normalizeStreamPreferences(settings.codec, settings.colorQuality);
+  settings.codec = normalizedStreamPreferences.codec;
+  settings.colorQuality = normalizedStreamPreferences.colorQuality;
 
   const keyboardLayout = resolveGfnKeyboardLayout(settings.keyboardLayout ?? DEFAULT_KEYBOARD_LAYOUT, process.platform);
   const languageCode = settings.gameLanguage ?? "en_US";

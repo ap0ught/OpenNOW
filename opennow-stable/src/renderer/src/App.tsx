@@ -20,6 +20,9 @@ import type {
 } from "@shared/gfn";
 import {
   DEFAULT_KEYBOARD_LAYOUT,
+  getDefaultStreamPreferences,
+  normalizeStreamPreferences,
+  USER_FACING_VIDEO_CODEC_OPTIONS,
   getPreferredSessionAdMediaUrl,
   getSessionAdDurationMs,
   getSessionAdItems,
@@ -51,7 +54,8 @@ import { ControllerStreamLoading } from "./components/ControllerStreamLoading";
 import type { QueueAdPlaybackEvent, QueueAdPreviewHandle } from "./components/QueueAdPreview";
 import { StreamView } from "./components/StreamView";
 
-const codecOptions: VideoCodec[] = ["H264", "H265", "AV1"];
+const codecOptions: VideoCodec[] = [...USER_FACING_VIDEO_CODEC_OPTIONS];
+const DEFAULT_STREAM_PREFERENCES = getDefaultStreamPreferences();
 const allResolutionOptions = ["1280x720", "1280x800", "1440x900", "1680x1050", "1920x1080", "1920x1200", "2560x1080", "2560x1440", "2560x1600", "3440x1440", "3840x2160", "3840x2400"];
 const fpsOptions = [30, 60, 120, 144, 240];
 const aspectRatioOptions = ["16:9", "16:10", "21:9", "32:9"] as const;
@@ -127,6 +131,17 @@ const DEFAULT_SHORTCUTS = {
   shortcutScreenshot: "F11",
   shortcutToggleRecording: "F12",
 } as const;
+
+function applyNormalizedStreamPreferences(settings: Pick<Settings, "codec" | "colorQuality">): {
+  codec: Settings["codec"];
+  colorQuality: Settings["colorQuality"];
+} {
+  const normalized = normalizeStreamPreferences(settings.codec, settings.colorQuality);
+  return {
+    codec: normalized.codec,
+    colorQuality: normalized.colorQuality,
+  };
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
@@ -602,8 +617,8 @@ export function App(): JSX.Element {
     aspectRatio: "16:9",
     fps: 60,
     maxBitrateMbps: 75,
-    codec: "H264",
-    colorQuality: "8bit_420",
+    codec: DEFAULT_STREAM_PREFERENCES.codec,
+    colorQuality: DEFAULT_STREAM_PREFERENCES.colorQuality,
     region: "",
     clipboardPaste: false,
     mouseSensitivity: 1,
@@ -1477,7 +1492,10 @@ export function App(): JSX.Element {
       try {
         // Load settings first
         const loadedSettings = await window.openNow.getSettings();
-        setSettings(loadedSettings);
+        setSettings({
+          ...loadedSettings,
+          ...applyNormalizedStreamPreferences(loadedSettings),
+        });
         setShowStatsOverlay(loadedSettings.showStatsOnLaunch);
         setSettingsLoaded(true);
 
@@ -1841,9 +1859,10 @@ export function App(): JSX.Element {
           }
 
           if (clientRef.current) {
+            const normalizedStreamPreferences = applyNormalizedStreamPreferences(settings);
             await clientRef.current.handleOffer(event.sdp, activeSession, {
-              codec: settings.codec,
-              colorQuality: settings.colorQuality,
+              codec: normalizedStreamPreferences.codec,
+              colorQuality: normalizedStreamPreferences.colorQuality,
               resolution: settings.resolution,
               fps: settings.fps,
               maxBitrateKbps: settings.maxBitrateMbps * 1000,
@@ -1880,9 +1899,21 @@ export function App(): JSX.Element {
 
   // Save settings when changed
   const updateSetting = useCallback(async <K extends keyof Settings>(key: K, value: Settings[K]) => {
-    setSettings((prev) => ({ ...prev, [key]: value }));
+    const nextSettings = { ...settings, [key]: value };
+    const normalizedStreamPreferences = applyNormalizedStreamPreferences(nextSettings);
+    const updates: Partial<Settings> = {
+      [key]: value,
+      codec: normalizedStreamPreferences.codec,
+      colorQuality: normalizedStreamPreferences.colorQuality,
+    };
+
+    setSettings((prev) => ({ ...prev, ...updates }));
     if (settingsLoaded) {
-      await window.openNow.setSetting(key, value);
+      await Promise.all(
+        (Object.entries(updates) as Array<[keyof Settings, Settings[keyof Settings]]>).map(([updateKey, updateValue]) =>
+          window.openNow.setSetting(updateKey, updateValue),
+        ),
+      );
     }
     // If a running client exists, push certain settings live
     if (key === "mouseSensitivity") {
@@ -1906,7 +1937,7 @@ export function App(): JSX.Element {
         // ignore
       }
     }
-  }, [settingsLoaded]);
+  }, [settings, settingsLoaded]);
 
   const handleMouseSensitivityChange = useCallback((value: number) => {
     void updateSetting("mouseSensitivity", value);
@@ -2089,8 +2120,7 @@ export function App(): JSX.Element {
         resolution: settings.resolution,
         fps: settings.fps,
         maxBitrateMbps: settings.maxBitrateMbps,
-        codec: settings.codec,
-        colorQuality: settings.colorQuality,
+        ...applyNormalizedStreamPreferences(settings),
         keyboardLayout: settings.keyboardLayout,
         gameLanguage: settings.gameLanguage,
         enableL4S: settings.enableL4S,
@@ -2241,8 +2271,7 @@ export function App(): JSX.Element {
           resolution: settings.resolution,
           fps: settings.fps,
           maxBitrateMbps: settings.maxBitrateMbps,
-          codec: settings.codec,
-          colorQuality: settings.colorQuality,
+          ...applyNormalizedStreamPreferences(settings),
           keyboardLayout: settings.keyboardLayout,
           gameLanguage: settings.gameLanguage,
           enableL4S: settings.enableL4S,

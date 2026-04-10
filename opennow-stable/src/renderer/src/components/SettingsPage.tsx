@@ -16,7 +16,13 @@ import type {
   ThankYouContributor,
   ThankYouSupporter,
 } from "@shared/gfn";
-import { colorQualityRequiresHevc, keyboardLayoutOptions } from "@shared/gfn";
+import {
+  getAllowedColorQualitiesForCodec,
+  keyboardLayoutOptions,
+  normalizeStreamPreferences,
+  USER_FACING_COLOR_QUALITY_OPTIONS,
+  USER_FACING_VIDEO_CODEC_OPTIONS,
+} from "@shared/gfn";
 import { formatShortcutForDisplay, normalizeShortcut } from "../shortcuts";
 
 interface SettingsPageProps {
@@ -27,14 +33,14 @@ interface SettingsPageProps {
 
 type ThanksLoadState = "idle" | "loading" | "loaded" | "error";
 
-const codecOptions: VideoCodec[] = ["H264", "H265", "AV1"];
+const codecOptions: VideoCodec[] = [...USER_FACING_VIDEO_CODEC_OPTIONS];
 
-const colorQualityOptions: { value: ColorQuality; label: string; description: string }[] = [
+const allColorQualityOptions: { value: ColorQuality; label: string; description: string }[] = [
   { value: "8bit_420", label: "8-bit 4:2:0", description: "Most compatible" },
-  { value: "8bit_444", label: "8-bit 4:4:4", description: "Better color" },
-  { value: "10bit_420", label: "10-bit 4:2:0", description: "HDR ready" },
-  { value: "10bit_444", label: "10-bit 4:4:4", description: "Best quality" },
 ];
+
+const colorQualityOptions: { value: ColorQuality; label: string; description: string }[] = allColorQualityOptions
+  .filter((option) => USER_FACING_COLOR_QUALITY_OPTIONS.includes(option.value));
 
 /* ── Static fallbacks (used when MES API is unavailable) ─────────── */
 
@@ -762,26 +768,14 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
     [onSettingChange]
   );
 
-  /** Change color quality, auto-switching codec to H265 if the mode requires HEVC */
-  const handleColorQualityChange = useCallback(
-    (cq: ColorQuality) => {
-      handleChange("colorQuality", cq);
-      if (colorQualityRequiresHevc(cq) && settings.codec === "H264") {
-        handleChange("codec", "H265");
-      }
-    },
-    [handleChange, settings.codec]
+  const normalizedStreamPreferences = useMemo(
+    () => normalizeStreamPreferences(settings.codec, settings.colorQuality),
+    [settings.codec, settings.colorQuality]
   );
-
-  const handleCodecChange = useCallback(
-    (codec: VideoCodec) => {
-      handleChange("codec", codec);
-      if (codec === "H264" && settings.colorQuality !== "8bit_420") {
-        handleChange("colorQuality", "8bit_420");
-      }
-    },
-    [handleChange, settings.colorQuality]
-  );
+  const availableColorQualityOptions = useMemo(() => {
+    const allowed = new Set(getAllowedColorQualitiesForCodec(normalizedStreamPreferences.codec));
+    return colorQualityOptions.filter((option) => allowed.has(option.value));
+  }, [normalizedStreamPreferences.codec]);
 
   // Microphone devices
   const [microphoneDevices, setMicrophoneDevices] = useState<MediaDeviceInfo[]>([]);
@@ -1585,8 +1579,8 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
                 {codecOptions.map((codec) => (
                   <button
                     key={codec}
-                    className={`settings-chip ${settings.codec === codec ? "active" : ""}`}
-                    onClick={() => handleCodecChange(codec)}
+                    className={`settings-chip ${normalizedStreamPreferences.codec === codec ? "active" : ""}`}
+                    onClick={() => handleChange("codec", codec)}
                   >
                     {codec}
                   </button>
@@ -1598,23 +1592,17 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
             <div className="settings-row settings-row--column">
               <label className="settings-label">Color Depth</label>
               <div className="settings-chip-row">
-                {colorQualityOptions.map((opt) => {
-                  const needsHevc = colorQualityRequiresHevc(opt.value);
-                  return (
-                    <button
-                      key={opt.value}
-                      className={`settings-chip ${settings.colorQuality === opt.value ? "active" : ""}`}
-                      onClick={() => handleColorQualityChange(opt.value)}
-                      title={`${opt.description}${needsHevc ? " — requires H265/AV1" : ""}`}
-                    >
-                      <span>{opt.label}</span>
-                    </button>
-                  );
-                })}
+                {availableColorQualityOptions.map((opt) => (
+                  <button
+                    key={opt.value}
+                    className={`settings-chip ${normalizedStreamPreferences.colorQuality === opt.value ? "active" : ""}`}
+                    onClick={() => handleChange("colorQuality", opt.value)}
+                    title={opt.description}
+                  >
+                    <span>{opt.label}</span>
+                  </button>
+                ))}
               </div>
-              {colorQualityRequiresHevc(settings.colorQuality) && settings.codec === "H264" && (
-                <span className="settings-input-hint">This mode requires H265 or AV1. Codec will be auto-switched.</span>
-              )}
             </div>
 
             {/* Bitrate slider */}
