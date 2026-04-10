@@ -864,7 +864,9 @@ function registerIpcHandlers(): void {
       signalingClientKey = nextKey;
       signalingClient.onEvent((event) => {
         emitToRenderer(event);
-        void nativeStreamerManager?.handleSignalingEvent(event);
+        void nativeStreamerManager?.handleSignalingEvent(event).catch((error) => {
+          console.warn("[NativeStreamer] Failed to forward signaling event:", error);
+        });
       });
       await signalingClient.connect();
     },

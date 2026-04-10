@@ -63,6 +63,9 @@ func init() {
 
 func (p *gstreamerPlayer) Start(ctx context.Context, cfg Config) error {
 	gst.Init(nil)
+	if err := verifyRuntimeElements(cfg.Codec); err != nil {
+		return err
+	}
 	if err := sdl.Init(sdl.INIT_VIDEO | sdl.INIT_GAMECONTROLLER | sdl.INIT_AUDIO); err != nil {
 		return err
 	}
@@ -91,6 +94,36 @@ func (p *gstreamerPlayer) Start(ctx context.Context, cfg Config) error {
 	loopCtx, cancel := context.WithCancel(ctx)
 	p.cancel = cancel
 	go p.eventLoop(loopCtx)
+	return nil
+}
+
+func verifyRuntimeElements(codec string) error {
+	required := []string{
+		"appsrc",
+		"decodebin",
+		"videoconvert",
+		"autovideosink",
+		"rtpopusdepay",
+		"opusdec",
+		"audioconvert",
+		"audioresample",
+		"autoaudiosink",
+	}
+	switch codec {
+	case "H265":
+		required = append(required, "rtph265depay")
+	case "AV1":
+		required = append(required, "rtpav1depay")
+	default:
+		required = append(required, "rtph264depay")
+	}
+	for _, name := range required {
+		element, err := gst.NewElement(name)
+		if err != nil {
+			return fmt.Errorf("gstreamer runtime missing required element %q: %w", name, err)
+		}
+		element.Unref()
+	}
 	return nil
 }
 

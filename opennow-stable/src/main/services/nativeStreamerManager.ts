@@ -36,6 +36,7 @@ type Envelope = {
 type NativeProcessDescriptor = { command: string; args: string[]; cwd?: string };
 
 type NativeStatsPayload = Extract<NativeStreamerEvent, { type: "stats" }>['stats'];
+const SOCKET_RECOVERABLE_ERRORS = new Set(["ECONNRESET", "EPIPE"]);
 
 export interface NativeStreamerManagerOptions {
   onEvent: (event: NativeStreamerEvent) => void;
@@ -254,6 +255,9 @@ export class NativeStreamerManager {
         console.error("[NativeStreamer] IPC decode failed:", error);
       });
     });
+    socket.on("error", (error) => {
+      void this.handleSocketFailure(socket, error);
+    });
     socket.once("close", () => {
       if (this.socket === socket) {
         this.connected = false;
@@ -264,6 +268,22 @@ export class NativeStreamerManager {
       }
       reader.close();
     });
+  }
+
+  private async handleSocketFailure(socket: Socket, error: Error & { code?: string }): Promise<void> {
+    if (this.socket !== socket && !this.pendingStartupReject) {
+      return;
+    }
+    const message = SOCKET_RECOVERABLE_ERRORS.has(error.code ?? "")
+      ? `Native streamer IPC disconnected: ${error.code}`
+      : `Native streamer IPC error: ${error.message}`;
+    console.warn("[NativeStreamer]", message);
+    if (this.pendingStartupReject) {
+      this.pendingStartupReject(new Error(message));
+      return;
+    }
+    this.options.onEvent({ type: "error", code: "native-ipc", message, fatal: true });
+    await this.abortStartup(new Error(message));
   }
 
   private async waitForSocketConnection(): Promise<Socket> {
@@ -425,14 +445,19 @@ export class NativeStreamerManager {
         env.GST_PLUGIN_PATH_1_0 = pluginDir;
         env.GST_PLUGIN_SYSTEM_PATH_1_0 = pluginDir;
         env.GST_PLUGIN_PATH = pluginDir;
+        env.GST_PLUGIN_SYSTEM_PATH = pluginDir;
       }
       if (pluginScanner) {
+        env.GST_PLUGIN_SCANNER = pluginScanner;
         env.GST_PLUGIN_SCANNER_1_0 = pluginScanner;
       }
 
       const registryDir = join(app.getPath("userData"), "native-streamer");
       await mkdir(registryDir, { recursive: true });
+      env.GST_REGISTRY = join(registryDir, "registry.bin");
       env.GST_REGISTRY_1_0 = join(registryDir, "registry.bin");
+      const pathEntries = [runtimeDir, pluginDir, pluginScanner ? dirname(pluginScanner) : null, env.PATH].filter(Boolean);
+      env.PATH = pathEntries.join(";");
     }
 
     return env;
