@@ -607,6 +607,7 @@ const THANKS_REQUEST_HEADERS = {
   "User-Agent": "OpenNOW-DesktopClient",
 } as const;
 const THANKS_EXCLUDED_PATTERN = /(copilot|claude|cappy)/i;
+const THANKS_FETCH_TIMEOUT_MS = 8000;
 
 interface GitHubContributorResponse {
   login?: string;
@@ -615,6 +616,43 @@ interface GitHubContributorResponse {
   contributions?: number;
   type?: string;
   name?: string | null;
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timeout);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timeout);
+        reject(error);
+      },
+    );
+  });
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number, label: string): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if ((error instanceof Error && error.name === "AbortError") || controller.signal.aborted) {
+      const reason = controller.signal.reason;
+      const message = reason instanceof Error ? reason.message : `${label} timed out after ${timeoutMs}ms`;
+      throw new Error(message);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function decodeHtmlEntities(value: string): string {
@@ -650,12 +688,17 @@ function shouldExcludeContributor(contributor: GitHubContributorResponse): boole
 }
 
 async function fetchThanksContributors(): Promise<ThankYouContributor[]> {
-  const response = await fetch(THANKS_CONTRIBUTORS_URL, { headers: THANKS_REQUEST_HEADERS });
+  const response = await fetchWithTimeout(
+    THANKS_CONTRIBUTORS_URL,
+    { headers: THANKS_REQUEST_HEADERS },
+    THANKS_FETCH_TIMEOUT_MS,
+    "GitHub contributors request",
+  );
   if (!response.ok) {
     throw new Error(`GitHub contributors request failed (${response.status})`);
   }
 
-  const payload = (await response.json()) as GitHubContributorResponse[];
+  const payload = (await withTimeout(response.json() as Promise<GitHubContributorResponse[]>, THANKS_FETCH_TIMEOUT_MS, "GitHub contributors response")) as GitHubContributorResponse[];
   if (!Array.isArray(payload)) {
     throw new Error("GitHub contributors response was not an array");
   }
@@ -726,17 +769,22 @@ function parseSupportersFromHtml(html: string): ThankYouSupporter[] {
 }
 
 async function fetchThanksSupporters(): Promise<ThankYouSupporter[]> {
-  const response = await fetch(THANKS_SUPPORTERS_URL, {
-    headers: {
-      ...THANKS_REQUEST_HEADERS,
-      Accept: "text/html,application/xhtml+xml",
+  const response = await fetchWithTimeout(
+    THANKS_SUPPORTERS_URL,
+    {
+      headers: {
+        ...THANKS_REQUEST_HEADERS,
+        Accept: "text/html,application/xhtml+xml",
+      },
     },
-  });
+    THANKS_FETCH_TIMEOUT_MS,
+    "GitHub sponsors request",
+  );
   if (!response.ok) {
     throw new Error(`GitHub sponsors page request failed (${response.status})`);
   }
 
-  const html = await response.text();
+  const html = await withTimeout(response.text(), THANKS_FETCH_TIMEOUT_MS, "GitHub sponsors response");
   return parseSupportersFromHtml(html);
 }
 
