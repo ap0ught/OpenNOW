@@ -1,6 +1,6 @@
 import { App as CapacitorApp } from "@capacitor/app";
 import { Browser } from "@capacitor/browser";
-import { CapacitorHttp } from "@capacitor/core";
+import { Capacitor, CapacitorHttp, type PluginListenerHandle } from "@capacitor/core";
 import { Device } from "@capacitor/device";
 import { Directory, Filesystem } from "@capacitor/filesystem";
 import { Preferences } from "@capacitor/preferences";
@@ -144,6 +144,72 @@ class AndroidAuthService {
     await writePreferenceJson(AUTH_STATE_KEY, { session: this.session, selectedProvider: this.selectedProvider });
   }
 
+  private async waitForAuthorizationCode(authUrl: string): Promise<string> {
+    let timeoutId: number | null = null;
+    let appUrlListener: PluginListenerHandle | null = null;
+    let browserFinishedListener: PluginListenerHandle | null = null;
+    let settled = false;
+
+    const cleanup = async (): Promise<void> => {
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+      await Promise.allSettled([
+        appUrlListener?.remove() ?? Promise.resolve(),
+        browserFinishedListener?.remove() ?? Promise.resolve(),
+        Browser.close().catch(() => undefined),
+      ]);
+      appUrlListener = null;
+      browserFinishedListener = null;
+    };
+
+    try {
+      return await new Promise<string>(async (resolve, reject) => {
+        const settle = (fn: () => void): void => {
+          if (settled) return;
+          settled = true;
+          fn();
+        };
+
+        timeoutId = window.setTimeout(() => {
+          settle(() => reject(new Error("Timed out waiting for OAuth callback")));
+        }, 180000);
+
+        appUrlListener = await CapacitorApp.addListener("appUrlOpen", ({ url }) => {
+          let parsed: URL;
+          try {
+            parsed = new URL(url);
+          } catch {
+            return;
+          }
+          if (parsed.protocol !== `${APP_SCHEME}:`) return;
+          const error = parsed.searchParams.get("error");
+          const code = parsed.searchParams.get("code");
+          settle(() => {
+            if (error) reject(new Error(error));
+            else if (!code) reject(new Error("Authorization failed"));
+            else resolve(code);
+          });
+        });
+
+        if (Capacitor.getPlatform() === "android") {
+          browserFinishedListener = await Browser.addListener("browserFinished", () => {
+            settle(() => reject(new Error("Login was cancelled before the OAuth callback completed")));
+          });
+        }
+
+        try {
+          await Browser.open({ url: authUrl, presentationStyle: "fullscreen" });
+        } catch (error) {
+          settle(() => reject(error instanceof Error ? error : new Error(String(error))));
+        }
+      });
+    } finally {
+      await cleanup();
+    }
+  }
+
   async getProviders(): Promise<LoginProvider[]> {
     if (this.providers.length > 0) return this.providers;
     try {
@@ -174,22 +240,7 @@ class AndroidAuthService {
     const deviceId = identifier || `android-${Math.random().toString(16).slice(2)}`;
     const { verifier, challenge } = await createPkce();
     const authUrl = buildAuthUrl(this.selectedProvider, challenge, deviceId);
-    const code = await new Promise<string>(async (resolve, reject) => {
-      const timeout = window.setTimeout(() => reject(new Error("Timed out waiting for OAuth callback")), 180000);
-      const listener = await CapacitorApp.addListener("appUrlOpen", ({ url }) => {
-        const parsed = new URL(url);
-        if (parsed.protocol !== `${APP_SCHEME}:`) return;
-        const error = parsed.searchParams.get("error");
-        const code = parsed.searchParams.get("code");
-        window.clearTimeout(timeout);
-        listener.remove();
-        void Browser.close().catch(() => undefined);
-        if (error) reject(new Error(error));
-        else if (!code) reject(new Error("Authorization failed"));
-        else resolve(code);
-      });
-      await Browser.open({ url: authUrl, presentationStyle: "fullscreen" });
-    });
+    const code = await this.waitForAuthorizationCode(authUrl);
     const initialTokens = await exchangeAuthorizationCode(code, verifier);
     const user = await fetchUserInfo(initialTokens);
     let tokens = initialTokens;
@@ -319,6 +370,8 @@ async function fetchSubscriptionInfo(input: SubscriptionFetchRequest): Promise<S
 function unsupported(message: string): Promise<never> { return Promise.reject(new Error(message)); }
 function dataUrlExtension(dataUrl: string): string { if (dataUrl.startsWith("data:image/jpeg")) return "jpg"; if (dataUrl.startsWith("data:image/webp")) return "webp"; return "png"; }
 function decodeDataUrl(dataUrl: string): string { const match = /^data:[^;]+;base64,(.+)$/i.exec(dataUrl); if (!match || !match[1]) throw new Error("Invalid data URL"); return match[1]; }
+function encodeBase64(bytes: Uint8Array): string { let binary = ""; const chunkSize = 0x8000; for (let index = 0; index < bytes.length; index += chunkSize) { binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize)); } return btoa(binary); }
+function concatBytes(chunks: Uint8Array[]): Uint8Array { const totalLength = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0); const merged = new Uint8Array(totalLength); let offset = 0; for (const chunk of chunks) { merged.set(chunk, offset); offset += chunk.byteLength; } return merged; }
 async function ensureDirectory(path: string): Promise<void> { await Filesystem.mkdir({ path, directory: Directory.Data, recursive: true }).catch(() => undefined); }
 async function listDirectory(path: string): Promise<Array<{ name: string }>> { try { const result = await Filesystem.readdir({ path, directory: Directory.Data }); return result.files.map((file) => ({ name: file.name })); } catch { return []; } }
 type RecordingMeta = RecordingEntry;
@@ -330,7 +383,7 @@ async function readDataUrl(path: string, mimeType: string): Promise<string> { co
 
 const signalingListeners = new Set<(event: MainToRendererSignalingEvent) => void>();
 let signalingClient: BrowserSignalingClient | null = null;
-const recordingBuffers = new Map<string, string[]>();
+const recordingBuffers = new Map<string, Uint8Array[]>();
 const recordingMime = new Map<string, string>();
 
 const api: OpenNowApi = {
@@ -371,11 +424,11 @@ const api: OpenNowApi = {
   saveScreenshot: async (input: ScreenshotSaveRequest): Promise<ScreenshotEntry> => { await ensureDirectory(SCREENSHOT_DIR); const fileName = `${Date.now()}-${Math.random().toString(16).slice(2)}.${dataUrlExtension(input.dataUrl)}`; const filePath = `${SCREENSHOT_DIR}/${fileName}`; await Filesystem.writeFile({ path: filePath, directory: Directory.Data, data: decodeDataUrl(input.dataUrl), recursive: true }); const stat = await Filesystem.stat({ path: filePath, directory: Directory.Data }); return { id: fileName, fileName, filePath, createdAtMs: Number(stat.ctime ?? Date.now()), sizeBytes: stat.size, dataUrl: input.dataUrl }; },
   listScreenshots: async (): Promise<ScreenshotEntry[]> => { const files = await listDirectory(SCREENSHOT_DIR); const entries = await Promise.all(files.map(async (file) => { const filePath = `${SCREENSHOT_DIR}/${file.name}`; const stat = await Filesystem.stat({ path: filePath, directory: Directory.Data }); const mime = file.name.endsWith(".jpg") ? "image/jpeg" : file.name.endsWith(".webp") ? "image/webp" : "image/png"; return { id: file.name, fileName: file.name, filePath, createdAtMs: Number(stat.ctime ?? Date.now()), sizeBytes: stat.size, dataUrl: await readDataUrl(filePath, mime) } satisfies ScreenshotEntry; })); return entries.sort((a, b) => b.createdAtMs - a.createdAtMs); },
   deleteScreenshot: async (input: ScreenshotDeleteRequest) => { await Filesystem.deleteFile({ path: `${SCREENSHOT_DIR}/${input.id}`, directory: Directory.Data }).catch(() => undefined); },
-  saveScreenshotAs: async (_input: ScreenshotSaveAsRequest): Promise<ScreenshotSaveAsResult> => ({ saved: false }),
+  saveScreenshotAs: async (_input: ScreenshotSaveAsRequest): Promise<ScreenshotSaveAsResult> => unsupported("Screenshot export is not supported on Android.") as Promise<ScreenshotSaveAsResult>,
   onTriggerScreenshot: () => () => undefined,
   beginRecording: async (input: RecordingBeginRequest): Promise<RecordingBeginResult> => { const recordingId = crypto.randomUUID(); recordingBuffers.set(recordingId, []); recordingMime.set(recordingId, input.mimeType); return { recordingId }; },
-  sendRecordingChunk: async (input: RecordingChunkRequest) => { const list = recordingBuffers.get(input.recordingId); if (!list) return; const bytes = new Uint8Array(input.chunk); let binary = ""; for (const byte of bytes) binary += String.fromCharCode(byte); list.push(btoa(binary)); },
-  finishRecording: async (input: RecordingFinishRequest): Promise<RecordingEntry> => { await ensureDirectory(RECORDING_DIR); const ext = (recordingMime.get(input.recordingId) ?? "video/webm").includes("mp4") ? "mp4" : "webm"; const fileName = `${Date.now()}-${input.recordingId}.${ext}`; const filePath = `${RECORDING_DIR}/${fileName}`; await Filesystem.writeFile({ path: filePath, directory: Directory.Data, data: (recordingBuffers.get(input.recordingId) ?? []).join(""), recursive: true }); const stat = await Filesystem.stat({ path: filePath, directory: Directory.Data }); const entry: RecordingMeta = { id: input.recordingId, fileName, filePath, createdAtMs: Number(stat.ctime ?? Date.now()), sizeBytes: stat.size, durationMs: input.durationMs, gameTitle: input.gameTitle, thumbnailDataUrl: input.thumbnailDataUrl }; const entries = await readRecordingMeta(); await writeRecordingMeta([entry, ...entries.filter((item) => item.id !== entry.id)]); recordingBuffers.delete(input.recordingId); recordingMime.delete(input.recordingId); return entry; },
+  sendRecordingChunk: async (input: RecordingChunkRequest) => { const list = recordingBuffers.get(input.recordingId); if (!list) return; list.push(new Uint8Array(input.chunk.slice(0))); },
+  finishRecording: async (input: RecordingFinishRequest): Promise<RecordingEntry> => { await ensureDirectory(RECORDING_DIR); const ext = (recordingMime.get(input.recordingId) ?? "video/webm").includes("mp4") ? "mp4" : "webm"; const fileName = `${Date.now()}-${input.recordingId}.${ext}`; const filePath = `${RECORDING_DIR}/${fileName}`; const mergedBytes = concatBytes(recordingBuffers.get(input.recordingId) ?? []); await Filesystem.writeFile({ path: filePath, directory: Directory.Data, data: encodeBase64(mergedBytes), recursive: true }); const stat = await Filesystem.stat({ path: filePath, directory: Directory.Data }); const entry: RecordingMeta = { id: input.recordingId, fileName, filePath, createdAtMs: Number(stat.ctime ?? Date.now()), sizeBytes: stat.size, durationMs: input.durationMs, gameTitle: input.gameTitle, thumbnailDataUrl: input.thumbnailDataUrl }; const entries = await readRecordingMeta(); await writeRecordingMeta([entry, ...entries.filter((item) => item.id !== entry.id)]); recordingBuffers.delete(input.recordingId); recordingMime.delete(input.recordingId); return entry; },
   abortRecording: async (input: RecordingAbortRequest) => { recordingBuffers.delete(input.recordingId); recordingMime.delete(input.recordingId); },
   listRecordings: async (): Promise<RecordingEntry[]> => { const entries = await readRecordingMeta(); return entries.sort((a, b) => b.createdAtMs - a.createdAtMs); },
   deleteRecording: async (input: RecordingDeleteRequest) => { const entries = await readRecordingMeta(); const match = entries.find((entry) => entry.id === input.id); if (match) await Filesystem.deleteFile({ path: match.filePath, directory: Directory.Data }).catch(() => undefined); await writeRecordingMeta(entries.filter((entry) => entry.id !== input.id)); },

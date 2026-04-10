@@ -682,7 +682,9 @@ export function StreamView({
   const screenshotApiAvailable =
     typeof openNow?.saveScreenshot === "function" &&
     typeof openNow?.listScreenshots === "function" &&
-    typeof openNow?.deleteScreenshot === "function" &&
+    typeof openNow?.deleteScreenshot === "function";
+  const screenshotExportAvailable =
+    platformCapabilities.supportsScreenshotExport &&
     typeof openNow?.saveScreenshotAs === "function";
 
   // Recording state
@@ -969,7 +971,7 @@ export function StreamView({
       console.error("[StreamView] Failed to delete screenshot:", error);
       setGalleryError("Unable to delete screenshot.");
     }
-  }, [screenshotApiAvailable, selectedScreenshot]);
+  }, [screenshotApiAvailable, screenshotExportAvailable, selectedScreenshot]);
 
   const handleSaveScreenshotAs = useCallback(async () => {
     setGalleryError(null);
@@ -979,13 +981,18 @@ export function StreamView({
     }
     if (!selectedScreenshot) return;
 
+    if (!screenshotExportAvailable) {
+      setGalleryError("Screenshot export is not available on this platform.");
+      return;
+    }
+
     try {
       await openNow.saveScreenshotAs({ id: selectedScreenshot.id });
     } catch (error) {
       console.error("[StreamView] Failed to save screenshot as:", error);
       setGalleryError("Unable to save screenshot.");
     }
-  }, [screenshotApiAvailable, selectedScreenshot]);
+  }, [screenshotApiAvailable, screenshotExportAvailable, selectedScreenshot]);
 
   const refreshRecordings = useCallback(async () => {
     setRecordingError(null);
@@ -1774,6 +1781,7 @@ export function StreamView({
               alt={`Screenshot ${selectedScreenshot.fileName}`}
             />
             <div className="sv-shot-modal-actions">
+{screenshotExportAvailable && (
               <button
                 type="button"
                 className="sv-shot-modal-btn"
@@ -1784,6 +1792,7 @@ export function StreamView({
                 <Save size={14} />
                 <span>Save</span>
               </button>
+              )}
               <button
                 type="button"
                 className="sv-shot-modal-btn sv-shot-modal-btn--danger"
