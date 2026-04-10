@@ -2156,6 +2156,21 @@ button.game-card-store-chip.active:hover {
   color: #fecaca;
 }
 
+.settings-thanks-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.settings-thanks-retry-btn {
+  color: var(--ink);
+}
+
+.settings-thanks-retry-btn:hover {
+  color: var(--accent);
+}
+
 /* Sections */
 .settings-sections {
   display: flex;

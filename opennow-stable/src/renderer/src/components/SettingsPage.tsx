@@ -971,11 +971,12 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
   useEffect(() => {
     if (activeTab !== "thanks") {
       thanksRequestIdRef.current += 1;
-      setThanksLoadState((current) => (current === "loading" ? "idle" : current));
+      setThanksLoadState((current) => (current === "loading" || current === "error" ? "idle" : current));
+      setThanksFetchError(null);
       return;
     }
 
-    if (thanksData || thanksLoadState === "loading") {
+    if (thanksData || thanksLoadState !== "idle") {
       return;
     }
 
@@ -1034,6 +1035,13 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
   const thanksContributors = thanksData?.contributors ?? [];
   const thanksSupporters = thanksData?.supporters ?? [];
   const hasThanksError = Boolean(thanksFetchError || thanksData?.contributorsError || thanksData?.supportersError);
+
+  const handleRetryThanks = useCallback(() => {
+    thanksRequestIdRef.current += 1;
+    setThanksData(null);
+    setThanksFetchError(null);
+    setThanksLoadState("idle");
+  }, []);
 
   const renderContributorCard = useCallback((contributor: ThankYouContributor) => {
     return renderPersonLink(
@@ -1095,6 +1103,11 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
         <section className="settings-section settings-thanks-status settings-thanks-status--error">
           <strong>Community data unavailable</strong>
           <span>{thanksFetchError}</span>
+          <div className="settings-thanks-actions">
+            <button type="button" className="settings-chip settings-thanks-retry-btn" onClick={handleRetryThanks}>
+              Retry
+            </button>
+          </div>
         </section>
       )}
 
