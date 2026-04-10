@@ -703,7 +703,7 @@ async function fetchThanksContributors(): Promise<ThankYouContributor[]> {
     throw new Error("GitHub contributors response was not an array");
   }
 
-  return payload
+  const contributors = payload
     .filter((contributor) => !shouldExcludeContributor(contributor))
     .map((contributor) => ({
       login: contributor.login!.trim(),
@@ -712,6 +712,7 @@ async function fetchThanksContributors(): Promise<ThankYouContributor[]> {
       contributions: typeof contributor.contributions === "number" ? contributor.contributions : 0,
     }))
     .sort((a, b) => b.contributions - a.contributions || a.login.localeCompare(b.login));
+  return contributors;
 }
 
 function parseSupporterName(entryHtml: string): { name: string; isPrivate: boolean } {
@@ -785,7 +786,8 @@ async function fetchThanksSupporters(): Promise<ThankYouSupporter[]> {
   }
 
   const html = await withTimeout(response.text(), THANKS_FETCH_TIMEOUT_MS, "GitHub sponsors response");
-  return parseSupportersFromHtml(html);
+  const supporters = parseSupportersFromHtml(html);
+  return supporters;
 }
 
 async function fetchThanksData(): Promise<ThankYouDataResult> {

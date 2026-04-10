@@ -980,10 +980,26 @@ export function SettingsPage({ settings, regions, onSettingChange }: SettingsPag
     }
 
     const requestId = ++thanksRequestIdRef.current;
+    let requestPromise: Promise<ThankYouDataResult>;
+
+    try {
+      const getThanksData = window.openNow?.getThanksData;
+      if (typeof getThanksData !== "function") {
+        throw new Error("openNow.getThanksData is unavailable");
+      }
+      requestPromise = getThanksData();
+    } catch (error) {
+      console.error("[SettingsPage] Failed to start thanks data request:", error);
+      setThanksData(null);
+      setThanksFetchError("Unable to load community acknowledgements right now.");
+      setThanksLoadState("error");
+      return;
+    }
+
     setThanksLoadState("loading");
     setThanksFetchError(null);
 
-    void window.openNow.getThanksData().then(
+    void requestPromise.then(
       (data) => {
         if (!thanksMountedRef.current || requestId !== thanksRequestIdRef.current) {
           return;
