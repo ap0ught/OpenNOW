@@ -247,9 +247,9 @@ jobs:
           export GST_REGISTRY="${runtime_root}/registry.bin"
           export GST_REGISTRY_1_0="${runtime_root}/registry.bin"
 
-          "${runtime_root}/tools/gst-inspect-1.0.exe" appsrc >/dev/null
-          "${runtime_root}/tools/gst-inspect-1.0.exe" rtpjitterbuffer >/dev/null
-          "${runtime_root}/tools/gst-inspect-1.0.exe" decodebin >/dev/null
+          for element in appsrc decodebin rtph264depay rtpopusdepay opusdec; do
+            "${runtime_root}/tools/gst-inspect-1.0.exe" "${element}" >/dev/null
+          done
 
           for plugin in libgstapp.dll libgstplayback.dll libgstcoreelements.dll libgstrtp.dll; do
             test -f "${runtime_root}/gstreamer-plugins/${plugin}"
