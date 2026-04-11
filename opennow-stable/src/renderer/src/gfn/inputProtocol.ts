@@ -44,6 +44,8 @@ export const GAMEPAD_AXIS_RT = 5; // Right trigger
 export const GAMEPAD_MAX_CONTROLLERS = 4;
 export const GAMEPAD_PACKET_SIZE = 38;
 export const GAMEPAD_DEADZONE = 0.15; // 15% radial deadzone
+export const PARTIALLY_RELIABLE_GAMEPAD_MASK_ALL = (1 << GAMEPAD_MAX_CONTROLLERS) - 1;
+export const PARTIALLY_RELIABLE_HID_DEVICE_MASK_ALL = 0xFFFFFFFF;
 
 export interface KeyboardPayload {
   keycode: number;
@@ -79,6 +81,10 @@ export interface GamepadInput {
   rightStickY: number; // -32768 to 32767 (inverted in XInput)
   connected: boolean; // true = connected, false = disconnected
   timestampUs: bigint;
+}
+
+export function isPartiallyReliableHidTransferEligible(inputType: number): boolean {
+  return inputType === INPUT_MOUSE_REL;
 }
 
 const codeMap: Record<string, { vk: number; scancode: number }> = {
