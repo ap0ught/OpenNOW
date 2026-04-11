@@ -1,0 +1,14 @@
+[package]
+name = "opennow-native-streamer"
+version = "0.1.0"
+edition = "2021"
+description = "OpenNOW Native Streamer"
+license = "MIT"
+
+[lib]
+name = "opennow_native_streamer"
+path = "src/lib.rs"
+
+[[bin]]
+name = "opennow-native-streamer"
+path = "src/main.rs"

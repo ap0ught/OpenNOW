@@ -6,6 +6,7 @@
     "dev": "npm --prefix opennow-stable run dev",
     "build": "npm --prefix opennow-stable run build",
     "typecheck": "npm --prefix opennow-stable run typecheck",
+    "native-streamer:test": "cargo test --manifest-path opennow-native-streamer/Cargo.toml",
     "dist": "npm --prefix opennow-stable run dist",
     "dist:signed": "npm --prefix opennow-stable run dist:signed"
   }

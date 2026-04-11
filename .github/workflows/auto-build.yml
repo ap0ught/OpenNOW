@@ -5,6 +5,7 @@ on:
   pull_request:
     paths:
       - "opennow-stable/**"
+      - "opennow-native-streamer/**"
       - ".github/workflows/auto-build.yml"
   push:
     branches:
@@ -12,6 +13,7 @@ on:
       - dev
     paths:
       - "opennow-stable/**"
+      - "opennow-native-streamer/**"
       - ".github/workflows/auto-build.yml"
 
 concurrency:
@@ -88,6 +90,17 @@ jobs:
 
       - name: Install dependencies
         run: npm ci --prefer-offline --no-audit --progress=false
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run native streamer tests
+        working-directory: .
+        run: cargo test --manifest-path opennow-native-streamer/Cargo.toml
+
+      - name: Build native streamer binary
+        working-directory: .
+        run: cargo build --manifest-path opennow-native-streamer/Cargo.toml
 
       - name: Build app bundles
         run: npm run build

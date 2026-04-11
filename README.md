@@ -108,6 +108,7 @@ For a fuller setup guide, see [docs/development.md](docs/development.md).
 ```text
 .
 ├── opennow-stable/   Electron app workspace
+├── opennow-native-streamer/ Rust native streamer foundation
 ├── docs/             Local project documentation
 ├── .github/          Workflows, templates, contributing docs
 ├── logo.png          Project logo
@@ -129,8 +130,9 @@ OpenNOW is split into three Electron layers:
 | Main | Electron + Node.js | OAuth, CloudMatch/session orchestration, signaling, caching, local file handling |
 | Preload | Electron `contextBridge` | Safe IPC bridge between the app shell and UI |
 | Renderer | React + TypeScript | Login flow, browsing, settings, WebRTC playback, diagnostics, controls |
+| Native streamer | Rust + GStreamer | Separate native process/window foundation, protocol helpers, IPC control plane, future native media path |
 
-The code lives under [`opennow-stable/src/`](opennow-stable/src), with shared TypeScript types and IPC contracts in [`opennow-stable/src/shared/`](opennow-stable/src/shared).
+The code lives under [`opennow-stable/src/`](opennow-stable/src), with shared TypeScript types and IPC contracts in [`opennow-stable/src/shared/`](opennow-stable/src/shared). The new native foundation lives in [`opennow-native-streamer/`](opennow-native-streamer) and is launched only when the `Native Streamer` beta toggle is enabled. When disabled, the existing Chromium/WebRTC path remains unchanged.
 
 ## Contributing
 

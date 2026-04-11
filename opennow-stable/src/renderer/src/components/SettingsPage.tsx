@@ -1952,6 +1952,28 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
               </label>
             </div>
 
+            <div className="settings-row settings-row--column">
+              <div className="settings-row-top settings-row-top--compact">
+                <label className="settings-label settings-label--wrap">
+                  <span className="settings-label-title">
+                    Native Streamer
+                    <span className="settings-inline-badge settings-inline-badge--beta">Beta</span>
+                  </span>
+                </label>
+                <label className="settings-toggle">
+                  <input
+                    type="checkbox"
+                    checked={settings.enableNativeStreamer}
+                    onChange={(e) => handleChange("enableNativeStreamer", e.target.checked)}
+                  />
+                  <span className="settings-toggle-track" />
+                </label>
+              </div>
+              <span className="settings-subtle-hint">
+                Launch the separate OpenNOW Native Streamer Rust + GStreamer backend/window for streaming. When disabled, OpenNOW keeps using the existing browser-based Chromium/WebRTC streamer as the fallback path.
+              </span>
+            </div>
+
             <div className="settings-row">
               <label className="settings-label">
                 <span className="settings-label-title">

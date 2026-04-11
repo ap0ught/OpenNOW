@@ -168,6 +168,8 @@ export interface Settings {
   gameLanguage: GameLanguage;
   /** Experimental request for Low Latency, Low Loss, Scalable throughput on new sessions */
   enableL4S: boolean;
+  /** Launch the separate Rust + GStreamer native streamer backend/window instead of the browser streamer */
+  enableNativeStreamer: boolean;
 }
 
 export const DEFAULT_STREAM_PREFERENCES: Readonly<Pick<Settings, "codec" | "colorQuality">> = Object.freeze({
@@ -585,6 +587,45 @@ export interface KeyframeRequest {
   attempt: number;
 }
 
+export interface NativeStreamerStartRequest {
+  session: SessionInfo;
+  settings: Pick<Settings, "resolution" | "fps" | "maxBitrateMbps" | "codec" | "colorQuality" | "decoderPreference" | "mouseSensitivity" | "mouseAcceleration">;
+}
+
+export interface NativeStreamerStopRequest {
+  reason?: string;
+}
+
+export interface NativeStreamerIcePayload extends IceCandidatePayload {}
+
+export interface NativeStreamerStats {
+  framesRendered: number;
+  audioBuffers: number;
+  inputPacketsSent: number;
+  lastError?: string | null;
+}
+
+export type NativeStreamerState =
+  | "booting"
+  | "idle"
+  | "starting"
+  | "awaiting_offer"
+  | "connecting"
+  | "streaming"
+  | "stopping"
+  | "stopped"
+  | "failed";
+
+export type MainToRendererNativeStreamerEvent =
+  | { type: "ready" }
+  | { type: "state"; state: NativeStreamerState; detail?: string }
+  | { type: "local-answer"; sdp: string; nvstSdp: string }
+  | { type: "local-ice"; candidate: NativeStreamerIcePayload }
+  | { type: "stats"; stats: NativeStreamerStats }
+  | { type: "log"; level: string; message: string }
+  | { type: "error"; code: string; message: string; recoverable: boolean }
+  | { type: "stopped"; reason?: string };
+
 export type MainToRendererSignalingEvent =
   | { type: "connected" }
   | { type: "disconnected"; reason: string }
@@ -622,7 +663,10 @@ export interface OpenNowApi {
   sendAnswer(input: SendAnswerRequest): Promise<void>;
   sendIceCandidate(input: IceCandidatePayload): Promise<void>;
   requestKeyframe(input: KeyframeRequest): Promise<void>;
+  startNativeStreamer(input: NativeStreamerStartRequest): Promise<void>;
+  stopNativeStreamer(input?: NativeStreamerStopRequest): Promise<void>;
   onSignalingEvent(listener: (event: MainToRendererSignalingEvent) => void): () => void;
+  onNativeStreamerEvent(listener: (event: MainToRendererNativeStreamerEvent) => void): () => void;
   /** Listen for F11 fullscreen toggle from main process */
   onToggleFullscreen(listener: () => void): () => void;
   quitApp(): Promise<void>;

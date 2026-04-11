@@ -20,7 +20,8 @@
     "preview": "electron-vite preview",
     "dist": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder",
     "dist:signed": "npm run build && electron-builder",
-    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.json",
+    "native-streamer:test": "cargo test --manifest-path ../opennow-native-streamer/Cargo.toml"
   },
   "dependencies": {
     "lucide-react": "^1.7.0",
@@ -62,7 +63,8 @@
     "files": [
       "dist/**",
       "dist-electron/**",
-      "package.json"
+      "package.json",
+      "../opennow-native-streamer/target/debug/opennow-native-streamer*"
     ],
     "asar": true,
     "win": {

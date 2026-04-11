@@ -7,7 +7,10 @@ import type {
   GamesFetchRequest,
   ResolveLaunchIdRequest,
   RegionsFetchRequest,
+  MainToRendererNativeStreamerEvent,
   MainToRendererSignalingEvent,
+  NativeStreamerStartRequest,
+  NativeStreamerStopRequest,
   OpenNowApi,
   SessionAdReportRequest,
   SessionCreateRequest,
@@ -83,6 +86,10 @@ const api: OpenNowApi = {
     ipcRenderer.invoke(IPC_CHANNELS.SEND_ICE_CANDIDATE, input),
   requestKeyframe: (input: KeyframeRequest) =>
     ipcRenderer.invoke(IPC_CHANNELS.REQUEST_KEYFRAME, input),
+  startNativeStreamer: (input: NativeStreamerStartRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.START_NATIVE_STREAMER, input),
+  stopNativeStreamer: (input: NativeStreamerStopRequest = {}) =>
+    ipcRenderer.invoke(IPC_CHANNELS.STOP_NATIVE_STREAMER, input),
   onSignalingEvent: (listener: (event: MainToRendererSignalingEvent) => void) => {
     const wrapped = (_event: Electron.IpcRendererEvent, payload: MainToRendererSignalingEvent) => {
       listener(payload);
@@ -91,6 +98,16 @@ const api: OpenNowApi = {
     ipcRenderer.on(IPC_CHANNELS.SIGNALING_EVENT, wrapped);
     return () => {
       ipcRenderer.off(IPC_CHANNELS.SIGNALING_EVENT, wrapped);
+    };
+  },
+  onNativeStreamerEvent: (listener: (event: MainToRendererNativeStreamerEvent) => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, payload: MainToRendererNativeStreamerEvent) => {
+      listener(payload);
+    };
+
+    ipcRenderer.on(IPC_CHANNELS.NATIVE_STREAMER_EVENT, wrapped);
+    return () => {
+      ipcRenderer.off(IPC_CHANNELS.NATIVE_STREAMER_EVENT, wrapped);
     };
   },
   onToggleFullscreen: (listener: () => void) => {

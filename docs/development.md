@@ -56,6 +56,9 @@ opennow-stable/
 ├── electron.vite.config.ts
 ├── package.json
 └── tsconfig*.json
+opennow-native-streamer/
+├── src/             Rust native streamer foundation
+└── tests/           Rust protocol and IPC tests
 ```
 
 ## Architecture
@@ -68,6 +71,7 @@ The main process handles platform and system responsibilities:
 - Game catalog fetches and cache refresh
 - CloudMatch session creation, polling, claiming, and stopping
 - Signaling and low-level Electron integration
+- Native streamer process spawning and local socket IPC when the beta toggle is enabled
 - Local media management for screenshots and recordings
 - Persistent settings storage
 
@@ -90,7 +94,8 @@ The renderer is a React app responsible for:
 - Login and provider selection
 - Browsing the catalog and public listings
 - Managing stream launch state and session recovery
-- Rendering the WebRTC stream
+- Rendering the WebRTC stream when the native toggle is disabled
+- Triggering the separate native streamer path when the native toggle is enabled
 - Handling controller input, shortcuts, stats overlay, screenshots, recordings, and settings UI
 
 Key entry points:
@@ -113,6 +118,12 @@ npm run dev
 ```bash
 cd opennow-stable
 npm run typecheck
+```
+
+### Run native streamer tests
+
+```bash
+cargo test --manifest-path opennow-native-streamer/Cargo.toml
 ```
 
 ### Build production bundles
@@ -159,6 +170,6 @@ Current build matrix:
 
 - The active app is the Electron client. If you see older references to previous implementations, prefer `opennow-stable/`.
 - Root-level npm scripts are convenience wrappers around the `opennow-stable` workspace.
-- Before opening a PR, run `npm run typecheck` and `npm run build`.
+- Before opening a PR, run `npm run typecheck`, `npm run build`, and `cargo test --manifest-path opennow-native-streamer/Cargo.toml`.
 
 For contribution workflow details, see [`.github/CONTRIBUTING.md`](../.github/CONTRIBUTING.md).

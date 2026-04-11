@@ -18,12 +18,14 @@ import { initLogCapture, exportLogs } from "@shared/logger";
 import { cacheManager } from "./services/cacheManager";
 import { refreshScheduler } from "./services/refreshScheduler";
 import { cacheEventBus } from "./services/cacheEventBus";
+import { NativeStreamerManager } from "./services/nativeStreamerManager";
 import {
   fetchMainGamesUncached,
   fetchLibraryGamesUncached,
   fetchPublicGamesUncached,
 } from "./gfn/games";
 import type {
+  MainToRendererNativeStreamerEvent,
   MainToRendererSignalingEvent,
   AuthLoginRequest,
   SessionInfo,
@@ -40,6 +42,8 @@ import type {
   SendAnswerRequest,
   IceCandidatePayload,
   KeyframeRequest,
+  NativeStreamerStartRequest,
+  NativeStreamerStopRequest,
   Settings,
   SubscriptionFetchRequest,
   SessionConflictChoice,
@@ -220,6 +224,7 @@ let signalingClient: GfnSignalingClient | null = null;
 let signalingClientKey: string | null = null;
 let authService: AuthService;
 let settingsManager: SettingsManager;
+let nativeStreamerManager: NativeStreamerManager | null = null;
 const SCREENSHOT_LIMIT = 60;
 
 function getScreenshotDirectory(): string {
@@ -1136,6 +1141,17 @@ function registerIpcHandlers(): void {
       throw new Error("Signaling is not connected");
     }
     return signalingClient.requestKeyframe(payload);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.START_NATIVE_STREAMER, async (_event, payload: NativeStreamerStartRequest): Promise<void> => {
+    if (!nativeStreamerManager) {
+      throw new Error("Native streamer manager is not initialized");
+    }
+    await nativeStreamerManager.start(payload);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.STOP_NATIVE_STREAMER, async (_event, payload: NativeStreamerStopRequest = {}): Promise<void> => {
+    await nativeStreamerManager?.stop(payload);
   });
 
   // Toggle fullscreen via IPC (for completeness)

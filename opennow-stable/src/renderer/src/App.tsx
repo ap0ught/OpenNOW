@@ -8,6 +8,7 @@ import type {
   GameInfo,
   GameVariant,
   LoginProvider,
+  MainToRendererNativeStreamerEvent,
   MainToRendererSignalingEvent,
   SessionAdAction,
   SessionAdInfo,
@@ -692,6 +693,7 @@ export function App(): JSX.Element {
     keyboardLayout: DEFAULT_KEYBOARD_LAYOUT,
     gameLanguage: "en_US",
     enableL4S: false,
+    enableNativeStreamer: false,
   });
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [codecResults, setCodecResults] = useState<CodecTestResult[] | null>(() => loadStoredCodecResults());
@@ -1958,6 +1960,10 @@ export function App(): JSX.Element {
             console.warn("[App] Received offer but no active session in sessionRef!");
             return;
           }
+          if (settings.enableNativeStreamer) {
+            console.log("[App] Native streamer mode active; offer will be handled by main/native backend");
+            return;
+          }
           console.log("[App] Active session for offer:", JSON.stringify({
             sessionId: activeSession.sessionId,
             serverIp: activeSession.serverIp,
@@ -2017,9 +2023,15 @@ export function App(): JSX.Element {
             }
           }
         } else if (event.type === "remote-ice") {
+          if (settings.enableNativeStreamer) {
+            return;
+          }
           await clientRef.current?.addRemoteCandidate(event.candidate);
         } else if (event.type === "disconnected") {
           console.warn("Signaling disconnected:", event.reason);
+          if (settings.enableNativeStreamer) {
+            await window.openNow.stopNativeStreamer({ reason: event.reason }).catch(() => {});
+          }
           clientRef.current?.dispose();
           clientRef.current = null;
           resetLaunchRuntime();
@@ -2034,6 +2046,40 @@ export function App(): JSX.Element {
 
     return () => unsubscribe();
   }, [resetLaunchRuntime, settings]);
+
+  useEffect(() => {
+    const unsubscribe = window.openNow.onNativeStreamerEvent(async (event: MainToRendererNativeStreamerEvent) => {
+      console.log("[App] Native streamer event:", event);
+      if (!settings.enableNativeStreamer) {
+        return;
+      }
+      if (event.type === "state") {
+        if (event.state === "streaming") {
+          setLaunchError(null);
+          setStreamStatus("streaming");
+        }
+        if (event.state === "failed") {
+          setLaunchError({
+            stage: "connecting",
+            title: "Native streamer failed",
+            description: event.detail || "The OpenNOW Native Streamer backend reported a fatal error.",
+          });
+        }
+      }
+      if (event.type === "error") {
+        setLaunchError({
+          stage: "connecting",
+          title: "Native streamer error",
+          description: event.message,
+          codeLabel: event.code,
+        });
+      }
+      if (event.type === "stopped" && streamStatusRef.current !== "idle") {
+        resetLaunchRuntime({ keepLaunchError: !!launchError });
+      }
+    });
+    return () => unsubscribe();
+  }, [launchError, resetLaunchRuntime, settings.enableNativeStreamer]);
 
   // Save settings when changed
   const updateSetting = useCallback(async <K extends keyof Settings>(key: K, value: Settings[K]) => {
@@ -2267,6 +2313,21 @@ export function App(): JSX.Element {
     sessionRef.current = claimed;
     setQueuePosition(undefined);
     setStreamStatus("connecting");
+    if (settings.enableNativeStreamer) {
+      await window.openNow.startNativeStreamer({
+        session: claimed,
+        settings: {
+          resolution: settings.resolution,
+          fps: settings.fps,
+          maxBitrateMbps: settings.maxBitrateMbps,
+          codec: settings.codec,
+          colorQuality: settings.colorQuality,
+          decoderPreference: settings.decoderPreference,
+          mouseSensitivity: settings.mouseSensitivity,
+          mouseAcceleration: settings.mouseAcceleration,
+        },
+      });
+    }
     await window.openNow.connectSignaling({
       sessionId: claimed.sessionId,
       signalingServer: claimed.signalingServer,
@@ -2538,6 +2599,21 @@ export function App(): JSX.Element {
         status: sessionToConnect.status,
       });
 
+      if (settings.enableNativeStreamer) {
+        await window.openNow.startNativeStreamer({
+          session: sessionToConnect,
+          settings: {
+            resolution: settings.resolution,
+            fps: settings.fps,
+            maxBitrateMbps: settings.maxBitrateMbps,
+            codec: settings.codec,
+            colorQuality: settings.colorQuality,
+            decoderPreference: settings.decoderPreference,
+            mouseSensitivity: settings.mouseSensitivity,
+            mouseAcceleration: settings.mouseAcceleration,
+          },
+        });
+      }
       await window.openNow.connectSignaling({
         sessionId: sessionToConnect.sessionId,
         signalingServer: sessionToConnect.signalingServer,
@@ -2550,6 +2626,7 @@ export function App(): JSX.Element {
       console.error("Launch failed:", error);
       setLaunchError(toLaunchErrorState(error, loadingStep));
       await window.openNow.disconnectSignaling().catch(() => {});
+      await window.openNow.stopNativeStreamer({ reason: "launch failed" }).catch(() => {});
       clientRef.current?.dispose();
       clientRef.current = null;
       resetLaunchRuntime({ keepLaunchError: true, keepStreamingContext: true });
@@ -2609,6 +2686,7 @@ export function App(): JSX.Element {
       console.error("Navbar resume failed:", error);
       setLaunchError(toLaunchErrorState(error, loadingStep));
       await window.openNow.disconnectSignaling().catch(() => {});
+      await window.openNow.stopNativeStreamer({ reason: "launch failed" }).catch(() => {});
       clientRef.current?.dispose();
       clientRef.current = null;
       resetLaunchRuntime({ keepLaunchError: true });
@@ -2638,6 +2716,7 @@ export function App(): JSX.Element {
         launchAbortRef.current = true;
       }
       await window.openNow.disconnectSignaling();
+      await window.openNow.stopNativeStreamer({ reason: "user stop" }).catch(() => {});
 
       const current = sessionRef.current;
       if (current) {
@@ -2714,6 +2793,7 @@ export function App(): JSX.Element {
 
   const handleDismissLaunchError = useCallback(async () => {
     await window.openNow.disconnectSignaling().catch(() => {});
+    await window.openNow.stopNativeStreamer({ reason: "dismiss launch error" }).catch(() => {});
     clientRef.current?.dispose();
     clientRef.current = null;
     resetLaunchRuntime();
