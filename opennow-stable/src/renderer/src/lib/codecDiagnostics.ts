@@ -183,14 +183,16 @@ export async function testCodecSupport(): Promise<CodecTestResult[]> {
       }
     }
 
+    const effectiveDecodeSupported = decodeSupported || webrtcSupported;
+
     results.push({
       codec: config.name,
       webrtcSupported,
-      decodeSupported,
+      decodeSupported: effectiveDecodeSupported,
       hwAccelerated,
       encodeSupported,
       encodeHwAccelerated,
-      decodeVia: decodeSupported ? guessDecodeBackend(hwAccelerated) : "Unsupported",
+      decodeVia: effectiveDecodeSupported ? guessDecodeBackend(hwAccelerated) : "Unsupported",
       encodeVia: encodeSupported ? guessEncodeBackend(encodeHwAccelerated) : "Unsupported",
       profiles,
     });

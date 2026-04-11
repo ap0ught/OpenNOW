@@ -676,6 +676,7 @@ export function App(): JSX.Element {
 
   const controllerOverlayOpenRef = useRef(false);
   const codecTestPromiseRef = useRef<Promise<CodecTestResult[] | null> | null>(null);
+  const codecStartupTestAttemptedRef = useRef(false);
 
   const resetStatsOverlayToPreference = useCallback((): void => {
     setShowStatsOverlay(settings.showStatsOnLaunch);
@@ -1631,9 +1632,10 @@ export function App(): JSX.Element {
   }, [codecResults]);
 
   useEffect(() => {
-    if (codecResults || codecTesting) {
+    if (codecResults || codecTesting || codecStartupTestAttemptedRef.current) {
       return;
     }
+    codecStartupTestAttemptedRef.current = true;
     void runCodecTest();
   }, [codecResults, codecTesting, runCodecTest]);
 
