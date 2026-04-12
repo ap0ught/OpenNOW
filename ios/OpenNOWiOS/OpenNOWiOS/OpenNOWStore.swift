@@ -1293,6 +1293,7 @@ final class OpenNOWStore: ObservableObject {
     }
 
     func signOut() {
+        Task { await NotificationManager.shared.cancelSessionNotifications() }
         user = nil
         authSession = nil
         allGames = []
