@@ -542,6 +542,28 @@ async function createMainWindow(): Promise<void> {
     },
   });
 
+  // Block all popup window creation. External http(s) links are forwarded
+  // to the system browser; all other targets (e.g., about:blank) are denied.
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith("https://") || url.startsWith("http://")) {
+      void shell.openExternal(url);
+    }
+    return { action: "deny" };
+  });
+
+  // Prevent the renderer from navigating away from the bundled app.
+  // Allow the Vite dev server URL in development; block everything else.
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    const devUrl = process.env.ELECTRON_RENDERER_URL;
+    if (devUrl && url.startsWith(devUrl)) {
+      return;
+    }
+    if (url.startsWith("file://")) {
+      return;
+    }
+    event.preventDefault();
+  });
+
   if (process.platform === "win32") {
     // Keep native window fullscreen in sync with HTML fullscreen so Windows treats
     // stream playback like a real fullscreen window instead of only DOM fullscreen.
