@@ -7,6 +7,7 @@ pnpm-lock.yaml
 
 # Build outputs
 dist/
+dist-local-build/
 target/
 target2/
 target3/

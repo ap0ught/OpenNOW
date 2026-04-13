@@ -1,6 +1,6 @@
 # SalsaNOW integration
 
-This repository includes **[SalsaNOW](https://github.com/ap0ught/SalsaNOW)** as a **git submodule** at [`external/SalsaNOW`](../external/SalsaNOW). OpenNOW does not embed its .NET runtime; you build or obtain `SalsaNOW.exe` separately and optionally point OpenNOW at it.
+This repository includes **[SalsaNOW](https://github.com/ap0ught/SalsaNOW)** as a **git submodule** at `[external/SalsaNOW](../external/SalsaNOW)`. OpenNOW does not embed its .NET runtime; you build or obtain `SalsaNOW.exe` separately and optionally point OpenNOW at it.
 
 ## What SalsaNOW is
 
@@ -31,8 +31,8 @@ The submodule tracks `https://github.com/ap0ught/SalsaNOW.git`.
 ## OpenNOW UI and IPC
 
 - **Settings** (Windows only): set **SalsaNOW companion** to the absolute path of `SalsaNOW.exe`, then use **Launch SalsaNOW**.
-- The main process reads **`salsaNowExePath` from saved settings** only; the renderer cannot pass an arbitrary path to the launcher IPC.
-- IPC channel: `companion:salsa-now-launch` (see [`opennow-stable/src/shared/ipc.ts`](../opennow-stable/src/shared/ipc.ts)).
+- The main process reads `**salsaNowExePath` from saved settings** only; the renderer cannot pass an arbitrary path to the launcher IPC.
+- IPC channel: `companion:salsa-now-launch` (see `[opennow-stable/src/shared/ipc.ts](../opennow-stable/src/shared/ipc.ts)`).
 
 ### Sharing the install package over HTTP (copy link)
 
@@ -43,8 +43,8 @@ OpenNOW can start a **short-lived HTTP server** on your machine that serves **on
 
 The UI lists:
 
-- **`http://127.0.0.1:<port>/x/<token>`** — only works **on the same computer** running OpenNOW. (`/x/` is a generic path prefix before the unguessable token.)
-- **`http://<LAN-IP>:<port>/x/<token>`** — one line per local IPv4; usable from **another device on the same LAN** (same Wi‑Fi/Ethernet, routing/firewall allowing it).
+- `**http://127.0.0.1:<port>/x/<token>`** — only works **on the same computer** running OpenNOW. (`/x/` is a generic path prefix before the unguessable token.)
+- `**http://<LAN-IP>:<port>/x/<token>`** — one line per local IPv4; usable from **another device on the same LAN** (same Wi‑Fi/Ethernet, routing/firewall allowing it).
 
 **GeForce NOW cloud session note:** the Windows VM where your game runs is **not** on your home LAN. Those LAN URLs usually **do not** work inside the GFN browser unless you add something that bridges networks (e.g. **Tailscale** on both sides, **ngrok** / similar tunnel to your PC, or hosting the file on **HTTPS** you control). Treat HTTP sharing as best for **lab / same-network** transfer; plan an explicit tunnel or upload if the target is strictly remote.
 

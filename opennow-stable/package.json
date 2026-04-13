@@ -19,6 +19,7 @@
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "dist": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder",
+    "dist:local": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder -c.win.signAndEditExecutable=false",
     "dist:signed": "npm run build && electron-builder",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.json",
     "test": "npm run test:vitest && npm run test:node",
