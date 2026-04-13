@@ -36,6 +36,7 @@ import type {
   PrintedWasteServerMapping,
   ThankYouDataResult,
   SalsaNowLaunchResult,
+  SalsaNowServeStartResult,
 } from "@shared/gfn";
 import { parseSerializedSessionErrorTransport } from "@shared/sessionError";
 
@@ -153,6 +154,9 @@ const api: OpenNowApi = {
   getThanksData: (): Promise<ThankYouDataResult> => ipcRenderer.invoke(IPC_CHANNELS.COMMUNITY_GET_THANKS),
   launchSalsaNowCompanion: (): Promise<SalsaNowLaunchResult> =>
     ipcRenderer.invoke(IPC_CHANNELS.SALSA_NOW_LAUNCH),
+  startSalsaNowPackageServer: (options: { useConfiguredExe: boolean }): Promise<SalsaNowServeStartResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.SALSA_NOW_START_PACKAGE_SERVER, options),
+  stopSalsaNowPackageServer: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.SALSA_NOW_STOP_PACKAGE_SERVER),
 };
 
 contextBridge.exposeInMainWorld("openNow", api);

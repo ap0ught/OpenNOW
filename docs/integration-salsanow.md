@@ -34,6 +34,22 @@ The submodule tracks `https://github.com/ap0ught/SalsaNOW.git`.
 - The main process reads **`salsaNowExePath` from saved settings** only; the renderer cannot pass an arbitrary path to the launcher IPC.
 - IPC channel: `companion:salsa-now-launch` (see [`opennow-stable/src/shared/ipc.ts`](../opennow-stable/src/shared/ipc.ts)).
 
+### Sharing the install package over HTTP (copy link)
+
+OpenNOW can start a **short-lived HTTP server** on your machine that serves **one file** (your built `SalsaNOW.exe`, a zip, etc.) at a URL containing a random token:
+
+- **Serve configured path** — uses `salsaNowExePath` from settings.
+- **Pick file to serve…** — opens a file dialog (`.exe`, `.zip`, `.msi`, or any file).
+
+The UI lists:
+
+- **`http://127.0.0.1:<port>/salsa-pkg/<token>`** — only works **on the same computer** running OpenNOW.
+- **`http://<LAN-IP>:<port>/salsa-pkg/<token>`** — one line per local IPv4; usable from **another device on the same LAN** (same Wi‑Fi/Ethernet, routing/firewall allowing it).
+
+**GeForce NOW cloud session note:** the Windows VM where your game runs is **not** on your home LAN. Those LAN URLs usually **do not** work inside the GFN browser unless you add something that bridges networks (e.g. **Tailscale** on both sides, **ngrok** / similar tunnel to your PC, or hosting the file on **HTTPS** you control). Treat HTTP sharing as best for **lab / same-network** transfer; plan an explicit tunnel or upload if the target is strictly remote.
+
+IPC: `companion:salsa-now-start-package-server`, `companion:salsa-now-stop-package-server`. The server is stopped when you click **Stop sharing** or when OpenNOW quits.
+
 ## Relationship to OpenNOW releases
 
 Electron builds in CI **do not** compile the C# submodule. Release artifacts stay the OpenNOW app; SalsaNOW remains a **separate binary** you maintain or ship alongside if desired.

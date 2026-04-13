@@ -612,6 +612,17 @@ export type SalsaNowLaunchResult =
   | { ok: true }
   | { ok: false; error: string };
 
+export type SalsaNowServeStartResult =
+  | {
+      ok: true;
+      port: number;
+      token: string;
+      fileName: string;
+      localUrl: string;
+      lanUrls: string[];
+    }
+  | { ok: false; error: string };
+
 export interface OpenNowApi {
   getAuthSession(input?: AuthSessionRequest): Promise<AuthSessionResult>;
   getLoginProviders(): Promise<LoginProvider[]>;
@@ -712,6 +723,14 @@ export interface OpenNowApi {
    * in the main process; the renderer cannot override it.
    */
   launchSalsaNowCompanion(): Promise<SalsaNowLaunchResult>;
+
+  /**
+   * Host the selected file (or `salsaNowExePath` when `useConfiguredExe`) on a short-lived local HTTP server.
+   * Returns copyable URLs; see docs for limits (GeForce NOW cloud VM cannot reach your LAN by default).
+   */
+  startSalsaNowPackageServer(options: { useConfiguredExe: boolean }): Promise<SalsaNowServeStartResult>;
+
+  stopSalsaNowPackageServer(): Promise<void>;
 }
 
 export interface ScreenshotSaveRequest {

@@ -57,6 +57,9 @@ export const IPC_CHANNELS = {
   PRINTEDWASTE_SERVER_MAPPING_FETCH: "printedwaste:server-mapping-fetch",
   /** Launch optional Windows companion (SalsaNOW.exe); path comes from settings only */
   SALSA_NOW_LAUNCH: "companion:salsa-now-launch",
+  /** Start local HTTP server to download one package file (token URL); see docs/integration-salsanow.md */
+  SALSA_NOW_START_PACKAGE_SERVER: "companion:salsa-now-start-package-server",
+  SALSA_NOW_STOP_PACKAGE_SERVER: "companion:salsa-now-stop-package-server",
 } as const;
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS];

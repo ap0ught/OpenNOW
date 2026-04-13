@@ -431,6 +431,10 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
   // Dynamic entitled resolutions from MES API
   const [entitledResolutions, setEntitledResolutions] = useState<EntitledResolution[]>([]);
   const [subscriptionLoading, setSubscriptionLoading] = useState(true);
+  const [salsaPackageServe, setSalsaPackageServe] = useState<
+    | { active: false }
+    | { active: true; localUrl: string; lanUrls: string[]; fileName: string }
+  >({ active: false });
 
   useEffect(() => {
     setToggleStatsInput(settings.shortcutToggleStats);
@@ -2197,6 +2201,108 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
                     <Play size={16} />
                     Launch
                   </button>
+                </div>
+
+                <div className="settings-row settings-row--column">
+                  <div className="settings-row-top">
+                    <label className="settings-label">
+                      Share install package (HTTP)
+                      <span className="settings-hint">
+                        Hosts the file on this PC with a random link (localhost + your LAN IPs). Open the link in a
+                        browser on a machine that can reach this network segment. GeForce NOW cloud rigs usually{" "}
+                        <strong>cannot</strong> see your home LAN; use a tunnel (ngrok, Tailscale, etc.) or another transfer
+                        method unless you know your network path works.
+                      </span>
+                    </label>
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
+                    <button
+                      type="button"
+                      className="settings-export-logs-btn"
+                      onClick={async () => {
+                        const r = await window.openNow.startSalsaNowPackageServer({ useConfiguredExe: true });
+                        if (!r.ok) {
+                          alert(r.error);
+                          return;
+                        }
+                        setSalsaPackageServe({
+                          active: true,
+                          localUrl: r.localUrl,
+                          lanUrls: r.lanUrls,
+                          fileName: r.fileName,
+                        });
+                      }}
+                    >
+                      Serve configured path
+                    </button>
+                    <button
+                      type="button"
+                      className="settings-export-logs-btn"
+                      onClick={async () => {
+                        const r = await window.openNow.startSalsaNowPackageServer({ useConfiguredExe: false });
+                        if (!r.ok) {
+                          alert(r.error);
+                          return;
+                        }
+                        setSalsaPackageServe({
+                          active: true,
+                          localUrl: r.localUrl,
+                          lanUrls: r.lanUrls,
+                          fileName: r.fileName,
+                        });
+                      }}
+                    >
+                      Pick file to serve…
+                    </button>
+                    {salsaPackageServe.active && (
+                      <button
+                        type="button"
+                        className="settings-delete-cache-btn"
+                        onClick={async () => {
+                          await window.openNow.stopSalsaNowPackageServer();
+                          setSalsaPackageServe({ active: false });
+                        }}
+                      >
+                        Stop sharing
+                      </button>
+                    )}
+                  </div>
+                  {salsaPackageServe.active && (
+                    <>
+                      <p className="settings-subtle-hint" style={{ marginTop: "0.35rem" }}>
+                        Serving <strong>{salsaPackageServe.fileName}</strong>. Copy a URL (Edge/Chrome on the target
+                        machine). Firewall may prompt the first time.
+                      </p>
+                      <textarea
+                        readOnly
+                        className="settings-text-input"
+                        rows={Math.max(2, 1 + salsaPackageServe.lanUrls.length)}
+                        style={{ width: "100%", marginTop: "0.35rem", fontFamily: "monospace", fontSize: "0.85rem" }}
+                        value={[salsaPackageServe.localUrl, ...salsaPackageServe.lanUrls].join("\n")}
+                        onFocus={(e) => e.target.select()}
+                      />
+                      {salsaPackageServe.lanUrls.length === 0 && (
+                        <span className="settings-subtle-hint">
+                          No non-local IPv4 found — only this PC can use the 127.0.0.1 link.
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        className="settings-export-logs-btn"
+                        style={{ marginTop: "0.35rem" }}
+                        onClick={async () => {
+                          const text = [salsaPackageServe.localUrl, ...salsaPackageServe.lanUrls].join("\n");
+                          try {
+                            await navigator.clipboard.writeText(text);
+                          } catch {
+                            alert("Could not copy to clipboard.");
+                          }
+                        }}
+                      >
+                        Copy all URLs
+                      </button>
+                    </>
+                  )}
                 </div>
               </>
             )}

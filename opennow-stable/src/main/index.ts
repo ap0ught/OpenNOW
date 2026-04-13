@@ -63,6 +63,7 @@ import type {
   ThankYouDataResult,
   ThankYouSupporter,
   SalsaNowLaunchResult,
+  SalsaNowServeStartResult,
 } from "@shared/gfn";
 import { serializeSessionErrorTransport } from "@shared/sessionError";
 
@@ -80,6 +81,7 @@ import { fetchSubscription, fetchDynamicRegions } from "./gfn/subscription";
 import { GfnSignalingClient } from "./gfn/signaling";
 import { isSessionError, SessionError, GfnErrorCode } from "./gfn/errorCodes";
 import { connectDiscordRpc, setActivity, clearActivity, destroyDiscordRpc } from "./discordRpc";
+import { startPackageServer as startSalsaNowPackageServer, stopPackageServer as stopSalsaNowPackageServer } from "./salsaNowPackageServer";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -1216,6 +1218,44 @@ function registerIpcHandlers(): void {
     return settingsManager.reset();
   });
 
+  ipcMain.handle(
+    IPC_CHANNELS.SALSA_NOW_START_PACKAGE_SERVER,
+    async (_event: Electron.IpcMainInvokeEvent, options: { useConfiguredExe: boolean }): Promise<SalsaNowServeStartResult> => {
+      let filePath: string;
+      if (options.useConfiguredExe) {
+        const raw = settingsManager.get("salsaNowExePath").trim();
+        if (!raw) {
+          return { ok: false, error: "Set the path to SalsaNOW.exe (or your package) in Settings first." };
+        }
+        filePath = resolve(raw);
+      } else {
+        const dialogOptions: Electron.OpenDialogOptions = {
+          properties: ["openFile"],
+          filters: [
+            { name: "Install package", extensions: ["exe", "zip", "msi"] },
+            { name: "All files", extensions: ["*"] },
+          ],
+        };
+        const picked =
+          mainWindow && !mainWindow.isDestroyed()
+            ? await dialog.showOpenDialog(mainWindow, dialogOptions)
+            : await dialog.showOpenDialog(dialogOptions);
+        if (picked.canceled || !picked.filePaths[0]) {
+          return { ok: false, error: "No file selected." };
+        }
+        filePath = picked.filePaths[0];
+      }
+      if (!existsSync(filePath)) {
+        return { ok: false, error: `File not found: ${filePath}` };
+      }
+      return startSalsaNowPackageServer(filePath);
+    },
+  );
+
+  ipcMain.handle(IPC_CHANNELS.SALSA_NOW_STOP_PACKAGE_SERVER, async (): Promise<void> => {
+    stopSalsaNowPackageServer();
+  });
+
   ipcMain.handle(IPC_CHANNELS.SALSA_NOW_LAUNCH, async (): Promise<SalsaNowLaunchResult> => {
     if (process.platform !== "win32") {
       return { ok: false, error: "SalsaNOW is only supported on Windows." };
@@ -1874,6 +1914,7 @@ app.on("before-quit", () => {
   signalingClient?.disconnect();
   signalingClient = null;
   signalingClientKey = null;
+  stopSalsaNowPackageServer();
   void destroyDiscordRpc();
 });
 
