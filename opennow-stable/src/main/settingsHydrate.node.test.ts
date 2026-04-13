@@ -20,6 +20,21 @@ describe("hydrateSettingsFromPartial (local-only, no NVIDIA)", () => {
     assert.equal(migrated, true);
   });
 
+  it("migrates legacy anti-AFK shortcut", () => {
+    const { settings, migrated } = hydrateSettingsFromPartial({
+      shortcutToggleAntiAfk: "Ctrl+Shift+F10",
+    } as Partial<Settings>);
+    assert.equal(settings.shortcutToggleAntiAfk, "Ctrl+Shift+K");
+    assert.equal(migrated, true);
+  });
+
+  it("merges favoriteGameIds from partial", () => {
+    const { settings } = hydrateSettingsFromPartial({
+      favoriteGameIds: ["a", "b"],
+    });
+    assert.deepEqual(settings.favoriteGameIds, ["a", "b"]);
+  });
+
   it("migrates boolean mouseAcceleration to percentage", () => {
     const { settings, migrated } = hydrateSettingsFromPartial({
       mouseAcceleration: true,
