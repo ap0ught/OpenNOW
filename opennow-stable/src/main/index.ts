@@ -62,6 +62,7 @@ import type {
   ThankYouContributor,
   ThankYouDataResult,
   ThankYouSupporter,
+  SalsaNowLaunchResult,
 } from "@shared/gfn";
 import { serializeSessionErrorTransport } from "@shared/sessionError";
 
@@ -1213,6 +1214,35 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.SETTINGS_RESET, async (): Promise<Settings> => {
     return settingsManager.reset();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SALSA_NOW_LAUNCH, async (): Promise<SalsaNowLaunchResult> => {
+    if (process.platform !== "win32") {
+      return { ok: false, error: "SalsaNOW is only supported on Windows." };
+    }
+    const raw = settingsManager.get("salsaNowExePath").trim();
+    if (!raw) {
+      return { ok: false, error: "Set the path to SalsaNOW.exe in Settings first." };
+    }
+    const exePath = resolve(raw);
+    if (!existsSync(exePath)) {
+      return { ok: false, error: `File not found: ${exePath}` };
+    }
+    try {
+      const st = await stat(exePath);
+      if (!st.isFile()) {
+        return { ok: false, error: "Path must point to SalsaNOW.exe (a file)." };
+      }
+    } catch {
+      return { ok: false, error: "Could not read the configured path." };
+    }
+    try {
+      const child = spawn(exePath, [], { detached: true, stdio: "ignore", windowsHide: false });
+      child.unref();
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
   });
 
   ipcMain.handle(IPC_CHANNELS.MICROPHONE_PERMISSION_GET, async (): Promise<MicrophonePermissionResult> => {

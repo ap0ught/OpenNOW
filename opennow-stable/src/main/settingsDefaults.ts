@@ -50,4 +50,5 @@ export const DEFAULT_SETTINGS: Settings = {
   enableL4S: false,
   enableCloudGsync: false,
   discordRichPresence: false,
+  salsaNowExePath: "",
 };

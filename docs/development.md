@@ -112,6 +112,10 @@ Key entry points:
 - [`opennow-stable/src/renderer/src/components/StreamView.tsx`](../opennow-stable/src/renderer/src/components/StreamView.tsx)
 - [`opennow-stable/src/renderer/src/components/SettingsPage.tsx`](../opennow-stable/src/renderer/src/components/SettingsPage.tsx)
 
+### Optional Windows companion (SalsaNOW)
+
+The repo vendors [SalsaNOW](https://github.com/ap0ught/SalsaNOW) under [`external/SalsaNOW`](../external/SalsaNOW) as a **git submodule**. OpenNOW can **launch** a user-built `SalsaNOW.exe` from Settings (path stored as `salsaNowExePath`). See [SalsaNOW integration](integration-salsanow.md) for checkout, build, security, and IPC notes.
+
 ## Common Tasks
 
 ### Start the app in development

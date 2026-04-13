@@ -1,4 +1,4 @@
-import { Globe, Check, Search, X, Loader, Zap, Mic, FileDown, Wifi, Trash2, Heart, Users, ExternalLink } from "lucide-react";
+import { Globe, Check, Search, X, Loader, Zap, Mic, FileDown, Wifi, Trash2, Heart, Users, ExternalLink, Play } from "lucide-react";
 import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import type { JSX } from "react";
 
@@ -105,6 +105,7 @@ const STATIC_FPS_PRESETS: FpsPreset[] = [
 ];
 
 const isMac = navigator.platform.toLowerCase().includes("mac");
+const isWin = navigator.platform.toLowerCase().includes("win");
 const shortcutExamples = "Examples: F3, Ctrl+Shift+Q, Ctrl+Shift+K";
 const shortcutDefaults = {
   shortcutToggleStats: "F3",
@@ -2151,6 +2152,54 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
                 <span className="settings-toggle-track" />
               </label>
             </div>
+
+            {isWin && (
+              <>
+                <div className="settings-row settings-row--column">
+                  <div className="settings-row-top">
+                    <label className="settings-label">
+                      SalsaNOW companion (optional)
+                      <span className="settings-hint">
+                        Absolute path to SalsaNOW.exe — a Windows helper that prepares GeForce NOW VM-style sessions for
+                        local Steam integration. Vendored source: <code>external/SalsaNOW</code>. Upstream:{" "}
+                        <a href="https://github.com/ap0ught/SalsaNOW" target="_blank" rel="noreferrer">
+                          ap0ught/SalsaNOW
+                        </a>
+                        . Read <code>docs/integration-salsanow.md</code> before enabling.
+                      </span>
+                    </label>
+                  </div>
+                  <input
+                    type="text"
+                    className="settings-text-input"
+                    placeholder="C:\\Path\\To\\SalsaNOW.exe"
+                    value={settings.salsaNowExePath}
+                    onChange={(e) => handleChange("salsaNowExePath", e.target.value)}
+                    spellCheck={false}
+                    autoComplete="off"
+                  />
+                </div>
+                <div className="settings-row">
+                  <label className="settings-label">
+                    Launch SalsaNOW
+                    <span className="settings-hint">Starts the configured executable detached from OpenNOW.</span>
+                  </label>
+                  <button
+                    type="button"
+                    className="settings-export-logs-btn"
+                    onClick={async () => {
+                      const r = await window.openNow.launchSalsaNowCompanion();
+                      if (!r.ok) {
+                        alert(r.error);
+                      }
+                    }}
+                  >
+                    <Play size={16} />
+                    Launch
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </section>
 

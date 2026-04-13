@@ -172,6 +172,12 @@ export interface Settings {
   enableCloudGsync: boolean;
   /** Show the currently streaming game as Discord Rich Presence activity */
   discordRichPresence: boolean;
+  /**
+   * Absolute path to SalsaNOW.exe (optional Windows companion that prepares a GeForce NOW
+   * VM-style session for local Steam integration). Empty disables launch from OpenNOW.
+   * Upstream source lives in `external/SalsaNOW` in this repository.
+   */
+  salsaNowExePath: string;
 }
 
 export const DEFAULT_STREAM_PREFERENCES: Readonly<Pick<Settings, "codec" | "colorQuality">> = Object.freeze({
@@ -602,6 +608,10 @@ export type MainToRendererSignalingEvent =
 /** Dialog result for session conflict resolution */
 export type SessionConflictChoice = "resume" | "new" | "cancel";
 
+export type SalsaNowLaunchResult =
+  | { ok: true }
+  | { ok: false; error: string };
+
 export interface OpenNowApi {
   getAuthSession(input?: AuthSessionRequest): Promise<AuthSessionResult>;
   getLoginProviders(): Promise<LoginProvider[]>;
@@ -696,6 +706,12 @@ export interface OpenNowApi {
   /** Fetch PrintedWaste server mapping metadata (includes nuked status) */
   fetchPrintedWasteServerMapping(): Promise<PrintedWasteServerMapping>;
   getThanksData(): Promise<ThankYouDataResult>;
+
+  /**
+   * Spawn SalsaNOW from `salsaNowExePath` (Windows only). Path is read from persisted settings
+   * in the main process; the renderer cannot override it.
+   */
+  launchSalsaNowCompanion(): Promise<SalsaNowLaunchResult>;
 }
 
 export interface ScreenshotSaveRequest {

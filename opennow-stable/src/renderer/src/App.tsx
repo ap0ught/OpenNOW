@@ -724,6 +724,7 @@ export function App(): JSX.Element {
     enableL4S: false,
     enableCloudGsync: false,
     discordRichPresence: false,
+    salsaNowExePath: "",
   });
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [codecResults, setCodecResults] = useState<CodecTestResult[] | null>(() => loadStoredCodecResults());

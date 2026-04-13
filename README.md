@@ -86,6 +86,7 @@ For a fuller setup guide, see [docs/development.md](docs/development.md).
 ## Documentation
 
 - [Development Guide](docs/development.md)
+- [SalsaNOW companion integration](docs/integration-salsanow.md) (optional Windows helper; vendored as `external/SalsaNOW`)
 - [Contributing Guide](.github/CONTRIBUTING.md)
 - [Project Website](https://opennow.zortos.me)
 
