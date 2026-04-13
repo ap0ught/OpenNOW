@@ -35,5 +35,5 @@ npm run dist
 - WebRTC relies on Chromium's built-in stack
 - `ws` is used in the main process for custom signaling behavior
 - Authentication uses an OAuth PKCE flow with a localhost callback
-- Settings are persisted locally through `electron-store`
+- Settings are persisted locally as `settings.json` under Electron’s user data directory (`SettingsManager` in the main process)
 - React Scan is available in renderer development builds for performance debugging

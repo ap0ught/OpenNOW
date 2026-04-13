@@ -38,7 +38,7 @@ OpenNOW is an Electron app. Streaming is handled entirely inside the Chromium re
 │  ├── Screenshots         — saved to ~/Pictures/OpenNOW/Screenshots/  │
 │  ├── Recordings          — written to ~/Pictures/OpenNOW/Recordings/ │
 │  │    └── ffmpeg (spawned) for thumbnail extraction                  │
-│  └── Settings            — electron-store persistent settings        │
+│  └── SettingsManager     — JSON settings file in Electron userData   │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
