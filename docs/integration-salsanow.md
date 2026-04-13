@@ -43,12 +43,12 @@ OpenNOW can start a **short-lived HTTP server** on your machine that serves **on
 
 The UI lists:
 
-- **`http://127.0.0.1:<port>/salsa-pkg/<token>`** — only works **on the same computer** running OpenNOW.
-- **`http://<LAN-IP>:<port>/salsa-pkg/<token>`** — one line per local IPv4; usable from **another device on the same LAN** (same Wi‑Fi/Ethernet, routing/firewall allowing it).
+- **`http://127.0.0.1:<port>/x/<token>`** — only works **on the same computer** running OpenNOW. (`/x/` is a generic path prefix before the unguessable token.)
+- **`http://<LAN-IP>:<port>/x/<token>`** — one line per local IPv4; usable from **another device on the same LAN** (same Wi‑Fi/Ethernet, routing/firewall allowing it).
 
 **GeForce NOW cloud session note:** the Windows VM where your game runs is **not** on your home LAN. Those LAN URLs usually **do not** work inside the GFN browser unless you add something that bridges networks (e.g. **Tailscale** on both sides, **ngrok** / similar tunnel to your PC, or hosting the file on **HTTPS** you control). Treat HTTP sharing as best for **lab / same-network** transfer; plan an explicit tunnel or upload if the target is strictly remote.
 
-IPC: `companion:salsa-now-start-package-server`, `companion:salsa-now-stop-package-server`. The server is stopped when you click **Stop sharing** or when OpenNOW quits.
+IPC: `companion:salsa-now-start-package-server`, `companion:salsa-now-stop-package-server`. The server is stopped when you click **Stop sharing** or when OpenNOW quits. The HTTP path uses a short neutral prefix plus token (implementation: `LOCAL_FILE_SERVE_PREFIX` in `salsaNowPackageServer.ts`).
 
 ## Relationship to OpenNOW releases
 

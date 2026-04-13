@@ -4,6 +4,12 @@ import http from "node:http";
 import os from "node:os";
 import { basename } from "node:path";
 
+/**
+ * HTTP path prefix before the secret token. Kept short and generic so the URL does not
+ * advertise what is being served (logs, history, screen shares).
+ */
+const LOCAL_FILE_SERVE_PREFIX = "/x/";
+
 export type SalsaNowServeStartResult =
   | {
       ok: true;
@@ -78,7 +84,8 @@ export function startPackageServer(absoluteFilePath: string): Promise<SalsaNowSe
         return;
       }
       const urlPath = (req.url ?? "").split("?")[0] ?? "";
-      if (urlPath !== `/salsa-pkg/${token}`) {
+      const expectedPath = `${LOCAL_FILE_SERVE_PREFIX}${token}`;
+      if (urlPath !== expectedPath) {
         res.statusCode = 404;
         res.end();
         return;
@@ -121,7 +128,7 @@ export function startPackageServer(absoluteFilePath: string): Promise<SalsaNowSe
       }
       server = srv;
       const port = addr.port;
-      const path = `/salsa-pkg/${token}`;
+      const path = `${LOCAL_FILE_SERVE_PREFIX}${token}`;
       const localUrl = `http://127.0.0.1:${port}${path}`;
       const lanUrls = listLanIPv4().map((ip) => `http://${ip}:${port}${path}`);
       resolve({ ok: true, port, token, fileName, localUrl, lanUrls });
