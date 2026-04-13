@@ -115,6 +115,26 @@ cd opennow-stable
 npm run typecheck
 ```
 
+### Run automated tests (local-only)
+
+Tests are **offline** by design: they exercise pure logic and small main-process helpers that do not call GeForce NOW, NVIDIA APIs, or the network.
+
+- **Vitest** (`src/**/*.vitest.test.ts`) — shared helpers and other renderer-adjacent pure code, with `@shared` path aliases aligned to Vite.
+- **Node.js built-in test runner** (`src/**/*.node.test.ts`, via `tsx`) — Electron-free modules such as `settingsHydrate` (no `electron` import), for maximum compatibility with stock Node tooling.
+
+From the repository root:
+
+```bash
+npm test
+```
+
+Or inside `opennow-stable/`:
+
+```bash
+npm run test:vitest
+npm run test:node
+```
+
 ### Build production bundles
 
 ```bash
@@ -159,6 +179,6 @@ Current build matrix:
 
 - The active app is the Electron client. If you see older references to previous implementations, prefer `opennow-stable/`.
 - Root-level npm scripts are convenience wrappers around the `opennow-stable` workspace.
-- Before opening a PR, run `npm run typecheck` and `npm run build`.
+- Before opening a PR, run `npm test`, `npm run typecheck`, and `npm run build`.
 
 For contribution workflow details, see [`.github/CONTRIBUTING.md`](../.github/CONTRIBUTING.md).

@@ -6,6 +6,7 @@
     "dev": "npm --prefix opennow-stable run dev",
     "build": "npm --prefix opennow-stable run build",
     "typecheck": "npm --prefix opennow-stable run typecheck",
+    "test": "npm --prefix opennow-stable run test",
     "dist": "npm --prefix opennow-stable run dist",
     "dist:signed": "npm --prefix opennow-stable run dist:signed"
   }
