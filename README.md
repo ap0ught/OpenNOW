@@ -1,49 +1,16 @@
-<h1 align="center">OpenNOW</h1>
-
-<p align="center">
-  <img src="logo.png" alt="OpenNOW logo" width="180" />
-</p>
-
-<p align="center">
-  <strong>An open-source desktop client for GeForce NOW.</strong>
-</p>
-
-<p align="center">
-  Browse the catalog, tune your stream, and launch sessions from a community-built app.
-</p>
+# OpenNOW
 
 
 
-<p align="center">
-  <a href="https://github.com/OpenCloudGaming/OpenNOW/releases">
-    <img src="https://img.shields.io/github/v/tag/OpenCloudGaming/OpenNOW?style=for-the-badge&label=Download&color=brightgreen" alt="Download">
-  </a>
-  <a href="https://opennow.zortos.me">
-    <img src="https://img.shields.io/badge/Docs-opennow.zortos.me-blue?style=for-the-badge" alt="Documentation">
-  </a>
-  <a href="https://github.com/OpenCloudGaming/OpenNOW/actions/workflows/auto-build.yml">
-    <img src="https://img.shields.io/github/actions/workflow/status/OpenCloudGaming/OpenNOW/auto-build.yml?style=for-the-badge&label=Auto%20Build" alt="Auto Build">
-  </a>
-  <a href="https://discord.gg/8EJYaJcNfD">
-    <img src="https://img.shields.io/badge/Discord-Join%20Us-7289da?style=for-the-badge&logo=discord&logoColor=white" alt="Discord">
-  </a>
-</p>
+**An open-source desktop client for GeForce NOW.**
 
-<p align="center">
-  <a href="https://github.com/OpenCloudGaming/OpenNOW/stargazers">
-    <img src="https://img.shields.io/github/stars/OpenCloudGaming/OpenNOW?style=flat-square" alt="Stars">
-  </a>
-  <a href="https://github.com/OpenCloudGaming/OpenNOW/releases">
-    <img src="https://img.shields.io/github/downloads/OpenCloudGaming/OpenNOW/total?style=flat-square" alt="Downloads">
-  </a>
-  <a href="LICENSE">
-    <img src="https://img.shields.io/github/license/OpenCloudGaming/OpenNOW?style=flat-square" alt="License">
-  </a>
-</p>
+Browse the catalog, tune your stream, and launch sessions from a community-built app.
 
-<p align="center">
-  <img src="img.png" alt="OpenNOW application preview" />
-</p>
+
+
+
+
+
 
 > [!WARNING]
 > OpenNOW is under active development. Expect occasional bugs, rough edges, and platform-specific issues while the client matures.
@@ -74,12 +41,14 @@ Grab the latest build from [GitHub Releases](https://github.com/OpenCloudGaming/
 
 Current packaging targets:
 
-| Platform | Formats |
-| --- | --- |
-| Windows | NSIS installer, portable executable |
-| macOS | `dmg`, `zip` |
-| Linux x64 | `AppImage`, `deb` |
-| Linux ARM64 | `AppImage`, `deb` |
+
+| Platform    | Formats                             |
+| ----------- | ----------------------------------- |
+| Windows     | NSIS installer, portable executable |
+| macOS       | `dmg`, `zip`                        |
+| Linux x64   | `AppImage`, `deb`                   |
+| Linux ARM64 | `AppImage`, `deb`                   |
+
 
 ### Develop Locally
 
@@ -124,13 +93,17 @@ For a fuller setup guide, see [docs/development.md](docs/development.md).
 
 OpenNOW is split into three Electron layers:
 
-| Layer | Tech | Responsibility |
-| --- | --- | --- |
-| Main | Electron + Node.js | OAuth, CloudMatch/session orchestration, signaling, caching, local file handling |
-| Preload | Electron `contextBridge` | Safe IPC bridge between the app shell and UI |
-| Renderer | React + TypeScript | Login flow, browsing, settings, WebRTC playback, diagnostics, controls |
+
+| Layer    | Tech                     | Responsibility                                                                   |
+| -------- | ------------------------ | -------------------------------------------------------------------------------- |
+| Main     | Electron + Node.js       | OAuth, CloudMatch/session orchestration, signaling, caching, local file handling |
+| Preload  | Electron `contextBridge` | Safe IPC bridge between the app shell and UI                                     |
+| Renderer | React + TypeScript       | Login flow, browsing, settings, WebRTC playback, diagnostics, controls           |
+
 
 The code lives under [`opennow-stable/src/`](opennow-stable/src), with shared TypeScript types and IPC contracts in [`opennow-stable/src/shared/`](opennow-stable/src/shared).
+
+For **how the main process starts, registers IPC, and shuts down** (Electron lifecycle, not a custom game loop), see the [Main process lifecycle](docs/development.md#main-process-lifecycle) subsection in the development guide.
 
 ## Contributing
 
@@ -156,13 +129,7 @@ The active client in this repository is the Electron-based app in [`opennow-stab
 
 ## Star History
 
-<a href="https://www.star-history.com/?repos=OpenCloudGaming%2FOpenNOW&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/image?repos=OpenCloudGaming/OpenNOW&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/image?repos=OpenCloudGaming/OpenNOW&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/image?repos=OpenCloudGaming/OpenNOW&type=date&legend=top-left" />
- </picture>
-</a>
+
 
 ## License
 

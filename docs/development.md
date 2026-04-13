@@ -75,6 +75,19 @@ Key entry point:
 
 - [`opennow-stable/src/main/index.ts`](../opennow-stable/src/main/index.ts)
 
+#### Main process lifecycle
+
+Electron does not use a custom game-style “main loop” file; behavior is driven by **Node’s event loop** plus **Electron `app` / `BrowserWindow` / `ipcMain` events**. In OpenNOW the flow in [`index.ts`](../opennow-stable/src/main/index.ts) is roughly:
+
+1. **Module load (before `app.whenReady()`)** — Reads basic video acceleration preferences from `userData/settings.json` (if present) so Chromium **command-line switches** (WebRTC, GPU decode/encode, background throttling, and related flags) can be applied before the GPU stack initializes.
+2. **`app.whenReady()`** — Starts core services in order: log capture, cache manager, auth state on disk, settings manager, optional Discord Rich Presence, default-session **permission** handlers for media/fullscreen/pointer lock, **`registerIpcHandlers()`** (all `ipcMain.handle` / `on` registrations), cache refresh scheduler (with event-bus → renderer notifications), then **`createMainWindow()`** (loads the UI and attaches window helpers such as persisting window size).
+3. **Runtime** — The UI and WebRTC live mostly in the **renderer**; the main process keeps running to service **IPC**, **signaling** (when connected), **CloudMatch** calls triggered from IPC, filesystem work, and background refresh timers.
+4. **`app.on("activate")` (macOS)** — If every window was closed but the app stays alive (macOS convention), opening the app again recreates the main window.
+5. **`window-all-closed`** — On Windows and Linux, closing all windows calls `app.quit()`. On macOS the app typically stays running until the user quits from the menu.
+6. **`before-quit`** — Stops the refresh scheduler, disconnects any active signaling client, and tears down Discord RPC so work does not continue after shutdown.
+
+Until the process exits, **IPC handlers registered in `registerIpcHandlers()` remain live** for the renderer and preload bridge.
+
 ### Preload
 
 The preload layer exposes a narrow IPC surface to the renderer with `contextBridge`.
@@ -167,13 +180,13 @@ The repository includes two main GitHub Actions workflows:
 
 Current build matrix:
 
-| Target | Output |
-| --- | --- |
-| Windows | NSIS installer, portable executable |
-| macOS x64 | `dmg`, `zip` |
-| macOS arm64 | `dmg`, `zip` |
-| Linux x64 | `AppImage`, `deb` |
-| Linux ARM64 | `AppImage`, `deb` |
+| Target      | Output                              |
+| ----------- | ----------------------------------- |
+| Windows     | NSIS installer, portable executable |
+| macOS x64   | `dmg`, `zip`                        |
+| macOS arm64 | `dmg`, `zip`                        |
+| Linux x64   | `AppImage`, `deb`                   |
+| Linux ARM64 | `AppImage`, `deb`                   |
 
 ## Notes For Contributors
 
