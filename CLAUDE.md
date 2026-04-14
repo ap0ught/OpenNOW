@@ -76,7 +76,7 @@ shim `package.json` that proxies common scripts into `opennow-stable/`.
 
 ```
 ┌─────────────────────────────────────┐
-│  Renderer (Chromium, sandboxed)     │
+│  Renderer (Chromium, unsandboxed)   │
 │  React UI · WebRTC · window.openNow │
 └────────────────┬────────────────────┘
                  │ contextBridge (IPC)

@@ -552,14 +552,33 @@ async function createMainWindow(): Promise<void> {
   });
 
   // Prevent the renderer from navigating away from the bundled app.
-  // Allow the Vite dev server URL in development; block everything else.
+  // Allow only the exact renderer entry URL in development or the exact
+  // bundled app URL in production; block everything else.
   mainWindow.webContents.on("will-navigate", (event, url) => {
-    const devUrl = process.env.ELECTRON_RENDERER_URL;
-    if (devUrl && url.startsWith(devUrl)) {
-      return;
-    }
-    if (url.startsWith("file://")) {
-      return;
+    try {
+      const targetUrl = new URL(url);
+      const devUrl = process.env.ELECTRON_RENDERER_URL;
+
+      if (devUrl) {
+        const allowedDevUrl = new URL(devUrl);
+        if (
+          targetUrl.protocol === allowedDevUrl.protocol &&
+          targetUrl.origin === allowedDevUrl.origin &&
+          targetUrl.pathname === allowedDevUrl.pathname
+        ) {
+          return;
+        }
+      } else {
+        const currentAppUrl = mainWindow.webContents.getURL();
+        if (currentAppUrl) {
+          const allowedAppUrl = new URL(currentAppUrl);
+          if (allowedAppUrl.protocol === "file:" && targetUrl.href === allowedAppUrl.href) {
+            return;
+          }
+        }
+      }
+    } catch {
+      // Fall through to prevent malformed or unexpected navigation targets.
     }
     event.preventDefault();
   });
