@@ -32,7 +32,7 @@ The submodule tracks `https://github.com/ap0ught/SalsaNOW.git`.
 
 - **Settings** (Windows only): set **SalsaNOW companion** to the absolute path of `SalsaNOW.exe`, then use **Launch SalsaNOW**.
 - The main process reads **`salsaNowExePath`** from saved settings only; the renderer cannot pass an arbitrary path to the launcher IPC.
-- IPC channel: `companion:salsa-now-launch` (see `[opennow-stable/src/shared/ipc.ts](../opennow-stable/src/shared/ipc.ts)`).
+- IPC channel: `companion:salsa-now-launch` (see [`opennow-stable/src/shared/ipc.ts`](../opennow-stable/src/shared/ipc.ts)).
 
 ### Sharing the install package over HTTP (copy link)
 
