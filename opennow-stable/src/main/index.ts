@@ -545,6 +545,47 @@ async function createMainWindow(): Promise<void> {
     },
   });
 
+  // Block all popup window creation. External http(s) links are forwarded
+  // to the system browser; all other targets (e.g., about:blank) are denied.
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith("https://") || url.startsWith("http://")) {
+      void shell.openExternal(url);
+    }
+    return { action: "deny" };
+  });
+
+  // Prevent the renderer from navigating away from the bundled app.
+  // Allow only the exact renderer entry URL in development or the exact
+  // bundled app URL in production; block everything else.
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    try {
+      const targetUrl = new URL(url);
+      const devUrl = process.env.ELECTRON_RENDERER_URL;
+
+      if (devUrl) {
+        const allowedDevUrl = new URL(devUrl);
+        if (
+          targetUrl.protocol === allowedDevUrl.protocol &&
+          targetUrl.origin === allowedDevUrl.origin &&
+          targetUrl.pathname === allowedDevUrl.pathname
+        ) {
+          return;
+        }
+      } else {
+        const currentAppUrl = mainWindow.webContents.getURL();
+        if (currentAppUrl) {
+          const allowedAppUrl = new URL(currentAppUrl);
+          if (allowedAppUrl.protocol === "file:" && targetUrl.href === allowedAppUrl.href) {
+            return;
+          }
+        }
+      }
+    } catch {
+      // Fall through to prevent malformed or unexpected navigation targets.
+    }
+    event.preventDefault();
+  });
+
   if (process.platform === "win32") {
     // Keep native window fullscreen in sync with HTML fullscreen so Windows treats
     // stream playback like a real fullscreen window instead of only DOM fullscreen.
