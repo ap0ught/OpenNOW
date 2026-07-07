@@ -9,14 +9,25 @@ import { shell } from "electron";
 
 import type {
   AuthLoginRequest,
+  AuthDeviceLoginAttemptRequest,
+  AuthDeviceLoginChallenge,
+  AuthDeviceLoginPollRequest,
+  AuthDeviceLoginPollResult,
+  AuthDeviceLoginStartRequest,
   AuthSession,
   AuthSessionResult,
   AuthTokens,
   AuthUser,
   LoginProvider,
+  SavedAccount,
   StreamRegion,
   SubscriptionInfo,
 } from "@shared/gfn";
+import {
+  buildGfnLcarsHeaders,
+  buildNvidiaAuthHeaders,
+  GFN_USER_AGENT,
+} from "./clientHeaders";
 import { fetchSubscription, fetchDynamicRegions } from "./subscription";
 
 const SERVICE_URLS_ENDPOINT = "https://pcs.geforcenow.com/v1/serviceUrls";
@@ -24,20 +35,22 @@ const TOKEN_ENDPOINT = "https://login.nvidia.com/token";
 const CLIENT_TOKEN_ENDPOINT = "https://login.nvidia.com/client_token";
 const USERINFO_ENDPOINT = "https://login.nvidia.com/userinfo";
 const AUTH_ENDPOINT = "https://login.nvidia.com/authorize";
+const DEVICE_AUTHORIZE_ENDPOINT = "https://login.nvidia.com/device/authorize";
 
 const CLIENT_ID = "ZU7sPN-miLujMD95LfOQ453IB0AtjM8sMyvgJ9wCXEQ";
+const STEAM_DECK_CLIENT_ID = "q61ddeJrVt7O90Nl-P-N7I36yctih4Ml6FyXLrb6j-U";
 const SCOPES = "openid consent email tk_client age";
 const DEFAULT_IDP_ID = "PDiAhv2kJTFeQ7WOPqiQ2tRZ7lGhR2X11dXvM4TZSxg";
-
-const GFN_USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 NVIDIACEFClient/HEAD/debb5919f6 GFN-PC/2.0.80.173";
+const STEAM_DECK_USER_AGENT =
+  "Mozilla/5.0 (X11; Linux x86_64; Steam Deck) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
 
 const REDIRECT_PORTS = [2259, 6460, 7119, 8870, 9096];
 const TOKEN_REFRESH_WINDOW_MS = 10 * 60 * 1000;
 const CLIENT_TOKEN_REFRESH_WINDOW_MS = 5 * 60 * 1000;
 
 interface PersistedAuthState {
-  session: AuthSession | null;
+  sessions: AuthSession[];
+  activeUserId: string | null;
   selectedProvider: LoginProvider | null;
 }
 
@@ -69,6 +82,20 @@ interface ClientTokenResponse {
   expires_in?: number;
 }
 
+interface DeviceAuthorizationResponse {
+  device_code?: string;
+  user_code?: string;
+  verification_uri?: string;
+  verification_uri_complete?: string;
+  expires_in?: number;
+  interval?: number;
+}
+
+interface DeviceTokenErrorResponse {
+  error?: string;
+  error_description?: string;
+}
+
 interface ServerInfoResponse {
   requestStatus?: {
     serverId?: string;
@@ -77,6 +104,12 @@ interface ServerInfoResponse {
     key: string;
     value: string;
   }>;
+}
+
+interface DeviceLoginAttempt {
+  provider: LoginProvider;
+  deviceCode: string;
+  expiresAt: number;
 }
 
 function defaultProvider(): LoginProvider {
@@ -158,6 +191,36 @@ function generatePkce(): { verifier: string; challenge: string } {
     .replace(/=+$/g, "");
 
   return { verifier, challenge };
+}
+
+function buildAuthHeadersForClient(
+  authClientId = CLIENT_ID,
+  options: {
+    bearerToken?: string;
+    accept?: string;
+    contentType?: string;
+    includeReferer?: boolean;
+  } = {},
+): Record<string, string> {
+  if (authClientId !== STEAM_DECK_CLIENT_ID) {
+    return buildNvidiaAuthHeaders(options);
+  }
+
+  const headers: Record<string, string> = {
+    Accept: options.accept ?? "application/json, text/plain, */*",
+    Origin: "https://play.geforcenow.com",
+    Referer: "https://play.geforcenow.com/",
+    "User-Agent": STEAM_DECK_USER_AGENT,
+  };
+
+  if (options.bearerToken !== undefined) {
+    headers.Authorization = `Bearer ${options.bearerToken}`;
+  }
+  if (options.contentType) {
+    headers["Content-Type"] = options.contentType;
+  }
+
+  return headers;
 }
 
 function buildAuthUrl(provider: LoginProvider, challenge: string, port: number): string {
@@ -246,13 +309,10 @@ async function exchangeAuthorizationCode(code: string, verifier: string, port: n
 
   const response = await fetch(TOKEN_ENDPOINT, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-      Origin: "https://nvfile",
-      Referer: "https://nvfile/",
-      Accept: "application/json, text/plain, */*",
-      "User-Agent": GFN_USER_AGENT,
-    },
+    headers: buildAuthHeadersForClient(CLIENT_ID, {
+      contentType: "application/x-www-form-urlencoded; charset=UTF-8",
+      includeReferer: true,
+    }),
     body,
   });
 
@@ -267,24 +327,116 @@ async function exchangeAuthorizationCode(code: string, verifier: string, port: n
     refreshToken: payload.refresh_token,
     idToken: payload.id_token,
     expiresAt: toExpiresAt(payload.expires_in),
+    authClientId: CLIENT_ID,
   };
 }
 
-async function refreshAuthTokens(refreshToken: string): Promise<AuthTokens> {
+async function requestDeviceAuthorization(
+  provider: LoginProvider,
+): Promise<Omit<AuthDeviceLoginChallenge, "attemptId">> {
+  const deviceId = generateDeviceId();
   const body = new URLSearchParams({
-    grant_type: "refresh_token",
-    refresh_token: refreshToken,
-    client_id: CLIENT_ID,
+    client_id: STEAM_DECK_CLIENT_ID,
+    scope: SCOPES,
+    device_id: deviceId,
+    display_name: "OpenNOW",
+    idp_id: provider.idpId,
+  });
+
+  const response = await fetch(DEVICE_AUTHORIZE_ENDPOINT, {
+    method: "POST",
+    headers: {
+      ...buildAuthHeadersForClient(STEAM_DECK_CLIENT_ID, {
+        contentType: "application/x-www-form-urlencoded; charset=UTF-8",
+      }),
+      "x-device-id": deviceId,
+      "nv-client-id": STEAM_DECK_CLIENT_ID,
+      "nv-client-streamer": "WEBRTC",
+      "nv-client-type": "BROWSER",
+      "nv-client-platform-name": "browser",
+      "nv-browser-type": "CHROME",
+      "nv-device-os": "STEAMOS",
+      "nv-device-type": "CONSOLE",
+      "nv-device-model": "STEAMDECK",
+      "nv-device-make": "VALVE",
+    },
+    body,
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Device authorization failed (${response.status}): ${text.slice(0, 400)}`);
+  }
+
+  const payload = (await response.json()) as DeviceAuthorizationResponse;
+  if (
+    !payload.device_code ||
+    !payload.user_code ||
+    !payload.verification_uri ||
+    !payload.verification_uri_complete
+  ) {
+    throw new Error("Device authorization response did not include QR login data");
+  }
+
+  return {
+    deviceCode: payload.device_code,
+    userCode: payload.user_code,
+    verificationUri: payload.verification_uri,
+    verificationUriComplete: payload.verification_uri_complete,
+    expiresAt: toExpiresAt(payload.expires_in, 600),
+    intervalSeconds: Math.max(1, payload.interval ?? 5),
+  };
+}
+
+async function exchangeDeviceCode(deviceCode: string): Promise<AuthTokens | DeviceTokenErrorResponse> {
+  const body = new URLSearchParams({
+    grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+    device_code: deviceCode,
+    client_id: STEAM_DECK_CLIENT_ID,
   });
 
   const response = await fetch(TOKEN_ENDPOINT, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-      Origin: "https://nvfile",
-      Accept: "application/json, text/plain, */*",
-      "User-Agent": GFN_USER_AGENT,
-    },
+    headers: buildAuthHeadersForClient(STEAM_DECK_CLIENT_ID, {
+      contentType: "application/x-www-form-urlencoded; charset=UTF-8",
+    }),
+    body,
+  });
+
+  const payload = (await response.json().catch(() => null)) as TokenResponse | DeviceTokenErrorResponse | null;
+  if (!response.ok) {
+    return payload && typeof payload === "object"
+      ? payload as DeviceTokenErrorResponse
+      : { error: "device_token_exchange_failed", error_description: `Device token exchange failed (${response.status})` };
+  }
+
+  const tokenPayload = payload as TokenResponse | null;
+  if (!tokenPayload?.access_token) {
+    return { error: "invalid_token_response", error_description: "Device token response did not include access_token" };
+  }
+
+  return {
+    accessToken: tokenPayload.access_token,
+    refreshToken: tokenPayload.refresh_token,
+    idToken: tokenPayload.id_token,
+    expiresAt: toExpiresAt(tokenPayload.expires_in),
+    authClientId: STEAM_DECK_CLIENT_ID,
+    clientToken: tokenPayload.client_token,
+  };
+}
+
+async function refreshAuthTokens(refreshToken: string, authClientId = CLIENT_ID): Promise<AuthTokens> {
+  const body = new URLSearchParams({
+    grant_type: "refresh_token",
+    refresh_token: refreshToken,
+    client_id: authClientId,
+  });
+
+  const response = await fetch(TOKEN_ENDPOINT, {
+    method: "POST",
+    headers: buildAuthHeadersForClient(authClientId, {
+      contentType: "application/x-www-form-urlencoded; charset=UTF-8",
+    }),
     body,
   });
 
@@ -299,21 +451,17 @@ async function refreshAuthTokens(refreshToken: string): Promise<AuthTokens> {
     refreshToken: payload.refresh_token ?? refreshToken,
     idToken: payload.id_token,
     expiresAt: toExpiresAt(payload.expires_in),
+    authClientId,
   };
 }
 
-async function requestClientToken(accessToken: string): Promise<{
+async function requestClientToken(accessToken: string, authClientId = CLIENT_ID): Promise<{
   token: string;
   expiresAt: number;
   lifetimeMs: number;
 }> {
   const response = await fetch(CLIENT_TOKEN_ENDPOINT, {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      Origin: "https://nvfile",
-      Accept: "application/json, text/plain, */*",
-      "User-Agent": GFN_USER_AGENT,
-    },
+    headers: buildAuthHeadersForClient(authClientId, { bearerToken: accessToken }),
   });
 
   if (!response.ok) {
@@ -330,22 +478,19 @@ async function requestClientToken(accessToken: string): Promise<{
   };
 }
 
-async function refreshWithClientToken(clientToken: string, userId: string): Promise<TokenResponse> {
+async function refreshWithClientToken(clientToken: string, userId: string, authClientId = CLIENT_ID): Promise<TokenResponse> {
   const body = new URLSearchParams({
     grant_type: "urn:ietf:params:oauth:grant-type:client_token",
     client_token: clientToken,
-    client_id: CLIENT_ID,
+    client_id: authClientId,
     sub: userId,
   });
 
   const response = await fetch(TOKEN_ENDPOINT, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-      Origin: "https://nvfile",
-      Accept: "application/json, text/plain, */*",
-      "User-Agent": GFN_USER_AGENT,
-    },
+    headers: buildAuthHeadersForClient(authClientId, {
+      contentType: "application/x-www-form-urlencoded; charset=UTF-8",
+    }),
     body,
   });
 
@@ -363,6 +508,7 @@ function mergeTokenSnapshot(base: AuthTokens, refreshed: TokenResponse): AuthTok
     refreshToken: refreshed.refresh_token ?? base.refreshToken,
     idToken: refreshed.id_token,
     expiresAt: toExpiresAt(refreshed.expires_in),
+    authClientId: base.authClientId ?? CLIENT_ID,
     clientToken: refreshed.client_token ?? base.clientToken,
     clientTokenExpiresAt: base.clientTokenExpiresAt,
     clientTokenLifetimeMs: base.clientTokenLifetimeMs,
@@ -401,12 +547,10 @@ async function fetchUserInfo(tokens: AuthTokens): Promise<AuthUser> {
   }
 
   const response = await fetch(USERINFO_ENDPOINT, {
-    headers: {
-      Authorization: `Bearer ${tokens.accessToken}`,
-      Origin: "https://nvfile",
-      Accept: "application/json",
-      "User-Agent": GFN_USER_AGENT,
-    },
+    headers: buildAuthHeadersForClient(tokens.authClientId, {
+      bearerToken: tokens.accessToken,
+      accept: "application/json",
+    }),
   });
 
   if (!response.ok) {
@@ -434,10 +578,13 @@ async function fetchUserInfo(tokens: AuthTokens): Promise<AuthUser> {
 
 export class AuthService {
   private providers: LoginProvider[] = [];
-  private session: AuthSession | null = null;
+  private sessions = new Map<string, AuthSession>();
+  private activeUserId: string | null = null;
   private selectedProvider: LoginProvider = defaultProvider();
   private cachedSubscription: SubscriptionInfo | null = null;
   private cachedVpcId: string | null = null;
+  private deviceLoginAttempts = new Map<string, DeviceLoginAttempt>();
+  private pendingDeviceLoginSessions = new Map<string, AuthSession>();
 
   constructor(private readonly statePath: string) {}
 
@@ -452,23 +599,46 @@ export class AuthService {
 
     try {
       const raw = await readFile(this.statePath, "utf8");
-      const parsed = JSON.parse(raw) as PersistedAuthState;
+      const parsed = JSON.parse(raw) as Partial<PersistedAuthState> & {
+        session?: AuthSession | null;
+      };
       if (parsed.selectedProvider) {
         this.selectedProvider = normalizeProvider(parsed.selectedProvider);
       }
-      if (parsed.session) {
-        this.session = {
+
+      this.sessions.clear();
+      if (Array.isArray(parsed.sessions)) {
+        for (const persistedSession of parsed.sessions) {
+          if (!persistedSession?.user?.userId) {
+            continue;
+          }
+          this.sessions.set(persistedSession.user.userId, {
+            ...persistedSession,
+            provider: normalizeProvider(persistedSession.provider),
+          });
+        }
+      } else if (parsed.session?.user?.userId) {
+        this.sessions.set(parsed.session.user.userId, {
           ...parsed.session,
           provider: normalizeProvider(parsed.session.provider),
-        };
+        });
+      }
 
-        // Refresh the real tier from MES API on session restore
-        // (persisted tier may be stale or was "FREE" from JWT fallback)
+      if (typeof parsed.activeUserId === "string" && this.sessions.has(parsed.activeUserId)) {
+        this.activeUserId = parsed.activeUserId;
+      } else {
+        this.activeUserId = this.sessions.keys().next().value ?? null;
+      }
+
+      const restoredSession = this.getSession();
+      if (restoredSession) {
+        this.selectedProvider = restoredSession.provider;
         await this.enrichUserTier();
         await this.persist();
       }
     } catch {
-      this.session = null;
+      this.sessions.clear();
+      this.activeUserId = null;
       this.selectedProvider = defaultProvider();
       await this.persist();
     }
@@ -476,7 +646,8 @@ export class AuthService {
 
   private async persist(): Promise<void> {
     const payload: PersistedAuthState = {
-      session: this.session,
+      sessions: Array.from(this.sessions.values()),
+      activeUserId: this.activeUserId,
       selectedProvider: this.selectedProvider,
     };
 
@@ -496,7 +667,7 @@ export class AuthService {
       return tokens;
     }
 
-    const clientToken = await requestClientToken(tokens.accessToken);
+    const clientToken = await requestClientToken(tokens.accessToken, tokens.authClientId);
     return {
       ...tokens,
       clientToken: clientToken.token,
@@ -556,12 +727,178 @@ export class AuthService {
     }
   }
 
+  setSession(session: AuthSession | null): void {
+    if (!session) {
+      this.sessions.clear();
+      this.activeUserId = null;
+      this.selectedProvider = defaultProvider();
+      this.clearSubscriptionCache();
+      this.clearVpcCache();
+      void this.persist();
+      return;
+    }
+
+    const normalized: AuthSession = {
+      ...session,
+      provider: normalizeProvider(session.provider),
+    };
+    this.sessions.set(normalized.user.userId, normalized);
+    this.activeUserId = normalized.user.userId;
+    this.selectedProvider = normalized.provider;
+    this.clearSubscriptionCache();
+    this.clearVpcCache();
+    void this.persist();
+  }
+
   getSession(): AuthSession | null {
-    return this.session;
+    if (!this.activeUserId) {
+      return null;
+    }
+    return this.sessions.get(this.activeUserId) ?? null;
+  }
+
+  private setActiveAccount(userId: string | null): void {
+    this.activeUserId = userId && this.sessions.has(userId) ? userId : null;
+    this.selectedProvider = this.getSession()?.provider ?? defaultProvider();
+    this.clearSubscriptionCache();
+    this.clearVpcCache();
+  }
+
+  getSavedAccounts(): SavedAccount[] {
+    return Array.from(this.sessions.values()).map((session) => ({
+      userId: session.user.userId,
+      displayName: session.user.displayName,
+      email: session.user.email,
+      avatarUrl: session.user.avatarUrl,
+      membershipTier: session.user.membershipTier,
+      providerCode: session.provider.code,
+    }));
+  }
+
+  async switchAccount(userId: string): Promise<AuthSession> {
+    const target = this.sessions.get(userId);
+    if (!target) {
+      throw new Error("Saved account not found");
+    }
+
+    const previousActiveUserId = this.activeUserId;
+    const previousSelectedProvider = this.selectedProvider;
+
+    this.activeUserId = userId;
+    this.selectedProvider = target.provider;
+    this.clearSubscriptionCache();
+    this.clearVpcCache();
+
+    const result = await this.ensureValidSessionWithStatus(true, userId);
+    const missingRefreshToken = result.refresh.outcome === "missing_refresh_token";
+    const refreshFailed = result.refresh.outcome === "failed";
+    const switchedUserMismatch = result.session?.user.userId !== userId;
+    if (!result.session || refreshFailed || missingRefreshToken || switchedUserMismatch) {
+      const fallbackMessage = "Failed to switch account due to an invalid or expired session.";
+
+      if (missingRefreshToken) {
+        await this.removeAccount(userId);
+        this.setActiveAccount(previousActiveUserId);
+        await this.persist();
+        throw new Error("Saved login for this account is incomplete. Please log in to this account again.");
+      }
+
+      this.activeUserId = previousActiveUserId;
+      this.selectedProvider = previousActiveUserId && this.sessions.has(previousActiveUserId)
+        ? previousSelectedProvider
+        : this.getSession()?.provider ?? defaultProvider();
+      this.clearSubscriptionCache();
+      this.clearVpcCache();
+      await this.persist();
+
+      if (switchedUserMismatch) {
+        throw new Error("Switched session did not match the selected account.");
+      }
+      throw new Error(result.refresh.message || fallbackMessage);
+    }
+    return result.session;
+  }
+
+  async removeAccount(userId: string): Promise<void> {
+    const removed = this.sessions.delete(userId);
+    if (!removed) {
+      return;
+    }
+    if (this.activeUserId === userId) {
+      this.setActiveAccount(this.sessions.keys().next().value ?? null);
+    } else {
+      this.clearSubscriptionCache();
+      this.clearVpcCache();
+    }
+    await this.persist();
+  }
+
+  async logoutAll(): Promise<void> {
+    this.sessions.clear();
+    this.activeUserId = null;
+    this.selectedProvider = defaultProvider();
+    this.cachedSubscription = null;
+    this.clearVpcCache();
+    await this.persist();
   }
 
   getSelectedProvider(): LoginProvider {
+    return this.getSession()?.provider ?? this.selectedProvider;
+  }
+
+  private async selectLoginProvider(providerIdpId?: string): Promise<LoginProvider> {
+    const providers = await this.getProviders();
+    const selected =
+      providers.find((provider) => provider.idpId === providerIdpId) ??
+      this.selectedProvider ??
+      providers[0] ??
+      defaultProvider();
+    this.selectedProvider = normalizeProvider(selected);
     return this.selectedProvider;
+  }
+
+  private async buildLoginSession(initialTokens: AuthTokens, provider: LoginProvider): Promise<AuthSession> {
+    const user = await fetchUserInfo(initialTokens);
+    console.debug("auth: fetched user info during login", { userId: user.userId, email: user.email, avatarUrl: user.avatarUrl });
+    let tokens = initialTokens;
+    try {
+      tokens = await this.ensureClientToken(initialTokens, user.userId);
+    } catch (error) {
+      console.warn("Unable to fetch client token after login. Falling back to OAuth token only:", error);
+    }
+
+    return {
+      provider: normalizeProvider(provider),
+      tokens,
+      user,
+    };
+  }
+
+  private async saveLoginSession(session: AuthSession): Promise<AuthSession> {
+    this.sessions.set(session.user.userId, session);
+    this.activeUserId = session.user.userId;
+    this.selectedProvider = session.provider;
+    this.clearSubscriptionCache();
+    this.clearVpcCache();
+
+    // Fetch real membership tier from MES subscription API
+    // (JWT does not contain gfn_tier, so fetchUserInfo always falls back to "FREE")
+    await this.enrichUserTier();
+
+    await this.persist();
+    return this.getSession() as AuthSession;
+  }
+
+  private pruneExpiredDeviceLogins(now = Date.now(), skipAttemptId?: string): void {
+    for (const [attemptId, attempt] of this.deviceLoginAttempts) {
+      if (attemptId === skipAttemptId) {
+        continue;
+      }
+      if (attempt.expiresAt <= now) {
+        this.deviceLoginAttempts.delete(attemptId);
+        this.pendingDeviceLoginSessions.delete(attemptId);
+      }
+    }
   }
 
   async getRegions(explicitToken?: string): Promise<StreamRegion[]> {
@@ -576,20 +913,12 @@ export class AuthService {
       token = session ? session.tokens.idToken ?? session.tokens.accessToken : undefined;
     }
 
-    const headers: Record<string, string> = {
-      Accept: "application/json",
-      "nv-client-id": "ec7e38d4-03af-4b58-b131-cfb0495903ab",
-      "nv-client-type": "BROWSER",
-      "nv-client-version": "2.0.80.173",
-      "nv-client-streamer": "WEBRTC",
-      "nv-device-os": "WINDOWS",
-      "nv-device-type": "DESKTOP",
-      "User-Agent": GFN_USER_AGENT,
-    };
-
-    if (token) {
-      headers.Authorization = `GFNJWT ${token}`;
-    }
+    const headers = buildGfnLcarsHeaders({
+      token,
+      clientType: "BROWSER",
+      clientStreamer: "WEBRTC",
+      includeUserAgent: true,
+    });
 
     let response: Response;
     try {
@@ -618,49 +947,103 @@ export class AuthService {
   }
 
   async login(input: AuthLoginRequest): Promise<AuthSession> {
-    const providers = await this.getProviders();
-    const selected =
-      providers.find((provider) => provider.idpId === input.providerIdpId) ??
-      this.selectedProvider ??
-      providers[0] ??
-      defaultProvider();
-
-    this.selectedProvider = normalizeProvider(selected);
+    const provider = await this.selectLoginProvider(input.providerIdpId);
 
     const { verifier, challenge } = generatePkce();
     const port = await findAvailablePort();
-    const authUrl = buildAuthUrl(this.selectedProvider, challenge, port);
+    const authUrl = buildAuthUrl(provider, challenge, port);
 
     const codePromise = waitForAuthorizationCode(port, 120000);
     await shell.openExternal(authUrl);
     const code = await codePromise;
 
     const initialTokens = await exchangeAuthorizationCode(code, verifier, port);
-    const user = await fetchUserInfo(initialTokens);
-    console.debug("auth: fetched user info during login", { userId: user.userId, email: user.email, avatarUrl: user.avatarUrl });
-    let tokens = initialTokens;
-    try {
-      tokens = await this.ensureClientToken(initialTokens, user.userId);
-    } catch (error) {
-      console.warn("Unable to fetch client token after login. Falling back to OAuth token only:", error);
+    const session = await this.buildLoginSession(initialTokens, provider);
+    return this.saveLoginSession(session);
+  }
+
+  async startDeviceLogin(input: AuthDeviceLoginStartRequest): Promise<AuthDeviceLoginChallenge> {
+    this.pruneExpiredDeviceLogins();
+    const provider = await this.selectLoginProvider(input.providerIdpId);
+    const challenge = await requestDeviceAuthorization(provider);
+    const attemptId = randomBytes(16).toString("hex");
+    this.deviceLoginAttempts.set(attemptId, {
+      provider,
+      deviceCode: challenge.deviceCode,
+      expiresAt: challenge.expiresAt,
+    });
+    return { ...challenge, attemptId };
+  }
+
+  async pollDeviceLogin(input: AuthDeviceLoginPollRequest): Promise<AuthDeviceLoginPollResult> {
+    this.pruneExpiredDeviceLogins();
+    if (!input.attemptId || !input.deviceCode) {
+      return { status: "error", error: "Missing device code" };
     }
 
-    this.session = {
-      provider: this.selectedProvider,
-      tokens,
-      user,
-    };
+    const attempt = this.deviceLoginAttempts.get(input.attemptId);
+    if (!attempt || attempt.deviceCode !== input.deviceCode) {
+      return { status: "expired", error: "QR login was cancelled or expired" };
+    }
+    if (Date.now() >= attempt.expiresAt) {
+      this.cancelDeviceLogin(input);
+      return { status: "expired", error: "QR login expired" };
+    }
 
-    // Fetch real membership tier from MES subscription API
-    // (JWT does not contain gfn_tier, so fetchUserInfo always falls back to "FREE")
-    await this.enrichUserTier();
+    const result = await exchangeDeviceCode(input.deviceCode);
+    if (!this.deviceLoginAttempts.has(input.attemptId)) {
+      return { status: "expired", error: "QR login was cancelled" };
+    }
 
-    await this.persist();
-    return this.session;
+    if ("accessToken" in result) {
+      const session = await this.buildLoginSession(result, attempt.provider);
+      if (!this.deviceLoginAttempts.has(input.attemptId)) {
+        return { status: "expired", error: "QR login was cancelled" };
+      }
+      this.pendingDeviceLoginSessions.set(input.attemptId, session);
+      return { status: "authorized" };
+    }
+
+    switch (result.error) {
+      case "authorization_pending":
+        return { status: "pending", error: result.error_description };
+      case "slow_down":
+        return { status: "slow_down", error: result.error_description };
+      case "expired_token":
+        this.cancelDeviceLogin(input);
+        return { status: "expired", error: result.error_description ?? "QR login expired" };
+      case "access_denied":
+        this.cancelDeviceLogin(input);
+        return { status: "access_denied", error: result.error_description ?? "QR login was denied" };
+      default:
+        this.cancelDeviceLogin(input);
+        return { status: "error", error: result.error_description ?? result.error ?? "QR login failed" };
+    }
+  }
+
+  async completeDeviceLogin(input: AuthDeviceLoginAttemptRequest): Promise<AuthSession> {
+    this.pruneExpiredDeviceLogins(Date.now(), input.attemptId);
+    const session = this.pendingDeviceLoginSessions.get(input.attemptId);
+    if (!session || !this.deviceLoginAttempts.has(input.attemptId)) {
+      throw new Error("QR login is no longer active");
+    }
+
+    this.cancelDeviceLogin(input);
+    return this.saveLoginSession(session);
+  }
+
+  cancelDeviceLogin(input: AuthDeviceLoginAttemptRequest): void {
+    this.deviceLoginAttempts.delete(input.attemptId);
+    this.pendingDeviceLoginSessions.delete(input.attemptId);
   }
 
   async logout(): Promise<void> {
-    this.session = null;
+    if (!this.activeUserId) {
+      return;
+    }
+    this.sessions.delete(this.activeUserId);
+    this.activeUserId = this.sessions.keys().next().value ?? null;
+    this.selectedProvider = this.getSession()?.provider ?? defaultProvider();
     this.cachedSubscription = null;
     this.clearVpcCache();
     await this.persist();
@@ -685,7 +1068,7 @@ export class AuthService {
     const userId = session.user.userId;
 
     // Fetch dynamic regions to get the VPC ID (handles Alliance partners correctly)
-    const { vpcId } = await fetchDynamicRegions(token, this.selectedProvider.streamingServiceUrl);
+    const { vpcId } = await fetchDynamicRegions(token, session.provider.streamingServiceUrl);
 
     const subscription = await fetchSubscription(token, userId, vpcId ?? undefined);
     this.cachedSubscription = subscription;
@@ -730,20 +1113,12 @@ export class AuthService {
       token = session ? session.tokens.idToken ?? session.tokens.accessToken : undefined;
     }
 
-    const headers: Record<string, string> = {
-      Accept: "application/json",
-      "nv-client-id": "ec7e38d4-03af-4b58-b131-cfb0495903ab",
-      "nv-client-type": "BROWSER",
-      "nv-client-version": "2.0.80.173",
-      "nv-client-streamer": "WEBRTC",
-      "nv-device-os": "WINDOWS",
-      "nv-device-type": "DESKTOP",
-      "User-Agent": GFN_USER_AGENT,
-    };
-
-    if (token) {
-      headers.Authorization = `GFNJWT ${token}`;
-    }
+    const headers = buildGfnLcarsHeaders({
+      token,
+      clientType: "BROWSER",
+      clientStreamer: "WEBRTC",
+      includeUserAgent: true,
+    });
 
     try {
       const response = await fetch(`${base}v2/serverInfo`, {
@@ -789,18 +1164,19 @@ export class AuthService {
    * Falls back silently to the existing tier if the fetch fails.
    */
   private async enrichUserTier(): Promise<void> {
-    if (!this.session) return;
+    const session = this.getSession();
+    if (!session) return;
 
     try {
       const subscription = await this.getSubscription();
       if (subscription && subscription.membershipTier) {
-        this.session = {
-          ...this.session,
+        this.sessions.set(session.user.userId, {
+          ...session,
           user: {
-            ...this.session.user,
+            ...session.user,
             membershipTier: subscription.membershipTier,
           },
-        };
+        });
         console.log(`Resolved membership tier: ${subscription.membershipTier}`);
       }
     } catch (error) {
@@ -812,8 +1188,12 @@ export class AuthService {
     return isNearExpiry(tokens.expiresAt, TOKEN_REFRESH_WINDOW_MS);
   }
 
-  async ensureValidSessionWithStatus(forceRefresh = false): Promise<AuthSessionResult> {
-    if (!this.session) {
+  async ensureValidSessionWithStatus(
+    forceRefresh = false,
+    expectedUserId?: string,
+  ): Promise<AuthSessionResult> {
+    const currentSession = this.getSession();
+    if (!currentSession) {
       return {
         session: null,
         refresh: {
@@ -825,8 +1205,8 @@ export class AuthService {
       };
     }
 
-    const userId = this.session.user.userId;
-    let tokens = this.session.tokens;
+    const userId = currentSession.user.userId;
+    let tokens = currentSession.tokens;
 
     // Official GFN client flow relies on client_token-based refresh. Bootstrap it
     // for older sessions that were saved before we persisted client tokens.
@@ -834,10 +1214,10 @@ export class AuthService {
       try {
         const withClientToken = await this.ensureClientToken(tokens, userId);
         if (withClientToken.clientToken && withClientToken.clientToken !== tokens.clientToken) {
-          this.session = {
-            ...this.session,
+          this.sessions.set(userId, {
+            ...currentSession,
             tokens: withClientToken,
-          };
+          });
           tokens = withClientToken;
           await this.persist();
         }
@@ -849,7 +1229,7 @@ export class AuthService {
     const shouldRefreshNow = forceRefresh || this.shouldRefresh(tokens);
     if (!shouldRefreshNow) {
       return {
-        session: this.session,
+        session: this.getSession(),
         refresh: {
           attempted: false,
           forced: forceRefresh,
@@ -863,19 +1243,49 @@ export class AuthService {
       refreshedTokens: AuthTokens,
       source: "client_token" | "refresh_token",
     ): Promise<AuthSessionResult> => {
-      let user = this.session?.user;
+      const latestSession = this.getSession() ?? currentSession;
+      const baseSession = latestSession.user.userId === userId ? latestSession : currentSession;
+      const expectedRefreshUserId = expectedUserId ?? userId;
+      let refreshedUser: AuthUser | null = null;
+      let userInfoError: string | undefined;
       try {
-        user = await fetchUserInfo(refreshedTokens);
-        console.debug("auth: fetched user info on token refresh", { userId: user.userId, email: user.email, avatarUrl: user.avatarUrl });
+        refreshedUser = await fetchUserInfo(refreshedTokens);
+        console.debug("auth: fetched user info on token refresh", {
+          userId: refreshedUser.userId,
+          email: refreshedUser.email,
+          avatarUrl: refreshedUser.avatarUrl,
+        });
       } catch (error) {
         console.warn("Token refresh succeeded but user info refresh failed. Keeping cached user:", error);
+        userInfoError = error instanceof Error ? error.message : "Unknown error while fetching user info";
       }
 
-      this.session = {
-        provider: this.session!.provider,
+      const resolvedUser = refreshedUser ?? baseSession.user;
+      if (resolvedUser.userId !== expectedRefreshUserId) {
+        return {
+          session: baseSession,
+          refresh: {
+            attempted: true,
+            forced: forceRefresh,
+            outcome: "failed",
+            message: refreshedUser
+              ? "Token refresh returned a different account than expected."
+              : "Token refresh kept a cached account identity that did not match the expected account.",
+            error: refreshedUser
+              ? `expected_user_id:${expectedRefreshUserId} actual_user_id:${refreshedUser.userId}`
+              : userInfoError
+                ? `expected_user_id:${expectedRefreshUserId} cached_user_id:${resolvedUser.userId} user_info_error:${userInfoError}`
+                : `expected_user_id:${expectedRefreshUserId} cached_user_id:${resolvedUser.userId}`,
+          },
+        };
+      }
+
+      const updatedSession: AuthSession = {
+        provider: baseSession.provider,
         tokens: refreshedTokens,
-        user: user ?? this.session!.user,
+        user: resolvedUser,
       };
+      this.sessions.set(updatedSession.user.userId, updatedSession);
 
       // Re-fetch real tier after token refresh
       this.clearSubscriptionCache();
@@ -884,7 +1294,7 @@ export class AuthService {
 
       const sourceText = source === "client_token" ? "client token" : "refresh token";
       return {
-        session: this.session,
+        session: this.getSession(),
         refresh: {
           attempted: true,
           forced: forceRefresh,
@@ -900,7 +1310,7 @@ export class AuthService {
 
     if (tokens.clientToken) {
       try {
-        const refreshedFromClientToken = await refreshWithClientToken(tokens.clientToken, userId);
+        const refreshedFromClientToken = await refreshWithClientToken(tokens.clientToken, userId, tokens.authClientId);
         let refreshedTokens = mergeTokenSnapshot(tokens, refreshedFromClientToken);
         refreshedTokens = await this.ensureClientToken(refreshedTokens, userId);
         return applyRefreshedTokens(refreshedTokens, "client_token");
@@ -913,7 +1323,7 @@ export class AuthService {
 
     if (tokens.refreshToken) {
       try {
-        const refreshedOAuth = await refreshAuthTokens(tokens.refreshToken);
+        const refreshedOAuth = await refreshAuthTokens(tokens.refreshToken, tokens.authClientId);
         let refreshedTokens: AuthTokens = {
           ...tokens,
           ...refreshedOAuth,
@@ -921,6 +1331,7 @@ export class AuthService {
           clientToken: tokens.clientToken,
           clientTokenExpiresAt: tokens.clientTokenExpiresAt,
           clientTokenLifetimeMs: tokens.clientTokenLifetimeMs,
+          authClientId: refreshedOAuth.authClientId ?? tokens.authClientId,
         };
         refreshedTokens = await this.ensureClientToken(refreshedTokens, userId);
         return applyRefreshedTokens(refreshedTokens, "refresh_token");
@@ -949,7 +1360,7 @@ export class AuthService {
       }
 
       return {
-        session: this.session,
+        session: this.getSession(),
         refresh: {
           attempted: true,
           forced: forceRefresh,
@@ -974,7 +1385,7 @@ export class AuthService {
     }
 
     return {
-      session: this.session,
+      session: this.getSession(),
       refresh: {
         attempted: true,
         forced: forceRefresh,
@@ -993,7 +1404,7 @@ export class AuthService {
   async resolveJwtToken(explicitToken?: string): Promise<string> {
     // Prefer the managed auth session whenever it exists so renderer-side cached
     // tokens cannot bypass refresh logic.
-    if (this.session) {
+    if (this.getSession()) {
       const session = await this.ensureValidSession();
       if (!session) {
         throw new Error("No authenticated session available");

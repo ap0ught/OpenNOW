@@ -1,4 +1,4 @@
-import { Globe, Check, Search, X, Loader, Zap, Mic, FileDown, Wifi, Trash2, Heart, Users, ExternalLink, Play } from "lucide-react";
+import { Globe, Check, Search, X, Loader, Zap, Mic, FileDown, Wifi, Trash2, Heart, Users, ExternalLink, Monitor, Keyboard, Download, RefreshCcw, Info, Cpu, AlertTriangle, MapPin, ScanLine, Gauge, Film, SlidersHorizontal, HardDrive, Sparkles } from "lucide-react";
 import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import type { JSX } from "react";
 
@@ -7,7 +7,9 @@ import type {
   StreamRegion,
   VideoCodec,
   ColorQuality,
+  AspectRatio,
   EntitledResolution,
+  SubscriptionInfo,
   VideoAccelerationPreference,
   MicrophoneMode,
   PingResult,
@@ -16,15 +18,36 @@ import type {
   ThankYouDataResult,
   ThankYouContributor,
   ThankYouSupporter,
+  AppUpdaterState,
+  NativeStreamerStatus,
+  NativeVideoBackendCapability,
+  NativeVideoBackendPreference,
+  GameAccountConnection,
 } from "@shared/gfn";
 import {
+  createUnsupportedNativeStreamerStatus,
+  DEFAULT_VIDEO_SHADER_SETTINGS,
+  isNativeStreamerSupportedPlatform,
+  NATIVE_STREAMER_WINDOWS_ONLY_MESSAGE,
   colorQualityRequiresHevc,
+  expandEntitledStreamResolutions,
+  getSafeFallbackEntitledResolutions,
   keyboardLayoutOptions,
+  resolveEntitledStreamProfile,
   USER_FACING_COLOR_QUALITY_OPTIONS,
   USER_FACING_VIDEO_CODEC_OPTIONS,
 } from "@shared/gfn";
-import { formatShortcutForDisplay, normalizeShortcut } from "../shortcuts";
-import { getCodecDecodeBadgeState, type CodecTestResult } from "../lib/codecDiagnostics";
+import { isZortosCommunityProxyUrl, ZORTOS_GITHUB_SPONSORS_URL } from "@shared/communityProxy";
+import { formatShortcutForDisplay, normalizeShortcut, shortcutFromKeyboardEvent } from "../shortcuts";
+import { getCodecDecodeBadgeState, shouldShowLinuxHardwareCodecHint, type CodecTestResult } from "../lib/codecDiagnostics";
+import { getAccentColorOption, getAccentColorOptions } from "../lib/uiCustomization";
+import { useTranslation } from "../i18n";
+import {
+  clearStoredRegionPingResults,
+  loadStoredRegionPingResults,
+  saveStoredRegionPingResults,
+} from "../utils/pingResultsStorage";
+import { SelectDropdown } from "./ui/SelectDropdown";
 
 interface SettingsPageProps {
   settings: Settings;
@@ -33,9 +56,215 @@ interface SettingsPageProps {
   codecTesting: boolean;
   onRunCodecTest: () => Promise<void>;
   onSettingChange: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
+  onClose: () => void;
+  focusSection?: SettingsSectionId;
+  /** Called when the user clicks "What's new" in the About section */
+  onOpenWhatsNew?: () => void;
 }
 
+type SettingsNavItem = {
+  id: SettingsSectionId;
+  label: string;
+  icon: JSX.Element;
+};
+
+type SettingsNavGroup = {
+  label: string;
+  items: SettingsNavItem[];
+};
+
 type ThanksLoadState = "idle" | "loading" | "loaded" | "error";
+type StorageResetState = "idle" | "resetting" | "success" | "error";
+type GameAccountBusyAction = "link" | "unlink" | "resync";
+
+type SettingsSectionId = "account" | "stream" | "native-streamer" | "game" | "audio" | "input" | "interface" | "about" | "thanks";
+type SettingsSearchScopeId =
+  | "account-storage"
+  | "stream-region"
+  | "stream-video"
+  | "stream-codec-diagnostics"
+  | "native-streamer"
+  | "game"
+  | "audio"
+  | "input"
+  | "interface"
+  | "about"
+  | "thanks";
+
+const SETTINGS_SCOPE_SEARCH_TERMS: Record<SettingsSearchScopeId, readonly string[]> = {
+  "account-storage": [
+    "account",
+    "subscription",
+    "storage",
+    "persistent storage",
+    "cloud storage",
+    "install to play",
+    "reset storage",
+    "storage reset",
+    "connections",
+    "connected accounts",
+    "game accounts",
+    "link accounts",
+    "unlink accounts",
+    "sync library",
+    "steam",
+    "epic",
+    "ubisoft",
+    "battle.net",
+    "xbox",
+    "gaijin",
+    "region",
+    "data",
+    "games",
+    "downloads",
+    "available",
+    "used",
+  ],
+  "stream-region": [
+    "stream",
+    "region",
+    "latency",
+    "ping",
+    "server",
+    "route",
+    "auto best",
+    "proxy",
+    "vpn",
+    "queue",
+    "session",
+    "sponsor",
+    "github sponsor",
+    "supporter",
+  ],
+  "stream-video": [
+    "stream",
+    "video",
+    "quality",
+    "codec",
+    "fps",
+    "resolution",
+    "bitrate",
+    "aspect ratio",
+    "l4s",
+    "cloud gsync",
+    "console mode",
+    "tv mode",
+    "big picture",
+    "gamepad friendly",
+    "video acceleration",
+    "filters",
+    "shader",
+    "shaders",
+    "sharpen",
+    "sharpening",
+    "saturation",
+    "contrast",
+    "brightness",
+    "vibrance",
+    "film grain",
+    "post processing",
+    "session proxy",
+    "community proxy",
+    "zortos",
+  ],
+  "stream-codec-diagnostics": [
+    "stream",
+    "codec diagnostics",
+    "diagnostics",
+    "decode",
+    "encode",
+    "gpu",
+    "cpu",
+    "test codecs",
+  ],
+  "native-streamer": [
+    "native",
+    "streamer",
+    "native streaming",
+    "gstreamer",
+    "backend",
+    "directx",
+    "dx11",
+    "dx12",
+    "cloud gsync",
+    "diagnostics",
+    "stats",
+    "overlay",
+    "experimental",
+    "shortcuts",
+    "alt-tab",
+    "exit",
+    "issue",
+    "github",
+    "discord",
+    "report",
+    "bug",
+  ],
+  game: ["game", "language", "keyboard layout", "store", "launch", "graphics settings", "in-game settings", "persistence"],
+  audio: ["audio", "microphone", "mic", "push to talk", "voice activity"],
+  input: [
+    "input",
+    "mouse",
+    "keyboard layout",
+    "shortcut",
+    "hotkey",
+    "keybind",
+    "controls",
+    "controller",
+    "gamepad",
+    "gyro",
+    "gyroscope",
+    "steam",
+    "steam controller",
+    "xbox",
+    "compatibility",
+    "gamecontroller",
+    "hid",
+    "macos",
+    "motion controls",
+    "anti afk",
+    "pointer lock",
+    "native cursor",
+    "cursor overlay",
+    "server cursor",
+    "server-side cursor",
+    "recording",
+    "screenshot",
+  ],
+  interface: [
+    "interface",
+    "ui",
+    "language",
+    "locale",
+    "translation",
+    "app language",
+    "accent color",
+    "theme color",
+    "overlay",
+    "library",
+    "fullscreen",
+    "discord",
+    "rich presence",
+    "poster",
+    "session timer",
+    "session time left",
+    "session countdown",
+    "free tier time",
+    "priority time",
+    "ultimate time",
+    "counter",
+    "controller",
+    "gamepad",
+    "big picture",
+  ],
+  about: ["about", "update", "version", "logs", "cache", "download"],
+  thanks: ["thanks", "contributors", "supporters", "sponsors", "community"],
+};
+
+const POSTER_SIZE_MIN = 75;
+const POSTER_SIZE_MAX = 135;
+const POSTER_SIZE_STEP = 5;
+const NVIDIA_STORAGE_MANAGER_URL = "https://www.nvidia.com/en-us/account/gfn/manage-storage/";
 
 const codecOptions: VideoCodec[] = [...USER_FACING_VIDEO_CODEC_OPTIONS];
 
@@ -54,6 +283,92 @@ const allColorQualityOptions: { value: ColorQuality; label: string; description:
 
 const colorQualityOptions: { value: ColorQuality; label: string; description: string }[] = [...allColorQualityOptions];
 
+const nativeVideoBackendOptions: { value: NativeVideoBackendPreference; label: string; description: string }[] = [
+  { value: "auto", label: "Auto", description: "Pick the default native path for the session" },
+  { value: "d3d12", label: "DirectX 12", description: "Use the D3D12 decoder and renderer" },
+  { value: "d3d11", label: "DirectX 11", description: "Use the D3D11 decoder and renderer" },
+];
+
+const APP_LANGUAGE_LABELS: Record<string, string> = {
+  en: "English",
+  es: "Español",
+  fr: "Français",
+  de: "Deutsch",
+  ja: "日本語",
+  zh: "中文",
+  pl: "Polski",
+  ru: "Русский",
+  tr: "Türkçe",
+  ko: "한국어",
+  nl: "Nederlands",
+  ro: "Română",
+};
+
+const accentColorOptions = getAccentColorOptions();
+
+function getAppLanguageLabel(locale: string): string {
+  return APP_LANGUAGE_LABELS[locale] ?? locale.toUpperCase();
+}
+
+function formatNativeVideoBackendName(backend: string | undefined): string {
+  switch (backend) {
+    case "d3d12":
+      return "D3D12";
+    case "d3d11":
+      return "D3D11";
+    case "videotoolbox":
+      return "VideoToolbox";
+    case "vaapi":
+      return "VAAPI";
+    case "v4l2":
+      return "V4L2";
+    case "vulkan":
+      return "Vulkan";
+    case "software":
+      return "Software";
+    default:
+      return backend ?? "Unknown";
+  }
+}
+
+function formatNativeVideoCodec(codec: string): string {
+  switch (codec.toLowerCase()) {
+    case "h264":
+      return "H.264";
+    case "h265":
+      return "H.265";
+    case "av1":
+      return "AV1";
+    default:
+      return codec.toUpperCase();
+  }
+}
+
+function getAvailableNativeCodecLabels(backend: NativeVideoBackendCapability | undefined): string[] {
+  return backend?.codecs
+    .filter((codec) => codec.available)
+    .map((codec) => formatNativeVideoCodec(codec.codec)) ?? [];
+}
+
+function formatGstreamerRuntimeLabel(status: NativeStreamerStatus | null): string {
+  switch (status?.gstreamerRuntime.source) {
+    case "bundled":
+      return status.gstreamerAvailable ? "Bundled Runtime Used" : "Bundled Runtime Found";
+    case "system":
+      return "System Runtime";
+    case "missing":
+      return "Runtime Missing";
+    default:
+      return "Runtime Unknown";
+  }
+}
+
+function getGstreamerRuntimeBadgeClass(status: NativeStreamerStatus | null): string {
+  if (status?.gstreamerRuntime.source === "bundled" && status.gstreamerAvailable) return "settings-inline-badge--codec-gpu";
+  if (status?.gstreamerRuntime.source === "system" && status.gstreamerAvailable) return "settings-inline-badge--codec-testing";
+  return "settings-inline-badge--updater-error";
+}
+
 /* ── Static fallbacks (used when MES API is unavailable) ─────────── */
 
 interface ResolutionPreset {
@@ -65,17 +380,20 @@ interface FpsPreset {
   value: number;
 }
 
-interface AspectRatioPreset {
-  value: string;
-  label: string;
-}
+function inferAspectRatioFromResolution(resolution: string): AspectRatio {
+  const parts = resolution.split("x");
+  const width = parseInt(parts[0] ?? "", 10);
+  const height = parseInt(parts[1] ?? "", 10);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || height === 0) {
+    return "16:9";
+  }
 
-const STATIC_ASPECT_RATIO_PRESETS: AspectRatioPreset[] = [
-  { value: "16:9", label: "16:9 (Widescreen)" },
-  { value: "16:10", label: "16:10 (Widescreen)" },
-  { value: "21:9", label: "21:9 (Ultrawide)" },
-  { value: "32:9", label: "32:9 (Super Ultrawide)" },
-];
+  const ratio = width / height;
+  if (Math.abs(ratio - 32 / 9) < 0.08) return "32:9";
+  if (Math.abs(ratio - 21 / 9) < 0.08) return "21:9";
+  if (Math.abs(ratio - 16 / 10) < 0.05) return "16:10";
+  return "16:9";
+}
 
 const STATIC_RESOLUTION_PRESETS: ResolutionPreset[] = [
   { value: "1280x720", label: "720p (16:9)" },
@@ -105,16 +423,58 @@ const STATIC_FPS_PRESETS: FpsPreset[] = [
 ];
 
 const isMac = navigator.platform.toLowerCase().includes("mac");
-const isWin = navigator.platform.toLowerCase().includes("win");
+const isWindows = isNativeStreamerSupportedPlatform(`${navigator.platform} ${navigator.userAgent}`);
 const shortcutExamples = "Examples: F3, Ctrl+Shift+Q, Ctrl+Shift+K";
 const shortcutDefaults = {
   shortcutToggleStats: "F3",
   shortcutTogglePointerLock: "F8",
+  shortcutToggleFullscreen: "F10",
   shortcutStopStream: "Ctrl+Shift+Q",
   shortcutToggleAntiAfk: "Ctrl+Shift+K",
   shortcutToggleMicrophone: "Ctrl+Shift+M",
   shortcutScreenshot: "F11",
+  shortcutToggleRecording: "F12",
 } as const;
+
+/** Canonical shortcut for toggling the stream sidebar (must match StreamView key handler). */
+const SIDEBAR_TOGGLE_SHORTCUT_RAW = isMac ? "Meta+G" : "Ctrl+G";
+const SIDEBAR_TOGGLE_SHORTCUT_ALIASES = isMac ? [SIDEBAR_TOGGLE_SHORTCUT_RAW] : [SIDEBAR_TOGGLE_SHORTCUT_RAW, "Ctrl+Shift+G"];
+const NATIVE_STREAMER_ENABLE_PROMPT_EXIT_MS = 160;
+
+function extractRemoteInvokeErrorMessage(error: unknown, fallback: string): string {
+  if (!(error instanceof Error) || !error.message.trim()) {
+    return fallback;
+  }
+
+  const ipcMatch = error.message.match(/^Error invoking remote method '[^']+': (?:(?:Error|TypeError|RangeError): )?([\s\S]+)$/);
+  return ipcMatch?.[1]?.trim() || error.message.trim();
+}
+
+type ShortcutSettingKey = keyof typeof shortcutDefaults;
+
+const SHORTCUT_SETTING_KEYS = Object.keys(shortcutDefaults) as ShortcutSettingKey[];
+
+function getShortcutConflictMessage(
+  editingKey: ShortcutSettingKey,
+  candidateCanonical: string,
+  currentSettings: Settings,
+): string | null {
+  const sidebarShortcuts = SIDEBAR_TOGGLE_SHORTCUT_ALIASES
+    .map((value) => normalizeShortcut(value))
+    .filter((parsed) => parsed.valid)
+    .map((parsed) => parsed.canonical);
+  if (sidebarShortcuts.includes(candidateCanonical)) {
+    return "Shortcut conflicts with the settings sidebar toggle.";
+  }
+  for (const key of SHORTCUT_SETTING_KEYS) {
+    if (key === editingKey) continue;
+    const parsed = normalizeShortcut(currentSettings[key]);
+    if (parsed.valid && parsed.canonical === candidateCanonical) {
+      return "Shortcut conflicts with another binding.";
+    }
+  }
+  return null;
+}
 
 const microphoneModeOptions: Array<{ value: MicrophoneMode; label: string }> = [
   { value: "disabled", label: "Disabled" },
@@ -258,45 +618,12 @@ function getFpsForResolution(entitled: EntitledResolution[], resolution: string)
   return [...new Set(fpsList)].sort((a, b) => a - b);
 }
 
-const PING_RESULTS_STORAGE_KEY = "opennow.ping-results.v1";
-const ENTITLED_RESOLUTIONS_STORAGE_KEY = "opennow.entitled-resolutions.v1";
+const ENTITLED_RESOLUTIONS_STORAGE_KEY = "opennow.entitled-resolutions.v2";
 
 interface EntitledResolutionsCache {
   userId: string;
+  membershipTier: string;
   entitledResolutions: EntitledResolution[];
-}
-
-interface PingCacheEntry {
-  url: string;
-  pingMs: number | null;
-}
-
-function loadStoredPingResults(): Map<string, number | null> | null {
-  try {
-    const raw = window.sessionStorage.getItem(PING_RESULTS_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return null;
-    const results = new Map<string, number | null>();
-    for (const entry of parsed as PingCacheEntry[]) {
-      results.set(entry.url, entry.pingMs);
-    }
-    return results;
-  } catch {
-    return null;
-  }
-}
-
-function saveStoredPingResults(results: Map<string, number | null>): void {
-  try {
-    const entries: PingCacheEntry[] = [];
-    results.forEach((pingMs, url) => {
-      entries.push({ url, pingMs });
-    });
-    window.sessionStorage.setItem(PING_RESULTS_STORAGE_KEY, JSON.stringify(entries));
-  } catch {
-    // Ignore storage failures
-  }
 }
 
 function loadCachedEntitledResolutions(): EntitledResolutionsCache | null {
@@ -309,11 +636,74 @@ function loadCachedEntitledResolutions(): EntitledResolutionsCache | null {
     }
     return {
       userId: parsed.userId,
+      membershipTier: typeof parsed.membershipTier === "string" ? parsed.membershipTier : "",
       entitledResolutions: parsed.entitledResolutions,
     };
   } catch {
     return null;
   }
+}
+
+function formatBytes(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let size = value;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  const digits = size >= 100 || unitIndex === 0 ? 0 : size >= 10 ? 1 : 2;
+  return `${size.toFixed(digits)} ${units[unitIndex]}`;
+}
+
+function formatStorageGb(value: number | undefined): string | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return null;
+  }
+
+  const rounded = Math.round(value * 10) / 10;
+  const display = Number.isInteger(rounded) ? rounded.toFixed(0) : rounded.toFixed(1);
+  return `${display} GB`;
+}
+
+function formatUpdaterTimestamp(value?: number): string | null {
+  if (!value) return null;
+  try {
+    return new Date(value).toLocaleString();
+  } catch {
+    return null;
+  }
+}
+
+function getUpdaterBadgeLabel(state: AppUpdaterState): string {
+  switch (state.status) {
+    case "disabled":
+      return "Packaged builds only";
+    case "idle":
+      return "Idle";
+    case "checking":
+      return "Checking";
+    case "available":
+      return "Update available";
+    case "not-available":
+      return "Up to date";
+    case "downloading":
+      return "Downloading";
+    case "downloaded":
+      return "Ready to install";
+    case "error":
+      return "Error";
+    default:
+      return "Idle";
+  }
+}
+
+function formatGameAccountSyncDate(value: string | undefined): string | null {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toLocaleString();
 }
 
 function saveCachedEntitledResolutions(cache: EntitledResolutionsCache): void {
@@ -326,9 +716,10 @@ function saveCachedEntitledResolutions(cache: EntitledResolutionsCache): void {
 
 /* ── Component ────────────────────────────────────────────────────── */
 
-export function SettingsPage({ settings, regions, onSettingChange, codecResults, codecTesting, onRunCodecTest }: SettingsPageProps): JSX.Element {
+export function SettingsPage({ settings, regions, onSettingChange, codecResults, codecTesting, onRunCodecTest, onClose, focusSection, onOpenWhatsNew }: SettingsPageProps): JSX.Element {
+  const { locale, availableLocales, setLocale, t } = useTranslation();
   const [savedIndicator, setSavedIndicator] = useState(false);
-  const [activeTab, setActiveTab] = useState<"preferences" | "thanks">("preferences");
+  const [activeSection, setActiveSection] = useState<SettingsSectionId>("stream");
   const [thanksData, setThanksData] = useState<ThankYouDataResult | null>(null);
   const [thanksLoadState, setThanksLoadState] = useState<ThanksLoadState>("idle");
   const [thanksFetchError, setThanksFetchError] = useState<string | null>(null);
@@ -340,7 +731,7 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
   const codecTestOpen = codecResults !== null || codecTesting;
 
   // Region ping state
-  const initialPingResults = useMemo(() => loadStoredPingResults(), []);
+  const initialPingResults = useMemo(() => loadStoredRegionPingResults(), []);
   const [pingResults, setPingResults] = useState<Map<string, number | null>>(initialPingResults ?? new Map());
   const [isPinging, setIsPinging] = useState(false);
   const [bestRegionUrl, setBestRegionUrl] = useState<string | null>(() => {
@@ -375,7 +766,7 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
 
       setPingResults(pingMap);
       setBestRegionUrl(bestUrl);
-      saveStoredPingResults(pingMap);
+      saveStoredRegionPingResults(pingMap);
     } catch (err) {
       console.error("Ping test failed:", err);
     } finally {
@@ -392,11 +783,7 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
         // Regions changed, clear cache and re-test
         setPingResults(new Map());
         setBestRegionUrl(null);
-        try {
-          window.sessionStorage.removeItem(PING_RESULTS_STORAGE_KEY);
-        } catch {
-          // Ignore
-        }
+        clearStoredRegionPingResults();
       }
     }
   }, [regions, pingResults]);
@@ -410,31 +797,99 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
 
   const [toggleStatsInput, setToggleStatsInput] = useState(settings.shortcutToggleStats);
   const [togglePointerLockInput, setTogglePointerLockInput] = useState(settings.shortcutTogglePointerLock);
+  const [toggleFullscreenInput, setToggleFullscreenInput] = useState(settings.shortcutToggleFullscreen);
   const [stopStreamInput, setStopStreamInput] = useState(settings.shortcutStopStream);
   const [toggleAntiAfkInput, setToggleAntiAfkInput] = useState(settings.shortcutToggleAntiAfk);
   const [toggleMicrophoneInput, setToggleMicrophoneInput] = useState(settings.shortcutToggleMicrophone);
   const [screenshotInput, setScreenshotInput] = useState(settings.shortcutScreenshot);
-  const [toggleStatsError, setToggleStatsError] = useState(false);
-  const [togglePointerLockError, setTogglePointerLockError] = useState(false);
-  const [stopStreamError, setStopStreamError] = useState(false);
-  const [toggleAntiAfkError, setToggleAntiAfkError] = useState(false);
-  const [toggleMicrophoneError, setToggleMicrophoneError] = useState(false);
-  const [screenshotError, setScreenshotError] = useState(false);
+  const [recordingInput, setRecordingInput] = useState(settings.shortcutToggleRecording);
+  const [toggleStatsError, setToggleStatsError] = useState<string | null>(null);
+  const [togglePointerLockError, setTogglePointerLockError] = useState<string | null>(null);
+  const [toggleFullscreenError, setToggleFullscreenError] = useState<string | null>(null);
+  const [stopStreamError, setStopStreamError] = useState<string | null>(null);
+  const [toggleAntiAfkError, setToggleAntiAfkError] = useState<string | null>(null);
+  const [toggleMicrophoneError, setToggleMicrophoneError] = useState<string | null>(null);
+  const [screenshotError, setScreenshotError] = useState<string | null>(null);
+  const [recordingError, setRecordingError] = useState<string | null>(null);
 
   const [keyboardLayoutDropdownOpen, setKeyboardLayoutDropdownOpen] = useState(false);
   const keyboardLayoutDropdownRef = useRef<HTMLDivElement | null>(null);
+
+  const [appLanguageDropdownOpen, setAppLanguageDropdownOpen] = useState(false);
+  const appLanguageDropdownRef = useRef<HTMLDivElement | null>(null);
+  const [accentColorDropdownOpen, setAccentColorDropdownOpen] = useState(false);
+  const accentColorDropdownRef = useRef<HTMLDivElement | null>(null);
 
   // Game language dropdown state
   const [gameLanguageDropdownOpen, setGameLanguageDropdownOpen] = useState(false);
   const gameLanguageDropdownRef = useRef<HTMLDivElement | null>(null);
 
+  const [resolutionDropdownOpen, setResolutionDropdownOpen] = useState(false);
+  const resolutionDropdownRef = useRef<HTMLDivElement | null>(null);
+  const [settingsSearch, setSettingsSearch] = useState("");
+  const settingsSearchShowsAll = settingsSearch.trim().length > 0;
+  const settingsContentRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    settingsContentRef.current?.scrollTo({ top: 0 });
+  }, [activeSection, settingsSearchShowsAll]);
+
+  useEffect(() => {
+    if (!focusSection) return;
+    setActiveSection(focusSection);
+    setSettingsSearch("");
+  }, [focusSection]);
+
+  const [codecAdvancedOpen, setCodecAdvancedOpen] = useState(false);
+  const [nativeStreamerStatus, setNativeStreamerStatus] = useState<NativeStreamerStatus | null>(null);
+  const [nativeStreamerStatusLoading, setNativeStreamerStatusLoading] = useState(false);
+  const [nativeStreamerEnablePromptOpen, setNativeStreamerEnablePromptOpen] = useState(false);
+  const [nativeStreamerEnablePromptClosing, setNativeStreamerEnablePromptClosing] = useState(false);
+  const nativeStreamerEnablePromptRef = useRef<HTMLDivElement | null>(null);
+  const nativeStreamerEnablePromptConfirmRef = useRef<HTMLButtonElement | null>(null);
+  const nativeStreamerEnablePromptPreviousFocusRef = useRef<HTMLElement | null>(null);
+  const nativeStreamerEnablePromptCloseTimerRef = useRef<number | null>(null);
+  const nativeStreamerEnablePromptVisible =
+    nativeStreamerEnablePromptOpen || nativeStreamerEnablePromptClosing;
+  const [zortosCommunityProxyPromptOpen, setZortosCommunityProxyPromptOpen] = useState(false);
+  const [zortosCommunityProxyPromptClosing, setZortosCommunityProxyPromptClosing] = useState(false);
+  const [zortosCommunityProxyProvisioning, setZortosCommunityProxyProvisioning] = useState(false);
+  const [zortosCommunityProxyError, setZortosCommunityProxyError] = useState<string | null>(null);
+  const zortosCommunityProxyPromptRef = useRef<HTMLDivElement | null>(null);
+  const zortosCommunityProxyPromptContinueRef = useRef<HTMLButtonElement | null>(null);
+  const zortosCommunityProxyPromptPreviousFocusRef = useRef<HTMLElement | null>(null);
+  const zortosCommunityProxyPromptCloseTimerRef = useRef<number | null>(null);
+  const zortosCommunityProxyPromptVisible =
+    zortosCommunityProxyPromptOpen || zortosCommunityProxyPromptClosing;
+  const isUsingZortosCommunityProxy = useMemo(
+    () => settings.sessionProxyEnabled && isZortosCommunityProxyUrl(settings.sessionProxyUrl),
+    [settings.sessionProxyEnabled, settings.sessionProxyUrl],
+  );
+  const [updaterState, setUpdaterState] = useState<AppUpdaterState>({
+    status: "idle",
+    currentVersion: "0.0.0",
+    currentDisplayVersion: "0.0.0",
+    updateSource: "github-releases",
+    canCheck: false,
+    canDownload: false,
+    canInstall: false,
+    isPackaged: false,
+  });
+
   // Dynamic entitled resolutions from MES API
   const [entitledResolutions, setEntitledResolutions] = useState<EntitledResolution[]>([]);
+  const [subscriptionInfo, setSubscriptionInfo] = useState<SubscriptionInfo | null>(null);
   const [subscriptionLoading, setSubscriptionLoading] = useState(true);
-  const [salsaPackageServe, setSalsaPackageServe] = useState<
-    | { active: false }
-    | { active: true; localUrl: string; lanUrls: string[]; fileName: string }
-  >({ active: false });
+  const [storageResetState, setStorageResetState] = useState<StorageResetState>("idle");
+  const [storageResetMessage, setStorageResetMessage] = useState<string | null>(null);
+  const [gameAccounts, setGameAccounts] = useState<GameAccountConnection[]>([]);
+  const [gameAccountsLoading, setGameAccountsLoading] = useState(true);
+  const [gameAccountsError, setGameAccountsError] = useState<string | null>(null);
+  const [gameAccountStatusMessage, setGameAccountStatusMessage] = useState<string | null>(null);
+  const [gameAccountBusy, setGameAccountBusy] = useState<{
+    provider: string;
+    action: GameAccountBusyAction;
+  } | null>(null);
 
   useEffect(() => {
     setToggleStatsInput(settings.shortcutToggleStats);
@@ -443,6 +898,10 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
   useEffect(() => {
     setTogglePointerLockInput(settings.shortcutTogglePointerLock);
   }, [settings.shortcutTogglePointerLock]);
+
+  useEffect(() => {
+    setToggleFullscreenInput(settings.shortcutToggleFullscreen);
+  }, [settings.shortcutToggleFullscreen]);
 
   useEffect(() => {
     setStopStreamInput(settings.shortcutStopStream);
@@ -460,75 +919,596 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
     setScreenshotInput(settings.shortcutScreenshot);
   }, [settings.shortcutScreenshot]);
 
-  // Fetch subscription data (cached per account; reload only when account changes)
+  useEffect(() => {
+    setRecordingInput(settings.shortcutToggleRecording);
+  }, [settings.shortcutToggleRecording]);
+
   useEffect(() => {
     let cancelled = false;
 
-    async function load(): Promise<void> {
-      try {
-        const sessionResult = await window.openNow.getAuthSession();
-        const session = sessionResult.session;
-        if (!session || cancelled) {
-          setEntitledResolutions([]);
-          setSubscriptionLoading(false);
-          return;
-        }
-
-        const userId = session.user.userId;
-        const cached = loadCachedEntitledResolutions();
-        if (cached && cached.userId === userId) {
-          setEntitledResolutions(cached.entitledResolutions);
-          setSubscriptionLoading(false);
-          return;
-        }
-
-        const sub = await window.openNow.fetchSubscription({
-          userId,
-        });
-
-        if (!cancelled) {
-          setEntitledResolutions(sub.entitledResolutions);
-          saveCachedEntitledResolutions({
-            userId,
-            entitledResolutions: sub.entitledResolutions,
-          });
-        }
-      } catch (err) {
-        console.warn("Failed to fetch subscription for settings:", err);
-      } finally {
-        if (!cancelled) setSubscriptionLoading(false);
+    void window.openNow.getUpdaterState().then((state) => {
+      if (!cancelled) {
+        setUpdaterState(state);
       }
-    }
+    }).catch((error) => {
+      console.warn("[Settings] Failed to load updater state:", error);
+    });
 
-    load();
-    return () => { cancelled = true; };
+    const unsubscribe = window.openNow.onUpdaterStateChanged((state) => {
+      if (!cancelled) {
+        setUpdaterState(state);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
   }, []);
 
-  const hasDynamic = entitledResolutions.length > 0;
+  const refreshNativeStreamerStatus = useCallback(async () => {
+    if (!isWindows) {
+      setNativeStreamerStatus(createUnsupportedNativeStreamerStatus());
+      setNativeStreamerStatusLoading(false);
+      return;
+    }
+
+    setNativeStreamerStatusLoading(true);
+    try {
+      setNativeStreamerStatus(await window.openNow.getNativeStreamerStatus());
+    } catch (error) {
+      console.warn("[Settings] Failed to detect native streamer:", error);
+      setNativeStreamerStatus({
+        detected: false,
+        gstreamerAvailable: false,
+        supportsOfferAnswer: false,
+        gstreamerRuntime: {
+          source: "unknown",
+          bundled: false,
+          message: "GStreamer runtime could not be checked.",
+        },
+        message: "Native streamer status could not be checked.",
+      });
+    } finally {
+      setNativeStreamerStatusLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeSection === "native-streamer" || settingsSearch.length > 0) {
+      void refreshNativeStreamerStatus();
+    }
+  }, [activeSection, refreshNativeStreamerStatus, settingsSearch.length]);
+
+  const loadSubscriptionData = useCallback(async (isCancelled: () => boolean = () => false): Promise<void> => {
+    setSubscriptionLoading(true);
+
+    try {
+      const sessionResult = await window.openNow.getAuthSession();
+      const session = sessionResult.session;
+      if (!session || isCancelled()) {
+        setEntitledResolutions([]);
+        setSubscriptionInfo(null);
+        return;
+      }
+
+      const userId = session.user.userId;
+      const cached = loadCachedEntitledResolutions();
+      if (
+        cached &&
+        cached.userId === userId &&
+        cached.membershipTier === session.user.membershipTier &&
+        !isCancelled()
+      ) {
+        setEntitledResolutions(cached.entitledResolutions);
+      }
+
+      const sub = await window.openNow.fetchSubscription({
+        userId,
+      });
+
+      if (!isCancelled()) {
+        setSubscriptionInfo(sub);
+        setEntitledResolutions(sub.entitledResolutions);
+        saveCachedEntitledResolutions({
+          userId,
+          membershipTier: sub.membershipTier,
+          entitledResolutions: sub.entitledResolutions,
+        });
+      }
+
+    } catch (err) {
+      console.warn("Failed to fetch subscription for settings:", err);
+      if (!isCancelled()) {
+        setSubscriptionInfo(null);
+      }
+    } finally {
+      if (!isCancelled()) setSubscriptionLoading(false);
+    }
+  }, []);
+
+  // Fetch subscription data for dynamic stream presets and persistent storage state.
+  useEffect(() => {
+    let cancelled = false;
+    void loadSubscriptionData(() => cancelled);
+    return () => { cancelled = true; };
+  }, [loadSubscriptionData]);
+
+  const loadGameAccounts = useCallback(async (isCancelled: () => boolean = () => false): Promise<void> => {
+    setGameAccountsLoading(true);
+    setGameAccountsError(null);
+    setGameAccountStatusMessage(null);
+
+    try {
+      const result = await window.openNow.fetchGameAccountConnections();
+      if (!isCancelled()) {
+        setGameAccounts(result.accounts);
+      }
+    } catch (error) {
+      console.warn("[Settings] Failed to fetch game account connections:", error);
+      if (!isCancelled()) {
+        setGameAccounts([]);
+        setGameAccountsError(
+          error instanceof Error && error.message.includes("No authenticated session")
+            ? t("settings.accountConnections.signInRequired")
+            : t("settings.accountConnections.loadFailed"),
+        );
+      }
+    } finally {
+      if (!isCancelled()) {
+        setGameAccountsLoading(false);
+      }
+    }
+  }, [t]);
+
+  const effectiveEntitledResolutions = useMemo(
+    () => {
+      const baseResolutions = entitledResolutions.length > 0
+        ? entitledResolutions
+        : subscriptionInfo
+          ? getSafeFallbackEntitledResolutions()
+          : [];
+      return expandEntitledStreamResolutions(baseResolutions);
+    },
+    [entitledResolutions, subscriptionInfo],
+  );
+  const useEntitledStreamOptions = effectiveEntitledResolutions.length > 0;
 
   // Grouped resolution presets (dynamic)
   const resolutionGroups = useMemo(
-    () => (hasDynamic ? groupResolutions(entitledResolutions) : []),
-    [entitledResolutions, hasDynamic]
+    () => (useEntitledStreamOptions ? groupResolutions(effectiveEntitledResolutions) : []),
+    [effectiveEntitledResolutions, useEntitledStreamOptions]
   );
 
   // Dynamic FPS presets based on current resolution
   const dynamicFpsOptions = useMemo(
-    () => (hasDynamic ? getFpsForResolution(entitledResolutions, settings.resolution) : []),
-    [entitledResolutions, settings.resolution, hasDynamic]
+    () => (useEntitledStreamOptions ? getFpsForResolution(effectiveEntitledResolutions, settings.resolution) : []),
+    [effectiveEntitledResolutions, settings.resolution, useEntitledStreamOptions]
   );
+  const resolvedEntitledProfile = useMemo(
+    () => resolveEntitledStreamProfile(effectiveEntitledResolutions, {
+      resolution: settings.resolution,
+      fps: settings.fps,
+    }),
+    [effectiveEntitledResolutions, settings.fps, settings.resolution],
+  );
+  const posterSizePercent = Math.round(settings.posterSizeScale * 100);
+  const updaterLastCheckedLabel = useMemo(() => formatUpdaterTimestamp(updaterState.lastCheckedAt), [updaterState.lastCheckedAt]);
+  const updaterProgressPercent = updaterState.progress ? Math.max(0, Math.min(100, Math.round(updaterState.progress.percent))) : 0;
+  const updaterProgressLabel = updaterState.progress
+    ? `${formatBytes(updaterState.progress.transferred)} / ${formatBytes(updaterState.progress.total || updaterState.progress.transferred)}`
+    : null;
+  const updaterDownloadRateLabel = updaterState.progress?.bytesPerSecond
+    ? `${formatBytes(updaterState.progress.bytesPerSecond)}/s`
+    : null;
+  const updaterBadgeLabel = useMemo(() => getUpdaterBadgeLabel(updaterState), [updaterState]);
+  const persistentStorage = subscriptionInfo?.storageAddon;
+  const persistentStorageSizeGb = typeof persistentStorage?.sizeGb === "number" ? persistentStorage.sizeGb : null;
+  const persistentStorageUsedGb = typeof persistentStorage?.usedGb === "number" ? persistentStorage.usedGb : null;
+  const persistentStorageRemainingGb =
+    persistentStorageSizeGb !== null && persistentStorageUsedGb !== null
+      ? Math.max(0, persistentStorageSizeGb - persistentStorageUsedGb)
+      : null;
+  const persistentStorageUsagePercent =
+    persistentStorageSizeGb !== null && persistentStorageSizeGb > 0 && persistentStorageUsedGb !== null
+      ? Math.max(0, Math.min(100, (persistentStorageUsedGb / persistentStorageSizeGb) * 100))
+      : null;
+  const persistentStorageSizeLabel = formatStorageGb(persistentStorage?.sizeGb);
+  const persistentStorageUsedLabel = formatStorageGb(persistentStorage?.usedGb);
+  const persistentStorageRemainingLabel = formatStorageGb(persistentStorageRemainingGb ?? undefined);
+  const persistentStorageUsageLabel = persistentStorage
+    ? persistentStorageUsedLabel && persistentStorageSizeLabel
+      ? t("settings.persistentStorage.usage", {
+        used: persistentStorageUsedLabel,
+        total: persistentStorageSizeLabel,
+      })
+      : t("settings.persistentStorage.usageUnavailable")
+    : subscriptionLoading
+      ? t("app.status.loading")
+      : t("settings.persistentStorage.notDetected");
+  const persistentStorageRegionLabel =
+    persistentStorage?.regionName ??
+    persistentStorage?.regionCode ??
+    (persistentStorage ? t("settings.persistentStorage.regionUnavailable") : null);
+  const persistentStorageDetails = [
+    persistentStorageRegionLabel
+      ? t("settings.persistentStorage.region", { region: persistentStorageRegionLabel })
+      : null,
+    persistentStorageRemainingLabel
+      ? t("settings.persistentStorage.remaining", { value: persistentStorageRemainingLabel })
+      : null,
+  ].filter((value): value is string => Boolean(value));
+  const currentStorageLocationOptionLabel = persistentStorageRegionLabel
+    ? t("settings.persistentStorage.currentLocationOption", { region: persistentStorageRegionLabel })
+    : t("settings.persistentStorage.currentLocationUnavailable");
+  const storageResetTargetLabel = persistentStorageRegionLabel ?? t("settings.persistentStorage.regionUnavailable");
+  const storageResetTargetHint = t("settings.persistentStorage.resetRequiresBrowserHint", {
+    region: storageResetTargetLabel,
+  });
+
+  const handleOpenPersistentStorageManager = useCallback(async (): Promise<void> => {
+    try {
+      await window.openNow.openExternalUrl(NVIDIA_STORAGE_MANAGER_URL);
+    } catch (error) {
+      console.error("[Settings] Failed to open NVIDIA Storage Manager:", error);
+      setStorageResetState("error");
+      setStorageResetMessage(t("settings.persistentStorage.openManagerFailed"));
+    }
+  }, [t]);
+
+  const handleResetPersistentStorage = useCallback(async (): Promise<void> => {
+    if (!persistentStorage) {
+      return;
+    }
+
+    setStorageResetState("idle");
+    setStorageResetMessage(t("settings.persistentStorage.resetRequiresBrowser"));
+    await handleOpenPersistentStorageManager();
+  }, [handleOpenPersistentStorageManager, persistentStorage, t]);
+
+  const handleGameAccountAction = useCallback(async (
+    account: GameAccountConnection,
+    action: GameAccountBusyAction,
+  ): Promise<void> => {
+    if (gameAccountBusy) {
+      return;
+    }
+
+    if (
+      action === "unlink" &&
+      !window.confirm(t("settings.accountConnections.unlinkConfirm", { provider: account.label }))
+    ) {
+      return;
+    }
+
+    setGameAccountBusy({ provider: account.provider, action });
+    setGameAccountStatusMessage(null);
+    setGameAccountsError(null);
+
+    try {
+      const payload = {
+        provider: account.provider,
+        proxyUrl: settings.sessionProxyEnabled ? settings.sessionProxyUrl.trim() || undefined : undefined,
+      };
+      const result =
+        action === "link"
+          ? await window.openNow.linkGameAccount(payload)
+          : action === "unlink"
+            ? await window.openNow.unlinkGameAccount(payload)
+            : await window.openNow.resyncGameAccount(payload);
+      setGameAccounts(result.accounts);
+      setGameAccountStatusMessage(
+        result.message ??
+        (action === "link"
+          ? t("settings.accountConnections.linkSuccess", { provider: account.label })
+          : action === "unlink"
+            ? t("settings.accountConnections.unlinkSuccess", { provider: account.label })
+            : t("settings.accountConnections.resyncSuccess", { provider: account.label })),
+      );
+    } catch (error) {
+      console.error(`[Settings] Game account ${action} failed:`, error);
+      setGameAccountsError(
+        error instanceof Error && error.message
+          ? error.message
+          : t("settings.accountConnections.actionFailed"),
+      );
+    } finally {
+      setGameAccountBusy(null);
+    }
+  }, [gameAccountBusy, settings.sessionProxyEnabled, settings.sessionProxyUrl, t]);
+
+  const selectedResolutionLabel = useMemo(() => {
+    if (useEntitledStreamOptions) {
+      for (const group of resolutionGroups) {
+        const found = group.resolutions.find(r => r.value === settings.resolution);
+        if (found) return found.label;
+      }
+      return settings.resolution || "Select";
+    }
+    const found = STATIC_RESOLUTION_PRESETS.find(r => r.value === settings.resolution);
+    return found ? found.label : settings.resolution || "Select";
+  }, [settings.resolution, useEntitledStreamOptions, resolutionGroups]);
 
   const handleChange = useCallback(
     <K extends keyof Settings>(key: K, value: Settings[K]) => {
       onSettingChange(key, value);
-      if (key === "controllerMode" && value === false) {
-        onSettingChange("autoLoadControllerLibrary", false);
-      }
       setSavedIndicator(true);
       setTimeout(() => setSavedIndicator(false), 1500);
     },
     [onSettingChange]
   );
+
+  const handleResolutionChange = useCallback((resolution: string) => {
+    handleChange("resolution", resolution);
+    const aspectRatio = inferAspectRatioFromResolution(resolution);
+    if (settings.aspectRatio !== aspectRatio) {
+      handleChange("aspectRatio", aspectRatio);
+    }
+  }, [handleChange, settings.aspectRatio]);
+
+  useEffect(() => {
+    if (!useEntitledStreamOptions || !resolvedEntitledProfile) {
+      return;
+    }
+
+    if (resolvedEntitledProfile.resolution !== settings.resolution) {
+      handleResolutionChange(resolvedEntitledProfile.resolution);
+    }
+    if (resolvedEntitledProfile.fps !== settings.fps) {
+      handleChange("fps", resolvedEntitledProfile.fps);
+    }
+  }, [
+    handleChange,
+    handleResolutionChange,
+    resolvedEntitledProfile,
+    settings.fps,
+    settings.resolution,
+    useEntitledStreamOptions,
+  ]);
+
+  const openNativeStreamerEnablePrompt = useCallback((): void => {
+    if (nativeStreamerEnablePromptCloseTimerRef.current !== null) {
+      window.clearTimeout(nativeStreamerEnablePromptCloseTimerRef.current);
+      nativeStreamerEnablePromptCloseTimerRef.current = null;
+    }
+
+    setNativeStreamerEnablePromptClosing(false);
+    setNativeStreamerEnablePromptOpen(true);
+  }, []);
+
+  const closeNativeStreamerEnablePrompt = useCallback((): void => {
+    if (nativeStreamerEnablePromptCloseTimerRef.current !== null) {
+      return;
+    }
+
+    setNativeStreamerEnablePromptOpen(false);
+    setNativeStreamerEnablePromptClosing(true);
+    nativeStreamerEnablePromptCloseTimerRef.current = window.setTimeout(() => {
+      nativeStreamerEnablePromptCloseTimerRef.current = null;
+      setNativeStreamerEnablePromptClosing(false);
+    }, NATIVE_STREAMER_ENABLE_PROMPT_EXIT_MS);
+  }, []);
+
+  const confirmNativeStreamerEnablePrompt = useCallback((): void => {
+    handleChange("streamClientMode", "native");
+    closeNativeStreamerEnablePrompt();
+  }, [closeNativeStreamerEnablePrompt, handleChange]);
+
+  const handleNativeStreamerToggleChange = useCallback((checked: boolean): void => {
+    if (!checked) {
+      handleChange("streamClientMode", "web");
+      return;
+    }
+
+    if (settings.streamClientMode === "native") {
+      return;
+    }
+
+    openNativeStreamerEnablePrompt();
+  }, [handleChange, openNativeStreamerEnablePrompt, settings.streamClientMode]);
+
+  const openZortosCommunityProxyPrompt = useCallback((): void => {
+    if (zortosCommunityProxyPromptCloseTimerRef.current !== null) {
+      window.clearTimeout(zortosCommunityProxyPromptCloseTimerRef.current);
+      zortosCommunityProxyPromptCloseTimerRef.current = null;
+    }
+
+    setZortosCommunityProxyError(null);
+    setZortosCommunityProxyProvisioning(false);
+    setZortosCommunityProxyPromptClosing(false);
+    setZortosCommunityProxyPromptOpen(true);
+  }, []);
+
+  const closeZortosCommunityProxyPrompt = useCallback((): void => {
+    if (zortosCommunityProxyPromptCloseTimerRef.current !== null || zortosCommunityProxyProvisioning) {
+      return;
+    }
+
+    setZortosCommunityProxyPromptOpen(false);
+    setZortosCommunityProxyPromptClosing(true);
+    zortosCommunityProxyPromptCloseTimerRef.current = window.setTimeout(() => {
+      zortosCommunityProxyPromptCloseTimerRef.current = null;
+      setZortosCommunityProxyPromptClosing(false);
+      setZortosCommunityProxyError(null);
+    }, NATIVE_STREAMER_ENABLE_PROMPT_EXIT_MS);
+  }, [zortosCommunityProxyProvisioning]);
+
+  const handleOpenZortosSponsors = useCallback((): void => {
+    void window.openNow.openExternalUrl(ZORTOS_GITHUB_SPONSORS_URL).catch((error) => {
+      console.error("[Settings] Failed to open GitHub Sponsors:", error);
+    });
+  }, []);
+
+  const confirmZortosCommunityProxyPrompt = useCallback(async (): Promise<void> => {
+    if (zortosCommunityProxyProvisioning) {
+      return;
+    }
+
+    setZortosCommunityProxyProvisioning(true);
+    setZortosCommunityProxyError(null);
+
+    try {
+      const result = await window.openNow.provisionZortosCommunityProxy();
+      handleChange("sessionProxyUrl", result.proxyUrl);
+      handleChange("sessionProxyEnabled", true);
+      setZortosCommunityProxyProvisioning(false);
+      closeZortosCommunityProxyPrompt();
+    } catch (error) {
+      console.error("[Settings] Failed to provision Zortos community proxy:", error);
+      setZortosCommunityProxyError(
+        extractRemoteInvokeErrorMessage(error, t("settings.video.zortosCommunityProxy.provisionFailed")),
+      );
+    } finally {
+      setZortosCommunityProxyProvisioning(false);
+    }
+  }, [closeZortosCommunityProxyPrompt, handleChange, t, zortosCommunityProxyProvisioning]);
+
+  useEffect(() => {
+    return () => {
+      if (nativeStreamerEnablePromptCloseTimerRef.current !== null) {
+        window.clearTimeout(nativeStreamerEnablePromptCloseTimerRef.current);
+        nativeStreamerEnablePromptCloseTimerRef.current = null;
+      }
+      if (zortosCommunityProxyPromptCloseTimerRef.current !== null) {
+        window.clearTimeout(zortosCommunityProxyPromptCloseTimerRef.current);
+        zortosCommunityProxyPromptCloseTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!nativeStreamerEnablePromptVisible) {
+      return;
+    }
+
+    nativeStreamerEnablePromptPreviousFocusRef.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+
+    const getFocusableElements = (): HTMLElement[] => {
+      const dialog = nativeStreamerEnablePromptRef.current;
+      if (!dialog) {
+        return [];
+      }
+
+      return Array.from(
+        dialog.querySelectorAll<HTMLElement>(
+          [
+            "a[href]",
+            "button:not([disabled])",
+            "input:not([disabled])",
+            "select:not([disabled])",
+            "textarea:not([disabled])",
+            '[tabindex]:not([tabindex="-1"])',
+          ].join(","),
+        ),
+      ).filter((element) => element.tabIndex >= 0 && element.getAttribute("aria-hidden") !== "true");
+    };
+
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeNativeStreamerEnablePrompt();
+        return;
+      }
+
+      if (event.key !== "Tab") {
+        return;
+      }
+
+      const dialog = nativeStreamerEnablePromptRef.current;
+      const focusableElements = getFocusableElements();
+      if (!dialog || focusableElements.length === 0) {
+        event.preventDefault();
+        dialog?.focus({ preventScroll: true });
+        return;
+      }
+
+      const activeElement = document.activeElement;
+      const firstElement = focusableElements[0];
+      const lastElement = focusableElements[focusableElements.length - 1];
+      const focusIsOnDialog = activeElement === dialog;
+
+      if (event.shiftKey && (focusIsOnDialog || activeElement === firstElement || !dialog.contains(activeElement))) {
+        event.preventDefault();
+        lastElement.focus({ preventScroll: true });
+        return;
+      }
+
+      if (!event.shiftKey && (focusIsOnDialog || activeElement === lastElement || !dialog.contains(activeElement))) {
+        event.preventDefault();
+        firstElement.focus({ preventScroll: true });
+      }
+    };
+
+    const focusFrame = window.requestAnimationFrame(() => {
+      nativeStreamerEnablePromptConfirmRef.current?.focus({ preventScroll: true });
+    });
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      document.removeEventListener("keydown", handleKeyDown);
+
+      const previousFocus = nativeStreamerEnablePromptPreviousFocusRef.current;
+      nativeStreamerEnablePromptPreviousFocusRef.current = null;
+      if (previousFocus?.isConnected) {
+        previousFocus.focus({ preventScroll: true });
+      }
+    };
+  }, [closeNativeStreamerEnablePrompt, nativeStreamerEnablePromptVisible]);
+
+  useEffect(() => {
+    if (!zortosCommunityProxyPromptVisible) {
+      return;
+    }
+
+    zortosCommunityProxyPromptPreviousFocusRef.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === "Escape" && !zortosCommunityProxyProvisioning) {
+        event.preventDefault();
+        closeZortosCommunityProxyPrompt();
+      }
+    };
+
+    const focusFrame = window.requestAnimationFrame(() => {
+      zortosCommunityProxyPromptContinueRef.current?.focus({ preventScroll: true });
+    });
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      document.removeEventListener("keydown", handleKeyDown);
+      const previousFocus = zortosCommunityProxyPromptPreviousFocusRef.current;
+      zortosCommunityProxyPromptPreviousFocusRef.current = null;
+      if (previousFocus?.isConnected) {
+        previousFocus.focus({ preventScroll: true });
+      }
+    };
+  }, [closeZortosCommunityProxyPrompt, zortosCommunityProxyPromptVisible, zortosCommunityProxyProvisioning]);
+
+  const handleAppLanguageChange = useCallback((nextLocale: string): void => {
+    setAppLanguageDropdownOpen(false);
+    void setLocale(nextLocale).catch((error) => {
+      console.warn("[Settings] Failed to change app language:", error);
+    });
+    setSavedIndicator(true);
+    setTimeout(() => setSavedIndicator(false), 1500);
+  }, [setLocale]);
+
+  const setNativeFramePacing = useCallback((mode: "low-latency" | "smooth") => {
+    if (mode === "low-latency") {
+      handleChange("enableCloudGsync", false);
+      handleChange("nativeCloudGsyncMode", "disabled");
+      handleChange("nativeD3dFullscreenMode", "disabled");
+      return;
+    }
+
+    handleChange("enableCloudGsync", true);
+    handleChange("nativeCloudGsyncMode", "auto");
+    handleChange("nativeD3dFullscreenMode", "auto");
+  }, [handleChange]);
 
   const handleColorQualityChange = useCallback(
     (cq: ColorQuality) => {
@@ -675,20 +1655,42 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
   }, [regions, regionSearch, pingResults]);
 
   const selectedRegionName = useMemo(() => {
-    if (!settings.region) return "Auto (Best)";
+    if (!settings.region) return t("settings.region.autoBest");
     const found = regions.find((r) => r.url === settings.region);
     return found?.name ?? settings.region;
-  }, [settings.region, regions]);
+  }, [settings.region, regions, locale, t]);
+
+  const appLanguageOptions = useMemo(
+    () => availableLocales.map((value) => ({ value, label: getAppLanguageLabel(value) })),
+    [availableLocales],
+  );
+
+  const selectedAppLanguageName = useMemo(() => {
+    return appLanguageOptions.find((option) => option.value === locale)?.label ?? getAppLanguageLabel(locale);
+  }, [appLanguageOptions, locale]);
+
+  const selectedAccentColor = useMemo(() => getAccentColorOption(settings.appAccentColor), [settings.appAccentColor]);
+  const getMicrophoneModeLabel = useCallback((mode: MicrophoneMode): string => {
+    switch (mode) {
+      case "push-to-talk":
+        return t("settings.audio.pushToTalk");
+      case "voice-activity":
+        return t("settings.audio.voiceActivity");
+      case "disabled":
+      default:
+        return t("settings.audio.disabled");
+    }
+  }, [locale, t]);
 
   const selectedMicrophoneModeName = useMemo(() => {
-    return microphoneModeOptions.find((option) => option.value === settings.microphoneMode)?.label ?? "Disabled";
-  }, [settings.microphoneMode]);
+    return getMicrophoneModeLabel(settings.microphoneMode);
+  }, [settings.microphoneMode, getMicrophoneModeLabel]);
 
   const selectedMicrophoneDeviceName = useMemo(() => {
-    if (!settings.microphoneDeviceId) return "Default Device";
+    if (!settings.microphoneDeviceId) return t("app.labels.defaultDevice");
     const found = microphoneDevices.find((device) => device.deviceId === settings.microphoneDeviceId);
-    return found?.label || "Selected Device";
-  }, [settings.microphoneDeviceId, microphoneDevices]);
+    return found?.label || t("settings.audio.selectedDevice");
+  }, [settings.microphoneDeviceId, microphoneDevices, locale, t]);
 
   const selectedGameLanguageName = useMemo(() => {
     return gameLanguageOptions.find((option) => option.value === settings.gameLanguage)?.label ?? "English (US)";
@@ -716,8 +1718,17 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
       if (keyboardLayoutDropdownRef.current && !keyboardLayoutDropdownRef.current.contains(target)) {
         setKeyboardLayoutDropdownOpen(false);
       }
+      if (appLanguageDropdownRef.current && !appLanguageDropdownRef.current.contains(target)) {
+        setAppLanguageDropdownOpen(false);
+      }
+      if (accentColorDropdownRef.current && !accentColorDropdownRef.current.contains(target)) {
+        setAccentColorDropdownOpen(false);
+      }
       if (gameLanguageDropdownRef.current && !gameLanguageDropdownRef.current.contains(target)) {
         setGameLanguageDropdownOpen(false);
+      }
+      if (resolutionDropdownRef.current && !resolutionDropdownRef.current.contains(target)) {
+        setResolutionDropdownOpen(false);
       }
     };
 
@@ -725,72 +1736,209 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
     return () => document.removeEventListener("mousedown", handlePointerDown);
   }, []);
 
-  const handleShortcutBlur = <K extends keyof Settings>(
-    key: K,
-    rawValue: string,
-    setInput: (value: string) => void,
-    setError: (value: boolean) => void
-  ): void => {
-    const normalized = normalizeShortcut(rawValue.trim());
-    if (!normalized.valid) {
-      setError(true);
+  const handleShortcutBlur = (key: ShortcutSettingKey, rawValue: string): void => {
+    const trimmed = rawValue.trim();
+    if (!trimmed) {
+      const msg = "Shortcut cannot be empty.";
+      switch (key) {
+        case "shortcutToggleStats": setToggleStatsError(msg); break;
+        case "shortcutTogglePointerLock": setTogglePointerLockError(msg); break;
+        case "shortcutToggleFullscreen": setToggleFullscreenError(msg); break;
+        case "shortcutStopStream": setStopStreamError(msg); break;
+        case "shortcutToggleAntiAfk": setToggleAntiAfkError(msg); break;
+        case "shortcutToggleMicrophone": setToggleMicrophoneError(msg); break;
+        case "shortcutScreenshot": setScreenshotError(msg); break;
+        case "shortcutToggleRecording": setRecordingError(msg); break;
+      }
       return;
     }
-    setError(false);
-    setInput(normalized.canonical);
+
+    const normalized = normalizeShortcut(trimmed);
+    if (!normalized.valid) {
+      const msg = "Invalid shortcut format.";
+      switch (key) {
+        case "shortcutToggleStats": setToggleStatsError(msg); break;
+        case "shortcutTogglePointerLock": setTogglePointerLockError(msg); break;
+        case "shortcutToggleFullscreen": setToggleFullscreenError(msg); break;
+        case "shortcutStopStream": setStopStreamError(msg); break;
+        case "shortcutToggleAntiAfk": setToggleAntiAfkError(msg); break;
+        case "shortcutToggleMicrophone": setToggleMicrophoneError(msg); break;
+        case "shortcutScreenshot": setScreenshotError(msg); break;
+        case "shortcutToggleRecording": setRecordingError(msg); break;
+      }
+      return;
+    }
+
+    const conflict = getShortcutConflictMessage(key, normalized.canonical, settings);
+    if (conflict) {
+      switch (key) {
+        case "shortcutToggleStats": setToggleStatsError(conflict); break;
+        case "shortcutTogglePointerLock": setTogglePointerLockError(conflict); break;
+        case "shortcutToggleFullscreen": setToggleFullscreenError(conflict); break;
+        case "shortcutStopStream": setStopStreamError(conflict); break;
+        case "shortcutToggleAntiAfk": setToggleAntiAfkError(conflict); break;
+        case "shortcutToggleMicrophone": setToggleMicrophoneError(conflict); break;
+        case "shortcutScreenshot": setScreenshotError(conflict); break;
+        case "shortcutToggleRecording": setRecordingError(conflict); break;
+      }
+      return;
+    }
+
+    switch (key) {
+      case "shortcutToggleStats": setToggleStatsError(null); break;
+      case "shortcutTogglePointerLock": setTogglePointerLockError(null); break;
+      case "shortcutToggleFullscreen": setToggleFullscreenError(null); break;
+      case "shortcutStopStream": setStopStreamError(null); break;
+      case "shortcutToggleAntiAfk": setToggleAntiAfkError(null); break;
+      case "shortcutToggleMicrophone": setToggleMicrophoneError(null); break;
+      case "shortcutScreenshot": setScreenshotError(null); break;
+      case "shortcutToggleRecording": setRecordingError(null); break;
+    }
+
+    switch (key) {
+      case "shortcutToggleStats": setToggleStatsInput(normalized.canonical); break;
+      case "shortcutTogglePointerLock": setTogglePointerLockInput(normalized.canonical); break;
+      case "shortcutToggleFullscreen": setToggleFullscreenInput(normalized.canonical); break;
+      case "shortcutStopStream": setStopStreamInput(normalized.canonical); break;
+      case "shortcutToggleAntiAfk": setToggleAntiAfkInput(normalized.canonical); break;
+      case "shortcutToggleMicrophone": setToggleMicrophoneInput(normalized.canonical); break;
+      case "shortcutScreenshot": setScreenshotInput(normalized.canonical); break;
+      case "shortcutToggleRecording": setRecordingInput(normalized.canonical); break;
+    }
+
     if (settings[key] !== normalized.canonical) {
-      handleChange(key, normalized.canonical as Settings[K]);
+      handleChange(key, normalized.canonical);
     }
   };
 
-  const handleShortcutKeyDown = (e: React.KeyboardEvent): void => {
-    if (e.key === "Enter") {
-      (e.target as HTMLInputElement).blur();
+  const applyShortcutCapture = (key: ShortcutSettingKey, canonical: string): void => {
+    const conflict = getShortcutConflictMessage(key, canonical, settings);
+    if (conflict) {
+      switch (key) {
+        case "shortcutToggleStats": setToggleStatsError(conflict); break;
+        case "shortcutTogglePointerLock": setTogglePointerLockError(conflict); break;
+        case "shortcutToggleFullscreen": setToggleFullscreenError(conflict); break;
+        case "shortcutStopStream": setStopStreamError(conflict); break;
+        case "shortcutToggleAntiAfk": setToggleAntiAfkError(conflict); break;
+        case "shortcutToggleMicrophone": setToggleMicrophoneError(conflict); break;
+        case "shortcutScreenshot": setScreenshotError(conflict); break;
+        case "shortcutToggleRecording": setRecordingError(conflict); break;
+      }
+      return;
     }
+
+    switch (key) {
+      case "shortcutToggleStats": setToggleStatsError(null); break;
+      case "shortcutTogglePointerLock": setTogglePointerLockError(null); break;
+      case "shortcutToggleFullscreen": setToggleFullscreenError(null); break;
+      case "shortcutStopStream": setStopStreamError(null); break;
+      case "shortcutToggleAntiAfk": setToggleAntiAfkError(null); break;
+      case "shortcutToggleMicrophone": setToggleMicrophoneError(null); break;
+      case "shortcutScreenshot": setScreenshotError(null); break;
+      case "shortcutToggleRecording": setRecordingError(null); break;
+    }
+
+    switch (key) {
+      case "shortcutToggleStats": setToggleStatsInput(canonical); break;
+      case "shortcutTogglePointerLock": setTogglePointerLockInput(canonical); break;
+      case "shortcutToggleFullscreen": setToggleFullscreenInput(canonical); break;
+      case "shortcutStopStream": setStopStreamInput(canonical); break;
+      case "shortcutToggleAntiAfk": setToggleAntiAfkInput(canonical); break;
+      case "shortcutToggleMicrophone": setToggleMicrophoneInput(canonical); break;
+      case "shortcutScreenshot": setScreenshotInput(canonical); break;
+      case "shortcutToggleRecording": setRecordingInput(canonical); break;
+    }
+
+    if (settings[key] !== canonical) {
+      handleChange(key, canonical);
+    }
+  };
+
+  const handleShortcutCaptureKeyDown = (key: ShortcutSettingKey, e: React.KeyboardEvent<HTMLInputElement>): void => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.currentTarget.blur();
+      return;
+    }
+    if (e.key === "Enter" || e.key === "Tab") {
+      return;
+    }
+
+    const captured = shortcutFromKeyboardEvent(e.nativeEvent);
+    if (!captured) {
+      return;
+    }
+
+    e.preventDefault();
+    e.stopPropagation();
+    applyShortcutCapture(key, captured);
+  };
+
+  const handleShortcutPaste = (key: ShortcutSettingKey, e: React.ClipboardEvent<HTMLInputElement>): void => {
+    const text = e.clipboardData.getData("text/plain").trim();
+    if (!text) {
+      return;
+    }
+    e.preventDefault();
+    const normalized = normalizeShortcut(text);
+    if (!normalized.valid) {
+      const msg = "Invalid shortcut format.";
+      switch (key) {
+        case "shortcutToggleStats": setToggleStatsError(msg); break;
+        case "shortcutTogglePointerLock": setTogglePointerLockError(msg); break;
+        case "shortcutToggleFullscreen": setToggleFullscreenError(msg); break;
+        case "shortcutStopStream": setStopStreamError(msg); break;
+        case "shortcutToggleAntiAfk": setToggleAntiAfkError(msg); break;
+        case "shortcutToggleMicrophone": setToggleMicrophoneError(msg); break;
+        case "shortcutScreenshot": setScreenshotError(msg); break;
+        case "shortcutToggleRecording": setRecordingError(msg); break;
+      }
+      return;
+    }
+    applyShortcutCapture(key, normalized.canonical);
   };
 
   const areShortcutsDefault = useMemo(
     () =>
       settings.shortcutToggleStats === shortcutDefaults.shortcutToggleStats
       && settings.shortcutTogglePointerLock === shortcutDefaults.shortcutTogglePointerLock
+      && settings.shortcutToggleFullscreen === shortcutDefaults.shortcutToggleFullscreen
       && settings.shortcutStopStream === shortcutDefaults.shortcutStopStream
       && settings.shortcutToggleAntiAfk === shortcutDefaults.shortcutToggleAntiAfk
       && settings.shortcutToggleMicrophone === shortcutDefaults.shortcutToggleMicrophone
-      && settings.shortcutScreenshot === shortcutDefaults.shortcutScreenshot,
+      && settings.shortcutScreenshot === shortcutDefaults.shortcutScreenshot
+      && settings.shortcutToggleRecording === shortcutDefaults.shortcutToggleRecording,
     [
       settings.shortcutToggleStats,
       settings.shortcutTogglePointerLock,
+      settings.shortcutToggleFullscreen,
       settings.shortcutStopStream,
       settings.shortcutToggleAntiAfk,
       settings.shortcutToggleMicrophone,
       settings.shortcutScreenshot,
+      settings.shortcutToggleRecording,
     ]
   );
 
   const handleResetShortcuts = useCallback(() => {
     setToggleStatsInput(shortcutDefaults.shortcutToggleStats);
     setTogglePointerLockInput(shortcutDefaults.shortcutTogglePointerLock);
+    setToggleFullscreenInput(shortcutDefaults.shortcutToggleFullscreen);
     setStopStreamInput(shortcutDefaults.shortcutStopStream);
     setToggleAntiAfkInput(shortcutDefaults.shortcutToggleAntiAfk);
     setToggleMicrophoneInput(shortcutDefaults.shortcutToggleMicrophone);
     setScreenshotInput(shortcutDefaults.shortcutScreenshot);
-    setToggleStatsError(false);
-    setTogglePointerLockError(false);
-    setStopStreamError(false);
-    setToggleAntiAfkError(false);
-    setToggleMicrophoneError(false);
-    setScreenshotError(false);
+    setRecordingInput(shortcutDefaults.shortcutToggleRecording);
+    setToggleStatsError(null);
+    setTogglePointerLockError(null);
+    setToggleFullscreenError(null);
+    setStopStreamError(null);
+    setToggleAntiAfkError(null);
+    setToggleMicrophoneError(null);
+    setScreenshotError(null);
+    setRecordingError(null);
 
-    const shortcutKeys = [
-      "shortcutToggleStats",
-      "shortcutTogglePointerLock",
-      "shortcutStopStream",
-      "shortcutToggleAntiAfk",
-      "shortcutToggleMicrophone",
-      "shortcutScreenshot",
-    ] as const;
-
-    for (const key of shortcutKeys) {
+    for (const key of SHORTCUT_SETTING_KEYS) {
       const value = shortcutDefaults[key];
       if (settings[key] !== value) {
         handleChange(key, value);
@@ -807,7 +1955,28 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
   }, []);
 
   useEffect(() => {
-    if (activeTab !== "thanks") {
+    const normalizedSearch = settingsSearch.trim().toLowerCase();
+    const showAll = normalizedSearch.length > 0;
+    const shouldShowThanks = activeSection === "thanks" || (showAll && (() => {
+      const terms = SETTINGS_SCOPE_SEARCH_TERMS["thanks"];
+      const searchTokens = normalizedSearch.split(/[^a-z0-9]+/).filter((token) => token.length > 0);
+      if (searchTokens.length === 0) {
+        return true;
+      }
+      const searchableWords = Array.from(
+        new Set(
+          terms
+            .join(" ")
+            .toLowerCase()
+            .split(/[^a-z0-9]+/)
+            .filter((word) => word.length > 0),
+        ),
+      );
+      const tokenMatchesWord = (token: string, word: string): boolean => token === word || word.startsWith(token);
+      return searchTokens.every((token) => searchableWords.some((word) => tokenMatchesWord(token, word)));
+    })());
+
+    if (!shouldShowThanks) {
       thanksRequestIdRef.current += 1;
       setThanksLoadState((current) => (current === "loading" || current === "error" ? "idle" : current));
       setThanksFetchError(null);
@@ -855,7 +2024,7 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
         setThanksLoadState("error");
       },
     );
-  }, [activeTab, thanksData, thanksLoadState]);
+  }, [activeSection, thanksData, thanksLoadState, settingsSearch]);
 
   const renderPersonLink = useCallback((person: ThankYouContributor | ThankYouSupporter, content: JSX.Element) => {
     if (!person.profileUrl) {
@@ -880,6 +2049,130 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
     setThanksLoadState("idle");
   }, []);
 
+  const renderGameAccountCard = useCallback((account: GameAccountConnection) => {
+    const busyAction = gameAccountBusy?.provider === account.provider ? gameAccountBusy.action : null;
+    const isBusy = Boolean(gameAccountBusy);
+    const syncDateLabel = formatGameAccountSyncDate(account.syncDate);
+    const statusLabel =
+      account.status === "expired"
+        ? t("settings.accountConnections.statusExpired")
+        : account.status === "sync_error"
+          ? t("settings.accountConnections.statusSyncError")
+          : account.isConnected
+            ? t("settings.accountConnections.statusConnected")
+            : t("settings.accountConnections.statusNotConnected");
+    const statusClass =
+      account.status === "expired" || account.status === "sync_error"
+        ? "settings-inline-badge--updater-error"
+        : account.isConnected
+          ? "settings-inline-badge--codec-gpu"
+          : "settings-inline-badge--codec-testing";
+    const canLink = account.supportsLinking && (!account.isConnected || account.status === "expired");
+    const canUnlink = account.isConnected && account.status !== "expired";
+    const canSyncOnly = account.supportsSync && !account.supportsLinking && !account.isConnected;
+    const primaryAction: GameAccountBusyAction =
+      canUnlink ? "unlink" : canLink ? "link" : "resync";
+    const primaryLabel =
+      primaryAction === "unlink"
+        ? t("settings.accountConnections.unlink")
+        : primaryAction === "resync"
+          ? t("settings.accountConnections.sync")
+          : account.status === "expired"
+            ? t("settings.accountConnections.reconnect")
+            : t("settings.accountConnections.connect");
+    const primaryIcon =
+      primaryAction === "unlink"
+        ? <Trash2 size={15} />
+        : primaryAction === "resync"
+          ? <RefreshCcw size={15} />
+          : <ExternalLink size={15} />;
+    const hasPrimaryAction = canUnlink || canLink || canSyncOnly;
+
+    return (
+      <div key={account.provider} className="settings-game-account-card">
+        <div className="settings-game-account-main">
+          <div className="settings-game-account-icon">
+            {account.iconUrl ? (
+              <img src={account.iconUrl} alt="" loading="lazy" />
+            ) : (
+              <Users size={18} />
+            )}
+          </div>
+          <div className="settings-game-account-copy">
+            <div className="settings-game-account-title-row">
+              <h3>{account.label}</h3>
+              <span className={`settings-inline-badge settings-inline-badge--codec ${statusClass}`}>
+                {statusLabel}
+              </span>
+            </div>
+            <p>
+              {account.isConnected
+                ? account.displayName || t("settings.accountConnections.connectedAccount")
+                : account.supportsSync && !account.supportsLinking
+                  ? t("settings.accountConnections.syncOnlyDescription")
+                  : t("settings.accountConnections.notConnectedDescription")}
+            </p>
+            <div className="settings-game-account-features">
+              {account.supportsLinking && <span>{t("settings.accountConnections.ssoSupported")}</span>}
+              {account.supportsSync && <span>{t("settings.accountConnections.syncSupported")}</span>}
+              {account.isRequired && <span>{t("settings.accountConnections.requiredForSomeGames")}</span>}
+            </div>
+            {account.supportsSync && account.isConnected ? (
+              <p className="settings-game-account-sync">
+                {account.syncState === "SYNC_SUCCESS"
+                  ? t("settings.accountConnections.syncSummary", {
+                    count: account.syncedGames,
+                    date: syncDateLabel ?? t("settings.accountConnections.recently"),
+                  })
+                  : t("settings.accountConnections.syncState", {
+                    state: account.syncState ?? t("settings.accountConnections.syncUnknown"),
+                  })}
+              </p>
+            ) : null}
+          </div>
+        </div>
+        <div className="settings-game-account-actions">
+          {account.supportsSync && account.isConnected ? (
+            <button
+              type="button"
+              className="settings-chip settings-game-account-action"
+              disabled={isBusy}
+              onClick={() => {
+                void handleGameAccountAction(account, "resync");
+              }}
+            >
+              {busyAction === "resync" ? <Loader size={15} className="spin" /> : <RefreshCcw size={15} />}
+              {busyAction === "resync"
+                ? t("settings.accountConnections.resyncing")
+                : t("settings.accountConnections.resync")}
+            </button>
+          ) : null}
+          {hasPrimaryAction ? (
+            <button
+              type="button"
+              className={`settings-game-account-action ${
+                primaryAction === "unlink" ? "settings-delete-cache-btn" : "settings-chip"
+              }`}
+              disabled={isBusy}
+              onClick={() => {
+                void handleGameAccountAction(account, primaryAction);
+              }}
+            >
+              {busyAction === primaryAction ? <Loader size={15} className="spin" /> : primaryIcon}
+              {busyAction === primaryAction
+                ? primaryAction === "unlink"
+                  ? t("settings.accountConnections.unlinking")
+                  : primaryAction === "resync"
+                    ? t("settings.accountConnections.syncing")
+                    : t("settings.accountConnections.connecting")
+                : primaryLabel}
+            </button>
+          ) : null}
+        </div>
+      </div>
+    );
+  }, [gameAccountBusy, handleGameAccountAction, t]);
+
   const renderContributorCard = useCallback((contributor: ThankYouContributor) => {
     return renderPersonLink(
       contributor,
@@ -888,7 +2181,7 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
         <div className="settings-person-body">
           <div className="settings-person-title-row">
             <span className="settings-person-name">{contributor.login}</span>
-            <span className="settings-person-badge">Contributor</span>
+            <span className="settings-person-badge">{t("settings.thanks.contributor")}</span>
           </div>
           <div className="settings-person-meta">
             <span>{contributor.contributions} contribution{contributor.contributions === 1 ? "" : "s"}</span>
@@ -900,6 +2193,13 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
   }, [renderPersonLink]);
 
   const renderSupporterCard = useCallback((supporter: ThankYouSupporter) => {
+    const sourceLabel =
+      supporter.isPrivate || supporter.source === "private"
+        ? t("settings.thanks.privateSponsor")
+        : supporter.source === "custom"
+          ? t("settings.thanks.projectSponsor")
+          : t("settings.thanks.githubSponsors");
+
     return renderPersonLink(
       supporter,
       <>
@@ -913,16 +2213,16 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
         <div className="settings-person-body">
           <div className="settings-person-title-row">
             <span className="settings-person-name">{supporter.name || "Private"}</span>
-            <span className="settings-person-badge settings-person-badge--supporter">Supporter</span>
+            <span className="settings-person-badge settings-person-badge--supporter">{t("settings.thanks.supporter")}</span>
           </div>
           <div className="settings-person-meta">
-            <span>{supporter.isPrivate ? "Private sponsor" : "GitHub Sponsors"}</span>
+            <span>{sourceLabel}</span>
             {supporter.profileUrl && <ExternalLink size={14} />}
           </div>
         </div>
       </>,
     );
-  }, [renderPersonLink]);
+  }, [renderPersonLink, t]);
 
   const thanksTabContent = (
     <div className="settings-thanks-layout">
@@ -931,18 +2231,18 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
           <Heart size={18} />
         </div>
         <div className="settings-thanks-hero-copy">
-          <h2>Thanks for helping OpenNOW grow</h2>
-          <p>OpenNOW is shaped by contributors building the client and supporters backing the project behind the scenes.</p>
+          <h2>{t("settings.thanks.title")}</h2>
+          <p>{t("settings.thanks.subtitle")}</p>
         </div>
       </section>
 
       {thanksFetchError && (
         <section className="settings-section settings-thanks-status settings-thanks-status--error">
-          <strong>Community data unavailable</strong>
+          <strong>{t("settings.thanks.communityDataUnavailable")}</strong>
           <span>{thanksFetchError}</span>
           <div className="settings-thanks-actions">
             <button type="button" className="settings-chip settings-thanks-retry-btn" onClick={handleRetryThanks}>
-              Retry
+              {t("app.actions.retry")}
             </button>
           </div>
         </section>
@@ -953,14 +2253,14 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
           <div className="settings-section-header settings-section-header--thanks">
             <Users size={18} />
             <div>
-              <h2>Contributors</h2>
-              <p className="settings-section-subtitle">People improving OpenNOW in code, fixes, and features.</p>
+              <h2>{t("settings.thanks.contributorsTitle")}</h2>
+              <p className="settings-section-subtitle">{t("settings.thanks.contributorsSubtitle")}</p>
             </div>
           </div>
           {thanksLoadState === "loading" && !thanksData ? (
             <div className="settings-thanks-state">
               <Loader size={16} className="settings-loading-icon" />
-              <span>Loading contributors from GitHub…</span>
+              <span>{t("settings.thanks.loadingContributors")}</span>
             </div>
           ) : thanksContributors.length > 0 ? (
             <div className="settings-people-grid">
@@ -970,7 +2270,7 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
             </div>
           ) : (
             <div className="settings-thanks-state settings-thanks-state--muted">
-              <span>{thanksData?.contributorsError ?? "No contributors could be shown right now."}</span>
+              <span>{thanksData?.contributorsError ?? t("settings.thanks.noContributors")}</span>
             </div>
           )}
         </section>
@@ -979,14 +2279,14 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
           <div className="settings-section-header settings-section-header--thanks">
             <Heart size={18} />
             <div>
-              <h2>Supporters</h2>
-              <p className="settings-section-subtitle">Public GitHub Sponsors backing the work, plus private supporters when available.</p>
+              <h2>{t("settings.thanks.supportersTitle")}</h2>
+              <p className="settings-section-subtitle">{t("settings.thanks.supportersSubtitle")}</p>
             </div>
           </div>
           {thanksLoadState === "loading" && !thanksData ? (
             <div className="settings-thanks-state">
               <Loader size={16} className="settings-loading-icon" />
-              <span>Loading supporters from GitHub Sponsors…</span>
+              <span>{t("settings.thanks.loadingSupporters")}</span>
             </div>
           ) : thanksSupporters.length > 0 ? (
             <div className="settings-people-grid">
@@ -996,7 +2296,7 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
             </div>
           ) : (
             <div className="settings-thanks-state settings-thanks-state--muted">
-              <span>{thanksData?.supportersError ?? "No supporters could be shown right now."}</span>
+              <span>{thanksData?.supportersError ?? t("settings.thanks.noSupporters")}</span>
             </div>
           )}
         </section>
@@ -1004,60 +2304,374 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
 
       {hasThanksError && thanksData && (
         <section className="settings-section settings-thanks-status">
-          {thanksData.contributorsError && <span>Contributors: {thanksData.contributorsError}</span>}
-          {thanksData.supportersError && <span>Supporters: {thanksData.supportersError}</span>}
+          {thanksData.contributorsError && <span>{t("settings.thanks.contributorsTitle")}: {thanksData.contributorsError}</span>}
+          {thanksData.supportersError && <span>{t("settings.thanks.supportersTitle")}: {thanksData.supportersError}</span>}
         </section>
       )}
     </div>
   );
 
+
+  const normalizedSettingsSearch = settingsSearch.trim().toLowerCase();
+  const showAll = settingsSearchShowsAll;
+  const tokenMatchesWord = (token: string, word: string): boolean => token === word || word.startsWith(token);
+  const scopeMatchesSearch = (scopeId: SettingsSearchScopeId): boolean => {
+    if (!showAll) {
+      return true;
+    }
+    const terms = SETTINGS_SCOPE_SEARCH_TERMS[scopeId];
+    const searchTokens = normalizedSettingsSearch.split(/[^a-z0-9]+/).filter((token) => token.length > 0);
+    if (searchTokens.length === 0) {
+      return true;
+    }
+    const searchableWords = Array.from(
+      new Set(
+        terms
+          .join(" ")
+          .toLowerCase()
+          .split(/[^a-z0-9]+/)
+          .filter((word) => word.length > 0),
+      ),
+    );
+    return searchTokens.every((token) => searchableWords.some((word) => tokenMatchesWord(token, word)));
+  };
+
+  const showAccountStorage = showAll ? scopeMatchesSearch("account-storage") : activeSection === "account";
+  const showAccount = showAccountStorage;
+  const showStreamRegion = showAll ? scopeMatchesSearch("stream-region") : activeSection === "stream";
+  const showStreamVideo = showAll ? scopeMatchesSearch("stream-video") : activeSection === "stream";
+  const showStreamCodecDiagnostics = showAll ? scopeMatchesSearch("stream-codec-diagnostics") : activeSection === "stream";
+  const showStream = showStreamRegion || showStreamVideo || showStreamCodecDiagnostics;
+  const showNativeStreamer = showAll ? scopeMatchesSearch("native-streamer") : activeSection === "native-streamer";
+  const showGame = showAll ? scopeMatchesSearch("game") : activeSection === "game";
+  const showAudio = showAll ? scopeMatchesSearch("audio") : activeSection === "audio";
+  const showInput = showAll ? scopeMatchesSearch("input") : activeSection === "input";
+  const showInterface = showAll ? scopeMatchesSearch("interface") : activeSection === "interface";
+  const showAbout = showAll ? scopeMatchesSearch("about") : activeSection === "about";
+  const showThanks = showAll ? scopeMatchesSearch("thanks") : activeSection === "thanks";
+  const hasAnySearchMatches = showAccount || showStream || showNativeStreamer || showGame || showAudio || showInput || showInterface || showAbout || showThanks;
+  const shouldRenderSettingsSections = showAll || activeSection !== "thanks";
+
+  useEffect(() => {
+    if (!showAccount) {
+      return;
+    }
+
+    let cancelled = false;
+    void loadGameAccounts(() => cancelled);
+    return () => { cancelled = true; };
+  }, [loadGameAccounts, showAccount]);
+
+  const settingsNavGroups = useMemo<SettingsNavGroup[]>(() => [
+    {
+      label: "Account",
+      items: [
+        { id: "account", label: t("settings.sections.account"), icon: <Users size={15} /> },
+      ],
+    },
+    {
+      label: "Streaming",
+      items: [
+        { id: "stream", label: t("settings.sections.stream"), icon: <Wifi size={15} /> },
+        { id: "native-streamer", label: t("settings.sections.nativeStreamer"), icon: <Cpu size={15} /> },
+      ],
+    },
+    {
+      label: "Controls",
+      items: [
+        { id: "game", label: t("settings.sections.game"), icon: <Globe size={15} /> },
+        { id: "audio", label: t("settings.sections.audio"), icon: <Mic size={15} /> },
+        { id: "input", label: t("settings.sections.input"), icon: <Keyboard size={15} /> },
+      ],
+    },
+    {
+      label: "App",
+      items: [
+        { id: "interface", label: t("settings.sections.interface"), icon: <Monitor size={15} /> },
+        { id: "about", label: t("settings.sections.about"), icon: <Info size={15} /> },
+        { id: "thanks", label: t("settings.sections.thanks"), icon: <Heart size={15} /> },
+      ],
+    },
+  ], [t, locale]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === "Escape" && !nativeStreamerEnablePromptVisible && !zortosCommunityProxyPromptVisible) {
+        event.preventDefault();
+        onClose();
+      }
+    };
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [nativeStreamerEnablePromptVisible, onClose, zortosCommunityProxyPromptVisible]);
+
   return (
-    <div className="settings-page">
-      <header className="settings-header">
-        <h1>Settings</h1>
-        <div className={`settings-saved ${savedIndicator ? "visible" : ""}`}>
-          <Check size={14} />
-          Saved
-        </div>
-      </header>
-
-      <div className="settings-tab-row settings-chip-row" role="tablist" aria-label="Settings sections">
-        <button
-          type="button"
-          className={`settings-chip settings-tab-chip ${activeTab === "preferences" ? "active" : ""}`}
-          onClick={() => setActiveTab("preferences")}
-          role="tab"
-          aria-selected={activeTab === "preferences"}
-        >
-          Preferences
-        </button>
-        <button
-          type="button"
-          className={`settings-chip settings-tab-chip ${activeTab === "thanks" ? "active" : ""}`}
-          onClick={() => setActiveTab("thanks")}
-          role="tab"
-          aria-selected={activeTab === "thanks"}
-        >
-          Thanks
-        </button>
-      </div>
-
-      {activeTab === "preferences" ? (
-        <div className="settings-sections">
-          {/* ── Region ────────────────────────────────────── */}
-        <section className="settings-section">
-          <div className="settings-section-header">
-            <h2>Region</h2>
+    <>
+        <header className="settings-modal-header">
+          <h1>{t("settings.title")}</h1>
+          <div className="settings-modal-header-actions">
+            <div className={`settings-saved ${savedIndicator ? "visible" : ""}`}>
+              <Check size={14} />
+              {t("settings.saved")}
+            </div>
+            <button
+              type="button"
+              className="settings-modal-close"
+              onClick={onClose}
+              title={t("app.actions.close")}
+              aria-label={t("app.actions.close")}
+            >
+              <X size={18} />
+            </button>
           </div>
-          <div className="settings-rows">
-            {/* Region selector with search */}
-            <div className="region-selector">
+        </header>
+
+        <div className="settings-layout">
+
+      {/* ── Sidebar ───────────────────────────────────────── */}
+      <nav className="settings-sidebar">
+        <div className="settings-search-wrap">
+          <Search size={13} className="settings-search-icon" />
+          <input
+            type="text"
+            className="settings-search-input"
+            placeholder={t("settings.searchPlaceholder")}
+            value={settingsSearch}
+            onChange={e => setSettingsSearch(e.target.value)}
+          />
+          {settingsSearch && (
+            <button type="button" className="settings-search-clear" onClick={() => setSettingsSearch("")}>
+              <X size={11} />
+            </button>
+          )}
+        </div>
+        <div className="settings-nav">
+          {settingsNavGroups.map((group) => (
+            <div key={group.label} className="settings-nav-group">
+              <div className="settings-nav-group-label">{group.label}</div>
+              {group.items.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  className={`settings-nav-item ${!showAll && activeSection === item.id ? "active" : ""}`}
+                  onClick={() => { setActiveSection(item.id); setSettingsSearch(""); }}
+                >
+                  {item.icon}
+                  {item.label}
+                </button>
+              ))}
+            </div>
+          ))}
+        </div>
+      </nav>
+
+      {/* ── Content ───────────────────────────────────────── */}
+      <div ref={settingsContentRef} className="settings-content">
+        {showAll && !hasAnySearchMatches ? (
+          <section className="settings-section">
+            <div className="settings-thanks-state settings-thanks-state--muted">
+              <span>{t("settings.noMatches", { query: settingsSearch.trim() })}</span>
+            </div>
+          </section>
+        ) : (
+          <>
+            {showThanks && thanksTabContent}
+            {shouldRenderSettingsSections && (
+              <>
+            {showAccount && (
+              <>
+              <section className="settings-section settings-storage-section">
+                {showAll && <div className="settings-section-context">{t("settings.sections.account")}</div>}
+                <div className="settings-section-header settings-section-header--with-copy">
+                  <HardDrive size={18} />
+                  <div>
+                    <h2>{t("settings.persistentStorage.title")}</h2>
+                    <p className="settings-section-subtitle">{t("settings.persistentStorage.description")}</p>
+                  </div>
+                </div>
+                <div className="settings-storage-card">
+                  <div className="settings-storage-summary">
+                    <div className="settings-storage-headline">
+                      <HardDrive size={18} />
+                      {persistentStorage ? (
+                        persistentStorageUsedLabel && persistentStorageSizeLabel ? (
+                          <span>
+                            <strong>{persistentStorageUsedLabel}</strong>{" "}
+                            {t("settings.persistentStorage.usedOutOf", { total: persistentStorageSizeLabel })}
+                          </span>
+                        ) : (
+                          <span>{t("settings.persistentStorage.usageUnavailable")}</span>
+                        )
+                      ) : (
+                        <span>{persistentStorageUsageLabel}</span>
+                      )}
+                    </div>
+                    {persistentStorage ? (
+                      <span className="settings-inline-badge settings-inline-badge--codec settings-inline-badge--codec-gpu">
+                        {t("settings.persistentStorage.detected")}
+                      </span>
+                    ) : null}
+                  </div>
+
+                  {persistentStorageUsagePercent !== null ? (
+                    <div
+                      className="settings-storage-meter"
+                      role="progressbar"
+                      aria-label={t("settings.persistentStorage.meterLabel")}
+                      aria-valuemin={0}
+                      aria-valuemax={persistentStorageSizeGb ?? 100}
+                      aria-valuenow={persistentStorageUsedGb ?? 0}
+                    >
+                      <div
+                        className="settings-storage-meter-used"
+                        style={{ width: `${persistentStorageUsagePercent}%` }}
+                      />
+                    </div>
+                  ) : (
+                    <div className="settings-storage-meter settings-storage-meter--empty" />
+                  )}
+
+                  <div className="settings-storage-legend">
+                    <span>
+                      <span className="settings-storage-legend-dot settings-storage-legend-dot--used" />
+                      {persistentStorageUsedLabel
+                        ? t("settings.persistentStorage.usedLegend", { value: persistentStorageUsedLabel })
+                        : t("settings.persistentStorage.usedLegendUnavailable")}
+                    </span>
+                    <span>
+                      <span className="settings-storage-legend-dot settings-storage-legend-dot--available" />
+                      {persistentStorageRemainingLabel
+                        ? t("settings.persistentStorage.availableLegend", { value: persistentStorageRemainingLabel })
+                        : t("settings.persistentStorage.availableLegendUnavailable")}
+                    </span>
+                  </div>
+
+                  <div className="settings-storage-location-control">
+                    <label className="settings-storage-location-copy" htmlFor="persistent-storage-reset-region">
+                      <span>{t("settings.persistentStorage.locationTitle")}</span>
+                      <span>{storageResetTargetHint}</span>
+                    </label>
+                    <SelectDropdown
+                      id="persistent-storage-reset-region"
+                      className="settings-storage-select-dropdown"
+                      value=""
+                      options={[{ value: "", label: currentStorageLocationOptionLabel }]}
+                      onChange={() => {}}
+                      disabled
+                      ariaLabel={t("settings.persistentStorage.locationTitle")}
+                    />
+                  </div>
+
+                  <div className="settings-storage-footer">
+                    <div className="settings-storage-meta">
+                      {persistentStorageDetails.length > 0 ? (
+                        <span>{persistentStorageDetails.join(" / ")}</span>
+                      ) : null}
+                      <span>{t("settings.persistentStorage.resetHint")}</span>
+                      {storageResetMessage ? (
+                        <span className={`settings-storage-message settings-storage-message--${storageResetState}`}>
+                          {storageResetMessage}
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="settings-storage-actions">
+                      <button
+                        type="button"
+                        className="settings-export-logs-btn settings-storage-manager-btn"
+                        disabled={!persistentStorage || subscriptionLoading}
+                        onClick={() => {
+                          void handleResetPersistentStorage();
+                        }}
+                      >
+                        <ExternalLink size={16} />
+                        {t("settings.persistentStorage.openManager")}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </section>
+              <section className="settings-section settings-game-accounts-section">
+                {showAll && <div className="settings-section-context">{t("settings.sections.account")}</div>}
+                <div className="settings-section-header settings-section-header--with-copy settings-game-accounts-header">
+                  <Users size={18} />
+                  <div>
+                    <h2>{t("settings.accountConnections.title")}</h2>
+                    <p className="settings-section-subtitle">{t("settings.accountConnections.description")}</p>
+                  </div>
+                  <button
+                    type="button"
+                    className="settings-chip settings-game-account-refresh"
+                    disabled={gameAccountsLoading || Boolean(gameAccountBusy)}
+                    onClick={() => {
+                      void loadGameAccounts();
+                    }}
+                  >
+                    {gameAccountsLoading ? <Loader size={15} className="spin" /> : <RefreshCcw size={15} />}
+                    {t("settings.accountConnections.refresh")}
+                  </button>
+                </div>
+                <div className="settings-game-accounts-card">
+                  {gameAccountsError ? (
+                    <div className="settings-game-account-state settings-game-account-state--error">
+                      <AlertTriangle size={16} />
+                      <span>{gameAccountsError}</span>
+                    </div>
+                  ) : null}
+                  {gameAccountStatusMessage ? (
+                    <div className="settings-game-account-state settings-game-account-state--success">
+                      <Check size={16} />
+                      <span>{gameAccountStatusMessage}</span>
+                    </div>
+                  ) : null}
+                  {gameAccountsLoading ? (
+                    <div className="settings-game-account-state settings-game-account-state--muted">
+                      <Loader size={16} className="spin" />
+                      <span>{t("settings.accountConnections.loading")}</span>
+                    </div>
+                  ) : gameAccounts.length > 0 ? (
+                    <div className="settings-game-account-grid">
+                      {gameAccounts.map((account) => renderGameAccountCard(account))}
+                    </div>
+                  ) : (
+                    <div className="settings-game-account-state settings-game-account-state--muted">
+                      <Users size={16} />
+                      <span>{t("settings.accountConnections.empty")}</span>
+                    </div>
+                  )}
+                </div>
+              </section>
+              </>
+            )}
+            {/* ═══ STREAM ════════════════════════════════════ */}
+            {showStream && (
+              <>
+                {/* ── Region ── */}
+                {showStreamRegion && (
+                <section className="settings-section settings-section--dropdown">
+                  {showAll && <div className="settings-section-context">{t("settings.sections.stream")}</div>}
+                  <div className="settings-section-header">
+                    <MapPin size={18} />
+                    <h2>{t("settings.region.title")}</h2>
+                  </div>
+                  <div className="settings-rows">
+                    <div className="settings-row settings-row--column settings-row--region">
+                    <div className="region-selector">
               <button
                 className={`region-selected ${regionDropdownOpen ? "open" : ""}`}
                 onClick={() => setRegionDropdownOpen(!regionDropdownOpen)}
                 type="button"
               >
-                <span className="region-selected-name">{selectedRegionName}</span>
+                <span className="region-selected-leading">
+                  <Globe size={15} className="region-selected-icon" />
+                  <span className="region-selected-name">{selectedRegionName || t("settings.region.autoBest")}</span>
+                </span>
                 {!settings.region && bestRegionUrl && (
                   (() => {
                     const bestRegion = regions.find(r => r.url === bestRegionUrl);
@@ -1082,9 +2696,9 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
                         </span>
                       );
                     } else if (pingValue === null) {
-                      return <span className="region-selected-ping-unavailable">Failed</span>;
+	                      return <span className="region-selected-ping-unavailable">{t("app.status.failed")}</span>;
                     } else if (isPinging) {
-                      return <span className="region-selected-ping-unavailable">Testing...</span>;
+                      return <span className="region-selected-ping-unavailable">{t("app.status.testing")}</span>;
                     }
                     return null;
                   })()
@@ -1102,7 +2716,7 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
                       <input
                         type="text"
                         className="region-dropdown-search-input"
-                        placeholder="Search regions..."
+                        placeholder={t("settings.region.searchPlaceholder")}
                         value={regionSearch}
                         onChange={(e) => setRegionSearch(e.target.value)}
                         autoFocus
@@ -1118,7 +2732,7 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
                       onClick={runPingTest}
                       disabled={isPinging}
                       type="button"
-                      title="Refresh ping"
+                      title={t("settings.region.refreshPing")}
                     >
                       {isPinging ? (
                         <Loader size={14} className="spin" />
@@ -1140,7 +2754,7 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
                     >
                       <Globe size={14} />
                       <div className="region-auto-best-info">
-                        <span>Auto (Best)</span>
+                        <span>{t("settings.region.autoBest")}</span>
                         {bestRegionUrl && (() => {
                           const bestRegion = regions.find(r => r.url === bestRegionUrl);
                           const bestPing = pingResults.get(bestRegionUrl);
@@ -1172,7 +2786,7 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
                         <span className="region-name-with-badge">
                           {region.name}
                           {region.url === bestRegionUrl && (
-                            <span className="region-best-badge">Best</span>
+                            <span className="region-best-badge">{t("app.labels.best")}</span>
                           )}
                         </span>
                         <span className="region-ping">
@@ -1184,7 +2798,7 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
                               if (pingValue === undefined) {
                                 return <span className="region-ping-unavailable">-</span>;
                               } else if (pingValue === null) {
-                                return <span className="region-ping-error">Failed</span>;
+                                return <span className="region-ping-error">{t("app.status.failed")}</span>;
                               } else {
                                 return (
                                   <span className={`region-ping-value ${pingValue <= 50 ? 'good' : pingValue <= 100 ? 'medium' : 'poor'}`}>
@@ -1200,1187 +2814,2005 @@ export function SettingsPage({ settings, regions, onSettingChange, codecResults,
                     ))}
 
                     {filteredRegions.length === 0 && regions.length > 0 && (
-                      <div className="region-dropdown-empty">No regions match &ldquo;{regionSearch}&rdquo;</div>
+                      <div className="region-dropdown-empty">{t("settings.region.noRegionsMatch", { query: regionSearch })}</div>
                     )}
                   </div>
                 </div>
               )}
-            </div>
-          </div>
-        </section>
-
-        {/* ── Game ───────────────────────────────────────── */}
-        <section className="settings-section">
-          <div className="settings-section-header">
-            <h2>Game</h2>
-          </div>
-          <div className="settings-rows">
-            {/* Game Language */}
-            <div className="settings-row">
-              <label className="settings-label">
-                In-Game Language
-                <span className="settings-hint">Language for in-game menus, subtitles, and audio (where supported)</span>
-              </label>
-              <div className="settings-dropdown" ref={gameLanguageDropdownRef}>
-                <button
-                  type="button"
-                  className={`settings-dropdown-selected ${gameLanguageDropdownOpen ? "open" : ""}`}
-                  onClick={() => setGameLanguageDropdownOpen((open) => !open)}
-                >
-                  <span className="settings-dropdown-selected-name">{selectedGameLanguageName}</span>
-                  <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" className={`settings-dropdown-chevron ${gameLanguageDropdownOpen ? "flipped" : ""}`}>
-                    <path d="M4.47 5.97a.75.75 0 0 1 1.06 0L8 8.44l2.47-2.47a.75.75 0 1 1 1.06 1.06l-3 3a.75.75 0 0 1-1.06 0l-3-3a.75.75 0 0 1 0-1.06Z" />
-                  </svg>
-                </button>
-                {gameLanguageDropdownOpen && (
-                  <div className="settings-dropdown-menu settings-dropdown-menu--tall">
-                    {gameLanguageOptions.map((option) => (
-                      <button
-                        key={option.value}
-                        type="button"
-                        className={`settings-dropdown-item ${settings.gameLanguage === option.value ? "active" : ""}`}
-                        onClick={() => {
-                          handleChange("gameLanguage", option.value);
-                          setGameLanguageDropdownOpen(false);
-                        }}
-                      >
-                        <span>{option.label}</span>
-                        {settings.gameLanguage === option.value && <Check size={14} className="settings-dropdown-check" />}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-        </section>
-
-        {/* ── Video ──────────────────────────────────────── */}
-        <section className="settings-section">
-          <div className="settings-section-header">
-            <h2>Video</h2>
-          </div>
-
-          <div className="settings-rows">
-            {/* Aspect Ratio — static chips */}
-            <div className="settings-row">
-              <label className="settings-label">Aspect Ratio</label>
-              <div className="settings-chip-row">
-                {STATIC_ASPECT_RATIO_PRESETS.map((preset) => (
-                  <button
-                    key={preset.value}
-                    className={`settings-chip ${settings.aspectRatio === preset.value ? "active" : ""}`}
-                    onClick={() => {
-                      handleChange("aspectRatio", preset.value as any);
-                    }}
-                  >
-                    <span>{preset.label}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Resolution — dynamic or static chips */}
-            <div className="settings-row settings-row--column">
-              <label className="settings-label">
-                Resolution
-                {subscriptionLoading && <Loader size={12} className="settings-loading-icon" />}
-              </label>
-
-              {hasDynamic ? (
-                <div className="settings-preset-groups">
-                  {resolutionGroups.map((group) => (
-                    <div key={group.category} className="settings-preset-group">
-                      <span className="settings-preset-group-label">{group.category}</span>
-                      <div className="settings-chip-row">
-                        {group.resolutions.map((res) => (
-                          <button
-                            key={res.value}
-                            className={`settings-chip ${settings.resolution === res.value ? "active" : ""}`}
-                            onClick={() => {
-                              handleChange("resolution", res.value);
-                            }}
-                          >
-                            <span>{res.label}</span>
-                          </button>
-                        ))}
-                      </div>
                     </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="settings-chip-row">
-                  {STATIC_RESOLUTION_PRESETS.map((preset) => (
-                    <button
-                      key={preset.value}
-                      className={`settings-chip ${settings.resolution === preset.value ? "active" : ""}`}
-                      onClick={() => {
-                        handleChange("resolution", preset.value);
-                      }}
-                    >
-                      <span>{preset.label}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* FPS — dynamic or static chips */}
-            <div className="settings-row">
-              <label className="settings-label">FPS</label>
-              <div className="settings-chip-row">
-                {(hasDynamic ? dynamicFpsOptions.map((v) => ({ value: v })) : STATIC_FPS_PRESETS).map(
-                  (preset) => (
-                    <button
-                      key={preset.value}
-                      className={`settings-chip ${settings.fps === preset.value ? "active" : ""}`}
-                      onClick={() => {
-                        handleChange("fps", preset.value);
-                      }}
-                    >
-                      <span>{preset.value}</span>
-                    </button>
-                  )
-                )}
-              </div>
-            </div>
-
-            {/* Codec */}
-            <div className="settings-row">
-              <label className="settings-label">Codec</label>
-              <div className="settings-chip-row">
-                {codecOptions.map((codec) => {
-                  const badgeState = getCodecDecodeBadgeState(codec, codecResults, codecTesting);
-                  return (
-                    <button
-                      key={codec}
-                      className={`settings-chip settings-chip--codec ${settings.codec === codec ? "active" : ""}`}
-                      onClick={() => handleCodecChange(codec)}
-                    >
-                      <span>{codec}</span>
-                      {badgeState && (
-                        <span
-                          className={`settings-inline-badge settings-inline-badge--codec settings-inline-badge--codec-${badgeState}`}
-                        >
-                          {badgeState === "gpu" ? "GPU" : badgeState === "cpu" ? "CPU" : "Testing…"}
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div className="settings-row settings-row--column">
-              <label className="settings-label">Decoder</label>
-              <div className="settings-chip-row">
-                {accelerationOptions.map((option) => (
-                  <button
-                    key={`decoder-${option.value}`}
-                    className={`settings-chip ${settings.decoderPreference === option.value ? "active" : ""}`}
-                    onClick={() => handleChange("decoderPreference", option.value)}
-                  >
-                    {option.label}
-                  </button>
-                ))}
-              </div>
-              <span className="settings-subtle-hint">Applies after app restart.</span>
-            </div>
-
-            <div className="settings-row settings-row--column">
-              <label className="settings-label">Encoder</label>
-              <div className="settings-chip-row">
-                {accelerationOptions.map((option) => (
-                  <button
-                    key={`encoder-${option.value}`}
-                    className={`settings-chip ${settings.encoderPreference === option.value ? "active" : ""}`}
-                    onClick={() => handleChange("encoderPreference", option.value)}
-                  >
-                    {option.label}
-                  </button>
-                ))}
-              </div>
-              <span className="settings-subtle-hint">Applies after app restart.</span>
-            </div>
-
-            {/* Color Quality */}
-            <div className="settings-row settings-row--column">
-              <label className="settings-label">Color Depth</label>
-              <div className="settings-chip-row">
-                {colorQualityOptions.map((opt) => {
-                  const needsHevc = colorQualityRequiresHevc(opt.value);
-                  return (
-                    <button
-                      key={opt.value}
-                      className={`settings-chip ${settings.colorQuality === opt.value ? "active" : ""}`}
-                      onClick={() => handleColorQualityChange(opt.value)}
-                      title={`${opt.description}${needsHevc ? " — requires H265/AV1" : ""}`}
-                    >
-                      <span>{opt.label}</span>
-                    </button>
-                  );
-                })}
-              </div>
-              {colorQualityRequiresHevc(settings.colorQuality) && settings.codec === "H264" && (
-                <span className="settings-input-hint">This mode requires H265 or AV1. Codec will be auto-switched.</span>
-              )}
-            </div>
-
-            {/* Bitrate slider */}
-            <div className="settings-row settings-row--column">
-              <div className="settings-row-top">
-                <label className="settings-label">Max Bitrate</label>
-                <span className="settings-value-badge">{settings.maxBitrateMbps} Mbps</span>
-              </div>
-              <input
-                type="range"
-                className="settings-slider"
-                min={5}
-                max={150}
-                step={5}
-                value={settings.maxBitrateMbps}
-                onChange={(e) => handleChange("maxBitrateMbps", parseInt(e.target.value, 10))}
-              />
-            </div>
-
-            <div className="settings-row settings-row--column">
-              <div className="settings-row-top settings-row-top--compact">
-                <label className="settings-label settings-label--wrap">
-                  <span className="settings-label-title">
-                    Experimental L4S Request
-                    <span className="settings-inline-badge settings-inline-badge--beta">Beta</span>
-                  </span>
-                </label>
-                <label className="settings-toggle">
-                  <input
-                    type="checkbox"
-                    checked={settings.enableL4S}
-                    onChange={(e) => handleChange("enableL4S", e.target.checked)}
-                  />
-                  <span className="settings-toggle-track" />
-                </label>
-              </div>
-              <span className="settings-subtle-hint">
-                Request the GeForce NOW L4S streaming feature on newly created sessions. This does not change browser WebRTC behavior by itself and may be ignored by the service or network path.
-              </span>
-            </div>
-
-            <div className="settings-row settings-row--column">
-              <div className="settings-row-top settings-row-top--compact">
-                <label className="settings-label settings-label--wrap">
-                  <span className="settings-label-title">
-                    Cloud G-Sync / Variable Refresh Rate
-                    <span className="settings-inline-badge settings-inline-badge--beta">Beta</span>
-                  </span>
-                </label>
-                <label className="settings-toggle">
-                  <input
-                    type="checkbox"
-                    checked={settings.enableCloudGsync}
-                    onChange={(e) => handleChange("enableCloudGsync", e.target.checked)}
-                  />
-                  <span className="settings-toggle-track" />
-                </label>
-              </div>
-              <span className="settings-subtle-hint">
-                Request Cloud G-Sync (VRR) on newly created sessions. Smooths frame pacing on variable frame rate streams. Requires a VRR-capable display. The service may ignore this request depending on your subscription tier.
-              </span>
-            </div>
-
-          </div>
-        </section>
-
-        {/* ── Codec Diagnostics ──────────────────────────── */}
-        <section className="settings-section">
-          <div className="settings-section-header">
-            <h2>Codec Diagnostics</h2>
-          </div>
-          <div className="settings-rows">
-            <div className="settings-row codec-test-row">
-              <label className="settings-label codec-test-description">
-                Test which codecs your system can decode/encode and whether they use GPU or CPU
-              </label>
-              <button
-                className="codec-test-btn"
-                onClick={() => {
-                  void onRunCodecTest();
-                }}
-                disabled={codecTesting}
-                type="button"
-              >
-                {codecTesting ? (
-                  <>
-                    <Loader size={16} className="settings-loading-icon" />
-                    Testing...
-                  </>
-                ) : (
-                  <>
-                    <Zap size={16} />
-                    {codecResults ? "Retest" : "Test Codecs"}
-                  </>
-                )}
-              </button>
-            </div>
-
-            {codecTestOpen && codecResults && (
-              <div className="codec-results">
-                {codecResults.map((result) => (
-                  <div key={result.codec} className="codec-result-card">
-                    <div className="codec-result-header">
-                      <span className="codec-result-name">{result.codec}</span>
-                      <span className={`codec-result-badge ${result.webrtcSupported ? "supported" : "unsupported"}`}>
-                        {result.webrtcSupported ? "WebRTC Ready" : "Not in WebRTC"}
-                      </span>
                     </div>
-
-                    <div className="codec-result-rows">
-                      {/* Decode row */}
-                      <div className="codec-result-row">
-                        <span className="codec-result-direction">Decode</span>
-                        <span className={`codec-result-status ${result.decodeSupported ? (result.hwAccelerated ? "hw" : "sw") : "none"}`}>
-                          {result.decodeSupported
-                            ? result.hwAccelerated
-                              ? "GPU"
-                              : "CPU"
-                            : "No"}
-                        </span>
-                        <span className="codec-result-via">{result.decodeVia}</span>
-                      </div>
-
-                      {/* Encode row */}
-                      <div className="codec-result-row">
-                        <span className="codec-result-direction">Encode</span>
-                        <span className={`codec-result-status ${result.encodeSupported ? (result.encodeHwAccelerated ? "hw" : "sw") : "none"}`}>
-                          {result.encodeSupported
-                            ? result.encodeHwAccelerated
-                              ? "GPU"
-                              : "CPU"
-                            : "No"}
-                        </span>
-                        <span className="codec-result-via">{result.encodeVia}</span>
-                      </div>
-                    </div>
-
-                    {/* Profiles */}
-                    {result.profiles.length > 0 && (
-                      <div className="codec-result-profiles">
-                        <span className="codec-result-profiles-label">Profiles:</span>
-                        <div className="codec-result-profiles-list">
-                          {result.profiles.map((p, i) => (
-                            <code key={i} className="codec-result-profile">{p}</code>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                ))}
               </div>
-            )}
-          </div>
-        </section>
+            </section>
 
-        {/* ── Audio / Microphone ───────────────────────── */}
-        <section className="settings-section">
-          <div className="settings-section-header">
-            <h2>Audio</h2>
-          </div>
-          <div className="settings-rows">
-            {/* Microphone Mode */}
-            <div className="settings-row">
-              <label className="settings-label">
-                Microphone
-                <span className="settings-hint">Enable voice chat during streaming</span>
-              </label>
-              <div className="settings-dropdown" ref={microphoneModeDropdownRef}>
-                <button
-                  type="button"
-                  className={`settings-dropdown-selected ${microphoneModeDropdownOpen ? "open" : ""}`}
-                  onClick={() => {
-                    setMicrophoneModeDropdownOpen((open) => !open);
-                    setMicrophoneDeviceDropdownOpen(false);
-                  }}
-                >
-                  <span className="settings-dropdown-selected-name">{selectedMicrophoneModeName}</span>
-                  <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" className={`settings-dropdown-chevron ${microphoneModeDropdownOpen ? "flipped" : ""}`}>
-                    <path d="M4.47 5.97a.75.75 0 0 1 1.06 0L8 8.44l2.47-2.47a.75.75 0 1 1 1.06 1.06l-3 3a.75.75 0 0 1-1.06 0l-3-3a.75.75 0 0 1 0-1.06Z" />
-                  </svg>
-                </button>
-                {microphoneModeDropdownOpen && (
-                  <div className="settings-dropdown-menu">
-                    {microphoneModeOptions.map((option) => (
-                      <button
-                        key={option.value}
-                        type="button"
-                        className={`settings-dropdown-item ${settings.microphoneMode === option.value ? "active" : ""}`}
-                        onClick={() => {
-                          handleChange("microphoneMode", option.value);
-                          setMicrophoneModeDropdownOpen(false);
-                        }}
-                      >
-                        <span>{option.label}</span>
-                        {settings.microphoneMode === option.value && <Check size={14} className="settings-dropdown-check" />}
-                      </button>
-                    ))}
-                  </div>
                 )}
+            {showStreamVideo && (
+            <section className="settings-section">
+              {showAll && <div className="settings-section-context">{t("settings.sections.stream")}</div>}
+              <div className="settings-section-header">
+                <Monitor size={18} />
+                <h2>{t("settings.video.title")}</h2>
               </div>
-            </div>
-
-            {/* Microphone Device (only shown when mic is enabled) */}
-            {settings.microphoneMode !== "disabled" && (
-              <div className="settings-row">
-                <label className="settings-label">
-                  <div className="flex items-center gap-2">
-                    <Mic size={14} />
-                    Microphone Device
-                  </div>
-                  <span className="settings-hint">Select input device for voice chat</span>
-                </label>
-                <div className="settings-mic-device-wrap">
-                  <div className="settings-dropdown" ref={microphoneDeviceDropdownRef}>
+              <div className="settings-rows">
+                {/* Resolution — grouped dropdown */}
+                <div className="settings-row settings-row--column">
+                  <label className="settings-label settings-label--with-icon">
+                    <ScanLine size={15} className="settings-label-icon" />
+                    {t("settings.video.resolution")}
+                    {subscriptionLoading && <Loader size={12} className="settings-loading-icon" />}
+                  </label>
+                  <div className="settings-dropdown settings-resolution-dropdown" ref={resolutionDropdownRef}>
                     <button
                       type="button"
-                      className={`settings-dropdown-selected ${microphoneDeviceDropdownOpen ? "open" : ""}`}
-                      onClick={() => {
-                        if (microphoneDevices.length === 0) return;
-                        setMicrophoneDeviceDropdownOpen((open) => !open);
-                        setMicrophoneModeDropdownOpen(false);
-                      }}
-                      disabled={microphoneDevices.length === 0}
+                      className={`settings-dropdown-selected ${resolutionDropdownOpen ? "open" : ""}`}
+                      onClick={() => setResolutionDropdownOpen(o => !o)}
                     >
-                      <span className="settings-dropdown-selected-name">{selectedMicrophoneDeviceName}</span>
-                      <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" className={`settings-dropdown-chevron ${microphoneDeviceDropdownOpen ? "flipped" : ""}`}>
+                      <span className="settings-dropdown-selected-name">{selectedResolutionLabel}</span>
+                      <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" className={`settings-dropdown-chevron ${resolutionDropdownOpen ? "flipped" : ""}`}>
                         <path d="M4.47 5.97a.75.75 0 0 1 1.06 0L8 8.44l2.47-2.47a.75.75 0 1 1 1.06 1.06l-3 3a.75.75 0 0 1-1.06 0l-3-3a.75.75 0 0 1 0-1.06Z" />
                       </svg>
                     </button>
-                    {microphoneDeviceDropdownOpen && (
-                      <div className="settings-dropdown-menu settings-dropdown-menu--tall">
+                    {resolutionDropdownOpen && (
+                      <div className="settings-dropdown-menu settings-dropdown-menu--grouped">
+                        {(useEntitledStreamOptions ? resolutionGroups : [{ category: "All", resolutions: STATIC_RESOLUTION_PRESETS.map(p => ({ ...p, width: 0, height: 0 })) }]).map(group => (
+                          <div key={group.category} className="settings-dropdown-group">
+                            <div className="settings-dropdown-group-label">{group.category}</div>
+                            {group.resolutions.map(res => (
+                              <button
+                                key={res.value}
+                                type="button"
+                                className={`settings-dropdown-item ${settings.resolution === res.value ? "active" : ""}`}
+                                onClick={() => { handleResolutionChange(res.value); setResolutionDropdownOpen(false); }}
+                              >
+                                <span>{res.label}</span>
+                                {settings.resolution === res.value && <Check size={14} className="settings-dropdown-check" />}
+                              </button>
+                            ))}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* FPS — dynamic or static chips */}
+                <div className="settings-row">
+                  <label className="settings-label settings-label--with-icon">
+                    <Gauge size={15} className="settings-label-icon" />
+                    {t("settings.video.fps")}
+                  </label>
+                  <div className="settings-chip-row">
+                    {(useEntitledStreamOptions ? dynamicFpsOptions.map((v) => ({ value: v })) : STATIC_FPS_PRESETS).map((preset) => (
+                      <button
+                        key={preset.value}
+                        className={`settings-chip ${settings.fps === preset.value ? "active" : ""}`}
+                        onClick={() => { handleChange("fps", preset.value); }}
+                      >
+                        <span>{preset.value}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Codec */}
+                <div className="settings-row">
+                  <label className="settings-label settings-label--with-icon">
+                    <Film size={15} className="settings-label-icon" />
+                    {t("settings.video.codec")}
+                  </label>
+                  <div className="settings-chip-row">
+                    {codecOptions.map((codec) => {
+                      const badgeState = getCodecDecodeBadgeState(codec, codecResults, codecTesting);
+                      return (
+                        <button
+                          key={codec}
+                          className={`settings-chip settings-chip--codec ${settings.codec === codec ? "active" : ""}`}
+                          onClick={() => handleCodecChange(codec)}
+                        >
+                          <span>{codec}</span>
+                          {badgeState && (
+                            <span className={`settings-inline-badge settings-inline-badge--codec settings-inline-badge--codec-${badgeState}`}>
+                              {badgeState === "gpu" ? t("settings.video.gpu") : badgeState === "cpu" ? t("settings.video.cpu") : t("settings.video.testing")}
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Color Quality */}
+                <div className="settings-row settings-row--column">
+                  <label className="settings-label settings-label--with-icon">
+                    <SlidersHorizontal size={15} className="settings-label-icon" />
+                    {t("settings.video.colorDepth")}
+                  </label>
+                  <div className="settings-chip-row">
+                    {colorQualityOptions.map((opt) => {
+                      const needsHevc = colorQualityRequiresHevc(opt.value);
+                      const colorDescription = opt.value === "8bit_420"
+                        ? t("settings.colorQuality.mostCompatible")
+                        : opt.value === "8bit_444"
+                          ? t("settings.colorQuality.sharperChroma")
+                          : opt.value === "10bit_420"
+                            ? t("settings.colorQuality.higherBitDepth")
+                            : t("settings.colorQuality.highestChromaAndBitDepth");
+                      return (
+                        <button
+                          key={opt.value}
+                          className={`settings-chip ${settings.colorQuality === opt.value ? "active" : ""}`}
+                          onClick={() => handleColorQualityChange(opt.value)}
+                          title={needsHevc ? t("settings.colorQuality.requiresH265OrAv1Title", { description: colorDescription }) : colorDescription}
+                        >
+                          <span>{opt.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {colorQualityRequiresHevc(settings.colorQuality) && settings.codec === "H264" && (
+                    <span className="settings-input-hint">{t("settings.video.requiresH265OrAv1")}</span>
+                  )}
+                </div>
+
+                {/* Bitrate slider */}
+                <div className="settings-row settings-row--column">
+                  <div className="settings-row-top">
+                    <label className="settings-label settings-label--with-icon">
+                      <HardDrive size={15} className="settings-label-icon" />
+                      {t("settings.video.maxBitrate")}
+                    </label>
+                    <span className="settings-value-badge">{settings.maxBitrateMbps} Mbps</span>
+                  </div>
+                  <input
+                    type="range"
+                    className="settings-slider"
+                    min={5}
+                    max={150}
+                    step={5}
+                    value={settings.maxBitrateMbps}
+                    onChange={(e) => handleChange("maxBitrateMbps", parseInt(e.target.value, 10))}
+                  />
+                </div>
+
+                <div className="settings-row settings-row--column">
+                  <div className="settings-row-top">
+                    <label className="settings-label">{t("settings.video.recordingBitrate")}</label>
+                    <span className="settings-value-badge">
+                      {settings.recordingBitrateMbps === null
+                        ? t("app.labels.auto")
+                        : `${settings.recordingBitrateMbps} Mbps`}
+                    </span>
+                  </div>
+                  <div className="settings-chip-row">
+                    <button
+                      type="button"
+                      className={`settings-chip ${settings.recordingBitrateMbps === null ? "active" : ""}`}
+                      onClick={() => handleChange("recordingBitrateMbps", null)}
+                    >
+                      <span>{t("app.labels.auto")}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className={`settings-chip ${settings.recordingBitrateMbps !== null ? "active" : ""}`}
+                      onClick={() => handleChange("recordingBitrateMbps", settings.recordingBitrateMbps ?? 75)}
+                    >
+                      <span>{t("settings.video.customBitrate")}</span>
+                    </button>
+                  </div>
+                  <input
+                    type="range"
+                    className="settings-slider"
+                    min={5}
+                    max={200}
+                    step={5}
+                    value={settings.recordingBitrateMbps ?? 75}
+                    disabled={settings.recordingBitrateMbps === null}
+                    onChange={(e) => handleChange("recordingBitrateMbps", parseInt(e.target.value, 10))}
+                  />
+                  <span className="settings-subtle-hint">{t("settings.video.recordingBitrateHint")}</span>
+                </div>
+
+                <div className="settings-row settings-row--column">
+                  <div className="settings-row-top settings-row-top--compact">
+                    <label className="settings-label settings-label--wrap">
+                      <span className="settings-label-title">
+                        {t("settings.video.sessionProxy")}
+                        <span className="settings-inline-badge settings-inline-badge--beta">{t("app.labels.beta")}</span>
+                      </span>
+                    </label>
+                    <label className="settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={settings.sessionProxyEnabled}
+                        onChange={(e) => handleChange("sessionProxyEnabled", e.target.checked)}
+                      />
+                      <span className="settings-toggle-track" />
+                    </label>
+                  </div>
+                  <span className="settings-subtle-hint">
+                    {t("settings.video.sessionProxyHint")}
+                  </span>
+                  <div className="settings-community-proxy-row">
+                    {isUsingZortosCommunityProxy ? (
+                      <span className="settings-inline-badge settings-inline-badge--beta">
+                        {t("settings.video.zortosCommunityProxy.enabledBadge")}
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        className="settings-chip settings-community-proxy-btn"
+                        onClick={openZortosCommunityProxyPrompt}
+                      >
+                        <Heart size={14} />
+                        <span>{t("settings.video.zortosCommunityProxy.useButton")}</span>
+                      </button>
+                    )}
+                  </div>
+                  {settings.sessionProxyEnabled && (
+                    <input
+                      type="text"
+                      className="settings-text-input"
+                      placeholder="http://127.0.0.1:8080"
+                      value={settings.sessionProxyUrl}
+                      onChange={(e) => handleChange("sessionProxyUrl", e.target.value)}
+                    />
+                  )}
+                </div>
+
+                <div className="settings-row settings-row--column">
+                  <div className="settings-row-top settings-row-top--compact">
+                    <label className="settings-label settings-label--wrap">
+                      <span className="settings-label-title">
+                        {t("settings.video.experimentalL4SRequest")}
+                        <span className="settings-inline-badge settings-inline-badge--beta">{t("app.labels.beta")}</span>
+                      </span>
+                    </label>
+                    <label className="settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={settings.enableL4S}
+                        onChange={(e) => handleChange("enableL4S", e.target.checked)}
+                      />
+                      <span className="settings-toggle-track" />
+                    </label>
+                  </div>
+                  <span className="settings-subtle-hint">
+                    {t("settings.video.experimentalL4SRequestHint")}
+                  </span>
+                </div>
+
+                <div className="settings-row settings-row--column">
+                  <div className="settings-row-top settings-row-top--compact">
+                    <label className="settings-label settings-label--wrap">
+                      <span className="settings-label-title">
+                        {t("settings.video.launchInConsoleMode")}
+                      </span>
+                    </label>
+                    <label className="settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={settings.launchInConsoleMode}
+                        onChange={(e) => handleChange("launchInConsoleMode", e.target.checked)}
+                      />
+                      <span className="settings-toggle-track" />
+                    </label>
+                  </div>
+                  <span className="settings-subtle-hint">
+                    {t("settings.video.launchInConsoleModeHint")}
+                  </span>
+                </div>
+
+                {/* Video filters (client-side GPU shaders) */}
+                <div className="settings-row settings-row--column">
+                  <div className="settings-row-top settings-row-top--compact">
+                    <label className="settings-label settings-label--wrap">
+                      <span className="settings-label-title">
+                        <Sparkles size={15} className="settings-label-icon" />
+                        {t("settings.videoFilters.title")}
+                        <span className="settings-inline-badge settings-inline-badge--beta">{t("app.labels.experimental")}</span>
+                      </span>
+                    </label>
+                    <label className="settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={settings.videoShader.enabled}
+                        onChange={(e) => handleChange("videoShader", { ...settings.videoShader, enabled: e.target.checked })}
+                      />
+                      <span className="settings-toggle-track" />
+                    </label>
+                  </div>
+                  <span className="settings-subtle-hint">
+                    {settings.streamClientMode === "native"
+                      ? t("settings.videoFilters.nativeUnavailable")
+                      : t("settings.videoFilters.hint")}
+                  </span>
+                  {settings.videoShader.enabled && (
+                    <>
+                      {([
+                        { key: "sharpen", labelKey: "settings.videoFilters.sharpen", min: 0, max: 100 },
+                        { key: "saturation", labelKey: "settings.videoFilters.saturation", min: 0, max: 200 },
+                        { key: "contrast", labelKey: "settings.videoFilters.contrast", min: 50, max: 150 },
+                        { key: "brightness", labelKey: "settings.videoFilters.brightness", min: 50, max: 150 },
+                        { key: "vibrance", labelKey: "settings.videoFilters.vibrance", min: 0, max: 100 },
+                        { key: "filmGrain", labelKey: "settings.videoFilters.filmGrain", min: 0, max: 100 },
+                      ] as const).map((control) => (
+                        <div key={control.key} className="settings-row settings-row--column">
+                          <div className="settings-row-top">
+                            <label className="settings-label">{t(control.labelKey)}</label>
+                            <span className="settings-value-badge">{settings.videoShader[control.key]}%</span>
+                          </div>
+                          <input
+                            type="range"
+                            className="settings-slider"
+                            min={control.min}
+                            max={control.max}
+                            step={1}
+                            value={settings.videoShader[control.key]}
+                            onChange={(e) => {
+                              const next = parseInt(e.target.value, 10);
+                              if (Number.isFinite(next)) {
+                                handleChange("videoShader", { ...settings.videoShader, [control.key]: next });
+                              }
+                            }}
+                          />
+                        </div>
+                      ))}
+                      <div className="settings-chip-row">
                         <button
                           type="button"
-                          className={`settings-dropdown-item ${settings.microphoneDeviceId === "" ? "active" : ""}`}
+                          className="settings-chip"
+                          onClick={() => handleChange("videoShader", { ...DEFAULT_VIDEO_SHADER_SETTINGS, enabled: true })}
+                        >
+                          <span>{t("settings.videoFilters.reset")}</span>
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              </div>
+            </section>
+
+            )}
+            {(showStreamVideo || showStreamCodecDiagnostics) && (
+            <div className="settings-advanced-wrap">
+              <button
+                type="button"
+                className="settings-advanced-toggle"
+                onClick={() => setCodecAdvancedOpen(v => !v)}
+              >
+                <SlidersHorizontal size={14} />
+                Advanced
+                <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor" className={`settings-advanced-chevron ${codecAdvancedOpen ? "flipped" : ""}`}>
+                  <path d="M4.47 5.97a.75.75 0 0 1 1.06 0L8 8.44l2.47-2.47a.75.75 0 1 1 1.06 1.06l-3 3a.75.75 0 0 1-1.06 0l-3-3a.75.75 0 0 1 0-1.06Z" />
+                </svg>
+              </button>
+              {codecAdvancedOpen && (
+                <section className="settings-section">
+                  {showAll && <div className="settings-section-context">{t("settings.sections.stream")}</div>}
+                  <div className="settings-section-header">
+                    <Cpu size={18} />
+                    <h2>Advanced</h2>
+                  </div>
+                  <div className="settings-rows">
+                    {showStreamVideo && (
+                      <>
+                        <div className="settings-row settings-row--column">
+                          <label className="settings-label settings-label--with-icon">
+                            <Cpu size={15} className="settings-label-icon" />
+                            {t("settings.video.decoder")}
+                          </label>
+                          <div className="settings-chip-row">
+                            {accelerationOptions.map((option) => (
+                              <button
+                                key={`decoder-${option.value}`}
+                                className={`settings-chip ${settings.decoderPreference === option.value ? "active" : ""}`}
+                                onClick={() => handleChange("decoderPreference", option.value)}
+                              >
+                                {option.value === "auto"
+                                  ? t("app.labels.auto")
+                                  : option.value === "hardware"
+                                    ? t("app.labels.hardware")
+                                    : t("settings.video.softwareCpu")}
+                              </button>
+                            ))}
+                          </div>
+                          <span className="settings-subtle-hint">{t("settings.video.appliesAfterRestart")}</span>
+                        </div>
+
+                        <div className="settings-row settings-row--column">
+                          <label className="settings-label settings-label--with-icon">
+                            <Film size={15} className="settings-label-icon" />
+                            {t("settings.video.encoder")}
+                          </label>
+                          <div className="settings-chip-row">
+                            {accelerationOptions.map((option) => (
+                              <button
+                                key={`encoder-${option.value}`}
+                                className={`settings-chip ${settings.encoderPreference === option.value ? "active" : ""}`}
+                                onClick={() => handleChange("encoderPreference", option.value)}
+                              >
+                                {option.value === "auto"
+                                  ? t("app.labels.auto")
+                                  : option.value === "hardware"
+                                    ? t("app.labels.hardware")
+                                    : t("settings.video.softwareCpu")}
+                              </button>
+                            ))}
+                          </div>
+                          <span className="settings-subtle-hint">{t("settings.video.appliesAfterRestart")}</span>
+                        </div>
+                      </>
+                    )}
+
+                    {showStreamCodecDiagnostics && (
+                      <>
+                    <div className="settings-row codec-test-row">
+                      <label className="settings-label codec-test-description settings-label--with-icon">
+                        <Zap size={15} className="settings-label-icon" />
+                        {t("settings.codecDiagnostics.description")}
+                      </label>
+                      <button
+                        className="codec-test-btn"
+                        onClick={() => { void onRunCodecTest(); }}
+                        disabled={codecTesting}
+                        type="button"
+                      >
+                        {codecTesting ? (
+                          <>
+                            <Loader size={16} className="settings-loading-icon" />
+                            {t("settings.video.testing")}
+                          </>
+                        ) : (
+                          <>
+                            <Zap size={16} />
+                            {codecResults ? t("settings.codecDiagnostics.retest") : t("settings.codecDiagnostics.testCodecs")}
+                          </>
+                        )}
+                      </button>
+                    </div>
+                    {codecTestOpen && codecResults && (
+                      <div className="codec-results">
+                        {shouldShowLinuxHardwareCodecHint(codecResults) ? (
+                          <div className="codec-result-hint">
+                            {t("settings.codecDiagnostics.linuxHardwareHint")}
+                          </div>
+                        ) : null}
+                        {codecResults.map((result) => (
+                          <div key={result.codec} className="codec-result-card">
+                            <div className="codec-result-header">
+                              <span className="codec-result-name">{result.codec}</span>
+                              <span className={`codec-result-badge ${result.webrtcSupported ? "supported" : "unsupported"}`}>
+                                {result.webrtcSupported ? t("settings.codecDiagnostics.webrtcReady") : t("settings.codecDiagnostics.notInWebrtc")}
+                              </span>
+                            </div>
+                            <div className="codec-result-rows">
+                              <div className="codec-result-row">
+                                <span className="codec-result-direction">{t("settings.codecDiagnostics.decode")}</span>
+                                <span className={`codec-result-status ${result.decodeSupported ? (result.hwAccelerated ? "hw" : "sw") : "none"}`}>
+                                  {result.decodeSupported ? (result.hwAccelerated ? t("settings.video.gpu") : t("settings.video.cpu")) : t("app.labels.no")}
+                                </span>
+                                <span className="codec-result-via">{result.decodeVia}</span>
+                              </div>
+                              <div className="codec-result-row">
+                                <span className="codec-result-direction">{t("settings.codecDiagnostics.encode")}</span>
+                                <span className={`codec-result-status ${result.encodeSupported ? (result.encodeHwAccelerated ? "hw" : "sw") : "none"}`}>
+                                  {result.encodeSupported ? (result.encodeHwAccelerated ? t("settings.video.gpu") : t("settings.video.cpu")) : t("app.labels.no")}
+                                </span>
+                                <span className="codec-result-via">{result.encodeVia}</span>
+                              </div>
+                            </div>
+                            {result.profiles.length > 0 && (
+                              <div className="codec-result-profiles">
+                                <span className="codec-result-profiles-label">{t("settings.codecDiagnostics.profiles")}</span>
+                                <div className="codec-result-profiles-list">
+                                  {result.profiles.map((p, i) => (
+                                    <code key={i} className="codec-result-profile">{p}</code>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                      </>
+                    )}
+                  </div>
+                </section>
+              )}
+            </div>
+            )}
+          </>
+        )}
+
+        {/* ═══ NATIVE STREAMER ═════════════════════════════ */}
+        {showNativeStreamer && (
+          <section className="settings-section">
+            {showAll && <div className="settings-section-context">{t("settings.sections.nativeStreamer")}</div>}
+            <div className="settings-section-header">
+              <h2>{t("settings.nativeStreamer.title")}</h2>
+            </div>
+            <div className="settings-rows">
+              {!isWindows ? (
+                <div className="settings-row settings-row--column">
+                  <div className="settings-row-top settings-row-top--compact">
+                    <label className="settings-label settings-label--wrap">
+                      <span className="settings-label-title">
+                        {t("settings.nativeStreamer.nativeStreaming")}
+                        <span className="settings-inline-badge settings-inline-badge--beta">{t("app.labels.experimental")}</span>
+                      </span>
+                    </label>
+                  </div>
+                  <span className="settings-input-hint">
+                    {NATIVE_STREAMER_WINDOWS_ONLY_MESSAGE}
+                  </span>
+                </div>
+              ) : (
+                <>
+                  <div className="settings-row settings-row--column">
+                    <div className="settings-row-top settings-row-top--compact">
+                      <label className="settings-label settings-label--wrap">
+                        <span className="settings-label-title">
+                          {t("settings.nativeStreamer.nativeStreaming")}
+                          <span className="settings-inline-badge settings-inline-badge--beta">{t("app.labels.experimental")}</span>
+                        </span>
+                      </label>
+                      <label className="settings-toggle">
+                        <input
+                          type="checkbox"
+                          checked={settings.streamClientMode === "native"}
+                          onChange={(e) => handleNativeStreamerToggleChange(e.target.checked)}
+                        />
+                        <span className="settings-toggle-track" />
+                      </label>
+                    </div>
+                    <span className="settings-subtle-hint">
+                      {t("settings.nativeStreamer.nativeStreamingHint")}
+                    </span>
+                    <div className="settings-chip-row">
+                      <a className="settings-chip" href="https://github.com/OpenCloudGaming/OpenNOW/issues" target="_blank" rel="noreferrer">
+                        <span>{t("settings.nativeStreamer.reportOnGithubIssues")}</span>
+                        <ExternalLink size={13} />
+                      </a>
+                      <a className="settings-chip" href="https://discord.gg/8EJYaJcNfD" target="_blank" rel="noreferrer">
+                        <span>{t("settings.nativeStreamer.reportOnDiscord")}</span>
+                        <ExternalLink size={13} />
+                      </a>
+                    </div>
+                  </div>
+
+                  <div className="settings-row">
+                    <label className="settings-label">
+                      {t("settings.nativeStreamer.showNativeStreamerStats")}
+                      <span className="settings-hint">{t("settings.nativeStreamer.showNativeStreamerStatsHint")}</span>
+                    </label>
+                    <label className="settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={settings.showNativeStreamerStats}
+                        onChange={(e) => handleChange("showNativeStreamerStats", e.target.checked)}
+                      />
+                      <span className="settings-toggle-track" />
+                    </label>
+                  </div>
+
+                  <div className="settings-row settings-row--column">
+                    <div className="settings-row-top settings-row-top--compact">
+                      <label className="settings-label settings-label--wrap">
+                        <span className="settings-label-title">{t("settings.nativeStreamer.streamerStatus")}</span>
+                      </label>
+                      <button
+                        type="button"
+                        className="settings-icon-button"
+                        onClick={() => void refreshNativeStreamerStatus()}
+                        disabled={nativeStreamerStatusLoading}
+                        title={t("settings.nativeStreamer.checkNativeStreamer")}
+                        aria-label={t("settings.nativeStreamer.checkNativeStreamer")}
+                      >
+                        {nativeStreamerStatusLoading ? <Loader size={15} className="spin" /> : <RefreshCcw size={15} />}
+                      </button>
+                    </div>
+                    <div className="settings-chip-row">
+                      <span
+                        className={`settings-inline-badge ${
+                          nativeStreamerStatusLoading
+                            ? "settings-inline-badge--codec-testing"
+                            : nativeStreamerStatus?.gstreamerAvailable
+                              ? "settings-inline-badge--codec-gpu"
+                              : "settings-inline-badge--updater-error"
+                        }`}
+                      >
+                        {nativeStreamerStatusLoading
+                          ? t("app.status.checking")
+                          : nativeStreamerStatus?.gstreamerAvailable
+                            ? t("settings.nativeStreamer.gstreamerReady")
+                            : t("settings.nativeStreamer.notReady")}
+                      </span>
+                    </div>
+                    <span className="settings-subtle-hint">
+                      {nativeStreamerStatus?.message ?? t("settings.nativeStreamer.statusDefaultHint")}
+                    </span>
+                  </div>
+
+                  <div className="settings-row settings-row--column">
+                    <label className="settings-label">{t("settings.nativeStreamer.gstreamerRuntime")}</label>
+                    <div className="settings-chip-row">
+                      <span className={`settings-inline-badge ${getGstreamerRuntimeBadgeClass(nativeStreamerStatus)}`}>
+                        {formatGstreamerRuntimeLabel(nativeStreamerStatus)}
+                      </span>
+                      {nativeStreamerStatus?.gstreamerRuntime.path ? (
+                        <span className="settings-inline-badge settings-inline-badge--codec">
+                          {t("settings.nativeStreamer.bundledPathDetected")}
+                        </span>
+                      ) : null}
+                    </div>
+                    <span className="settings-subtle-hint">
+                      {nativeStreamerStatus?.gstreamerRuntime.message ?? t("settings.nativeStreamer.runtimeDefaultHint")}
+                    </span>
+                    {!nativeStreamerStatus?.gstreamerAvailable && nativeStreamerStatus?.gstreamerRuntime.installInstructions?.length ? (
+                      <div className="settings-install-steps">
+                        <span className="settings-subtle-hint">
+                          {t("settings.nativeStreamer.linuxRuntimeHint")}
+                        </span>
+                        {nativeStreamerStatus.gstreamerRuntime.installInstructions.map((instruction) => (
+                          <div key={instruction.distro} className="settings-install-step">
+                            <span className="settings-install-step-title">{instruction.distro}</span>
+                            <code>{instruction.command}</code>
+                            {instruction.note ? <span className="settings-subtle-hint">{instruction.note}</span> : null}
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="settings-row settings-row--column">
+                    <label className="settings-label">{t("settings.nativeStreamer.videoPath")}</label>
+                    <div className="settings-chip-row">
+                      <span
+                        className={`settings-inline-badge ${
+                          nativeStreamerStatus?.activeVideoBackend?.available
+                            ? nativeStreamerStatus.activeVideoBackend.backend === "software"
+                              ? "settings-inline-badge--codec-testing"
+                              : "settings-inline-badge--codec-gpu"
+                            : "settings-inline-badge--updater-error"
+                        }`}
+                      >
+                        {formatNativeVideoBackendName(nativeStreamerStatus?.activeVideoBackend?.backend)}
+                      </span>
+                      {getAvailableNativeCodecLabels(nativeStreamerStatus?.activeVideoBackend).map((codec) => (
+                        <span key={codec} className="settings-inline-badge settings-inline-badge--codec">
+                          {codec}
+                        </span>
+                      ))}
+                    </div>
+                    <span className="settings-subtle-hint">
+                      {nativeStreamerStatus?.gstreamerAvailable
+                        ? `${nativeStreamerStatus.codecSummary ?? t("settings.nativeStreamer.codecSupportUnknown")}. ${nativeStreamerStatus.zeroCopySummary ?? t("settings.nativeStreamer.memoryPathUnknown")}.`
+                        : nativeStreamerStatus?.activeVideoBackend?.reason
+                          ?? t("settings.nativeStreamer.videoPathDefaultHint")}
+                    </span>
+                  </div>
+
+                  <div className="settings-row settings-row--column">
+                    <label className="settings-label">{t("settings.nativeStreamer.directxBackend")}</label>
+                    <div className="settings-chip-row">
+                      {nativeVideoBackendOptions.map((option) => (
+                        <button
+                          key={option.value}
+                          type="button"
+                          className={`settings-chip ${settings.nativeVideoBackend === option.value ? "active" : ""}`}
+                          onClick={() => handleChange("nativeVideoBackend", option.value)}
+                          title={option.description}
+                        >
+                          <span>{option.label}</span>
+                        </button>
+                      ))}
+                    </div>
+                    <span className="settings-subtle-hint">
+                      {t("settings.nativeStreamer.directxBackendHint")}
+                    </span>
+                  </div>
+
+                  <div className="settings-row settings-row--column">
+                    <label className="settings-label">{t("settings.nativeStreamer.framePacing")}</label>
+                    <div className="settings-chip-row">
+                      <button
+                        type="button"
+                        className={`settings-chip ${!settings.enableCloudGsync ? "active" : ""}`}
+                        onClick={() => setNativeFramePacing("low-latency")}
+                      >
+                        <span>{t("settings.nativeStreamer.lowestLatency")}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className={`settings-chip ${settings.enableCloudGsync ? "active" : ""}`}
+                        onClick={() => setNativeFramePacing("smooth")}
+                      >
+                        <span>{t("settings.nativeStreamer.smoothGsync")}</span>
+                      </button>
+                    </div>
+                    <span className="settings-subtle-hint">
+                      {t("settings.nativeStreamer.framePacingHint")}
+                    </span>
+                  </div>
+                </>
+              )}
+            </div>
+          </section>
+        )}
+
+        {/* ═══ GAME ══════════════════════════════════════ */}
+        {showGame && (
+          <section className="settings-section">
+            {showAll && <div className="settings-section-context">{t("settings.sections.game")}</div>}
+            <div className="settings-section-header">
+              <h2>{t("settings.game.title")}</h2>
+            </div>
+            <div className="settings-rows">
+              <div className="settings-row">
+                <label className="settings-label">
+                  {t("settings.game.language")}
+                  <span className="settings-hint">{t("settings.game.inGameLanguageHint")}</span>
+                </label>
+                <div className="settings-dropdown" ref={gameLanguageDropdownRef}>
+                  <button
+                    type="button"
+                    className={`settings-dropdown-selected ${gameLanguageDropdownOpen ? "open" : ""}`}
+                    onClick={() => setGameLanguageDropdownOpen((open) => !open)}
+                  >
+                    <span className="settings-dropdown-selected-name">{selectedGameLanguageName}</span>
+                    <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" className={`settings-dropdown-chevron ${gameLanguageDropdownOpen ? "flipped" : ""}`}>
+                      <path d="M4.47 5.97a.75.75 0 0 1 1.06 0L8 8.44l2.47-2.47a.75.75 0 1 1 1.06 1.06l-3 3a.75.75 0 0 1-1.06 0l-3-3a.75.75 0 0 1 0-1.06Z" />
+                    </svg>
+                  </button>
+                  {gameLanguageDropdownOpen && (
+                    <div className="settings-dropdown-menu settings-dropdown-menu--tall">
+                      {gameLanguageOptions.map((option) => (
+                        <button
+                          key={option.value}
+                          type="button"
+                          className={`settings-dropdown-item ${settings.gameLanguage === option.value ? "active" : ""}`}
                           onClick={() => {
-                            handleChange("microphoneDeviceId", "");
-                            setMicrophoneDeviceDropdownOpen(false);
+                            handleChange("gameLanguage", option.value);
+                            setGameLanguageDropdownOpen(false);
                           }}
                         >
-                          <span>Default Device</span>
-                          {settings.microphoneDeviceId === "" && <Check size={14} className="settings-dropdown-check" />}
+                          <span>{option.label}</span>
+                          {settings.gameLanguage === option.value && <Check size={14} className="settings-dropdown-check" />}
                         </button>
-                        {microphoneDevices.map((device, index) => (
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div className="settings-row settings-row--column">
+                <div className="settings-row-top settings-row-top--compact">
+                  <label className="settings-label settings-label--wrap">
+                    <span className="settings-label-title">
+                      {t("settings.game.persistInGameSettings")}
+                    </span>
+                  </label>
+                  <label className="settings-toggle">
+                    <input
+                      type="checkbox"
+                      checked={settings.enablePersistingInGameSettings}
+                      onChange={(e) => handleChange("enablePersistingInGameSettings", e.target.checked)}
+                    />
+                    <span className="settings-toggle-track" />
+                  </label>
+                </div>
+                <span className="settings-subtle-hint">
+                  {t("settings.game.persistInGameSettingsHint")}
+                </span>
+              </div>
+            </div>
+          </section>
+        )}
+
+        {/* ═══ AUDIO ══════════════════════════════════════ */}
+        {showAudio && (
+          <section className="settings-section">
+            {showAll && <div className="settings-section-context">{t("settings.sections.audio")}</div>}
+            <div className="settings-section-header">
+              <h2>{t("settings.audio.title")}</h2>
+            </div>
+              <div className="settings-rows">
+                <div className="settings-row">
+                  <label className="settings-label">
+                    {t("settings.audio.microphone")}
+                    <span className="settings-hint">{t("settings.audio.microphoneHint")}</span>
+                  </label>
+                  <div className="settings-dropdown" ref={microphoneModeDropdownRef}>
+                    <button
+                      type="button"
+                      className={`settings-dropdown-selected ${microphoneModeDropdownOpen ? "open" : ""}`}
+                      onClick={() => {
+                        setMicrophoneModeDropdownOpen((open) => !open);
+                        setMicrophoneDeviceDropdownOpen(false);
+                      }}
+                    >
+                      <span className="settings-dropdown-selected-name">{selectedMicrophoneModeName}</span>
+                      <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" className={`settings-dropdown-chevron ${microphoneModeDropdownOpen ? "flipped" : ""}`}>
+                        <path d="M4.47 5.97a.75.75 0 0 1 1.06 0L8 8.44l2.47-2.47a.75.75 0 1 1 1.06 1.06l-3 3a.75.75 0 0 1-1.06 0l-3-3a.75.75 0 0 1 0-1.06Z" />
+                      </svg>
+                    </button>
+                    {microphoneModeDropdownOpen && (
+                      <div className="settings-dropdown-menu">
+                        {microphoneModeOptions.map((option) => (
                           <button
-                            key={device.deviceId}
+                            key={option.value}
                             type="button"
-                            className={`settings-dropdown-item ${settings.microphoneDeviceId === device.deviceId ? "active" : ""}`}
+                            className={`settings-dropdown-item ${settings.microphoneMode === option.value ? "active" : ""}`}
                             onClick={() => {
-                              handleChange("microphoneDeviceId", device.deviceId);
-                              setMicrophoneDeviceDropdownOpen(false);
+                              handleChange("microphoneMode", option.value);
+                              setMicrophoneModeDropdownOpen(false);
                             }}
                           >
-                            <span>{device.label || `Microphone ${index + 1}`}</span>
-                            {settings.microphoneDeviceId === device.deviceId && <Check size={14} className="settings-dropdown-check" />}
+                            <span>{getMicrophoneModeLabel(option.value)}</span>
+                            {settings.microphoneMode === option.value && <Check size={14} className="settings-dropdown-check" />}
                           </button>
                         ))}
                       </div>
                     )}
                   </div>
-                  {microphonePermissionError && (
-                    <span className="text-red-400 text-xs mt-1">{microphonePermissionError}</span>
-                  )}
-                  {microphoneDevices.length === 0 && !microphonePermissionError && (
-                    <span className="text-yellow-400 text-xs mt-1">No microphone devices found</span>
-                  )}
                 </div>
-              </div>
-            )}
-          </div>
-        </section>
 
-        {/* ── Input ──────────────────────────────────────── */}
-        <section className="settings-section">
-          <div className="settings-section-header">
-            <h2>Input</h2>
-          </div>
-          <div className="settings-rows">
-            <div className="settings-row">
-              <label className="settings-label">Clipboard Paste</label>
-              <label className="settings-toggle">
-                <input
-                  type="checkbox"
-                  checked={settings.clipboardPaste}
-                  onChange={(e) => handleChange("clipboardPaste", e.target.checked)}
-                />
-                <span className="settings-toggle-track" />
-              </label>
-            </div>
-
-            <div className="settings-row settings-row--top-aligned">
-              <label className="settings-label settings-label--wrap">
-                Keyboard Layout
-                <span className="settings-hint">Controls how your physical keyboard is mapped inside the remote session. Separate from the in-game language setting.</span>
-              </label>
-              <div className="settings-dropdown settings-dropdown--constrained" ref={keyboardLayoutDropdownRef}>
-                <button
-                  type="button"
-                  className={`settings-dropdown-selected ${keyboardLayoutDropdownOpen ? "open" : ""}`}
-                  onClick={() => setKeyboardLayoutDropdownOpen((open) => !open)}
-                >
-                  <span className="settings-dropdown-selected-name">{selectedKeyboardLayoutName}</span>
-                  <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" className={`settings-dropdown-chevron ${keyboardLayoutDropdownOpen ? "flipped" : ""}`}>
-                    <path d="M4.47 5.97a.75.75 0 0 1 1.06 0L8 8.44l2.47-2.47a.75.75 0 1 1 1.06 1.06l-3 3a.75.75 0 0 1-1.06 0l-3-3a.75.75 0 0 1 0-1.06Z" />
-                  </svg>
-                </button>
-                {keyboardLayoutDropdownOpen && (
-                  <div className="settings-dropdown-menu settings-dropdown-menu--tall">
-                    {keyboardLayoutOptions.map((option) => (
-                      <button
-                        key={option.value}
-                        type="button"
-                        className={`settings-dropdown-item ${settings.keyboardLayout === option.value ? "active" : ""}`}
-                        onClick={() => {
-                          handleChange("keyboardLayout", option.value);
-                          setKeyboardLayoutDropdownOpen(false);
-                        }}
-                      >
-                        <span>{option.label}</span>
-                        {settings.keyboardLayout === option.value && <Check size={14} className="settings-dropdown-check" />}
-                      </button>
-                    ))}
+                {settings.microphoneMode !== "disabled" && (
+                  <div className="settings-row">
+                    <label className="settings-label">
+                      <div className="flex items-center gap-2">
+                        <Mic size={14} />
+                        {t("settings.audio.microphoneDevice")}
+                      </div>
+                      <span className="settings-hint">{t("settings.audio.microphoneDeviceHint")}</span>
+                    </label>
+                    <div className="settings-mic-device-wrap">
+                      <div className="settings-dropdown" ref={microphoneDeviceDropdownRef}>
+                        <button
+                          type="button"
+                          className={`settings-dropdown-selected ${microphoneDeviceDropdownOpen ? "open" : ""}`}
+                          onClick={() => {
+                            if (microphoneDevices.length === 0) return;
+                            setMicrophoneDeviceDropdownOpen((open) => !open);
+                            setMicrophoneModeDropdownOpen(false);
+                          }}
+                          disabled={microphoneDevices.length === 0}
+                        >
+                          <span className="settings-dropdown-selected-name">{selectedMicrophoneDeviceName}</span>
+                          <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" className={`settings-dropdown-chevron ${microphoneDeviceDropdownOpen ? "flipped" : ""}`}>
+                            <path d="M4.47 5.97a.75.75 0 0 1 1.06 0L8 8.44l2.47-2.47a.75.75 0 1 1 1.06 1.06l-3 3a.75.75 0 0 1-1.06 0l-3-3a.75.75 0 0 1 0-1.06Z" />
+                          </svg>
+                        </button>
+                        {microphoneDeviceDropdownOpen && (
+                          <div className="settings-dropdown-menu settings-dropdown-menu--tall">
+                            <button
+                              type="button"
+                              className={`settings-dropdown-item ${settings.microphoneDeviceId === "" ? "active" : ""}`}
+                              onClick={() => {
+                                handleChange("microphoneDeviceId", "");
+                                setMicrophoneDeviceDropdownOpen(false);
+                              }}
+                            >
+                              <span>{t("app.labels.defaultDevice")}</span>
+                              {settings.microphoneDeviceId === "" && <Check size={14} className="settings-dropdown-check" />}
+                            </button>
+                            {microphoneDevices.map((device, index) => (
+                              <button
+                                key={device.deviceId}
+                                type="button"
+                                className={`settings-dropdown-item ${settings.microphoneDeviceId === device.deviceId ? "active" : ""}`}
+                                onClick={() => {
+                                  handleChange("microphoneDeviceId", device.deviceId);
+                                  setMicrophoneDeviceDropdownOpen(false);
+                                }}
+                              >
+                                <span>{device.label || t("settings.audio.microphoneIndexed", { index: index + 1 })}</span>
+                                {settings.microphoneDeviceId === device.deviceId && <Check size={14} className="settings-dropdown-check" />}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                      {microphonePermissionError && (
+                        <span className="text-red-400 text-xs mt-1">{microphonePermissionError}</span>
+                      )}
+                      {microphoneDevices.length === 0 && !microphonePermissionError && (
+                        <span className="text-yellow-400 text-xs mt-1">{t("settings.audio.noMicrophoneDevicesFound")}</span>
+                      )}
+                    </div>
                   </div>
                 )}
               </div>
-            </div>
+            </section>
+        )}
 
-            {/* Mouse Sensitivity */}
-            <div className="settings-row settings-row--column">
-              <div className="settings-row-top">
-                <label className="settings-label">Mouse Sensitivity</label>
-                <span className="settings-value-badge">{settings.mouseSensitivity.toFixed(2)}x</span>
+        {/* ═══ INPUT ═══════════════════════════════════════ */}
+        {showInput && (
+            <section className="settings-section">
+              {showAll && <div className="settings-section-context">{t("settings.sections.input")}</div>}
+              <div className="settings-section-header">
+                <h2>{t("settings.input.title")}</h2>
               </div>
-              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                <input
-                  type="range"
-                  className="settings-slider"
-                  min={0.1}
-                  max={4}
-                  step={0.01}
-                  value={settings.mouseSensitivity}
-                  onChange={(e) => handleChange("mouseSensitivity", parseFloat(e.target.value))}
-                />
-                <input
-                  type="number"
-                  className="settings-number-input"
-                  style={{ width: 80 }}
-                  min={0.1}
-                  max={4}
-                  step={0.01}
-                  value={Number(settings.mouseSensitivity.toFixed(2))}
-                  onChange={(e) => {
-                    const v = parseFloat(e.target.value || "0");
-                    if (Number.isFinite(v)) handleChange("mouseSensitivity", Math.max(0.1, Math.min(4, v)));
-                  }}
-                />
-              </div>
-              <span className="settings-subtle-hint">Multiplier applied to mouse movement (1.00 = default)</span>
-            </div>
-
-            <div className="settings-row settings-row--column">
-              <div className="settings-row-top">
-                <label className="settings-label">Mouse Accelerator</label>
-                <span className="settings-value-badge">{Math.round(settings.mouseAcceleration)}%</span>
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                <input
-                  type="range"
-                  className="settings-slider"
-                  min={1}
-                  max={150}
-                  step={1}
-                  value={Math.round(settings.mouseAcceleration)}
-                  onChange={(e) => handleChange("mouseAcceleration", Math.max(1, Math.min(150, Math.round(Number(e.target.value) || 1))))}
-                />
-                <input
-                  type="number"
-                  className="settings-number-input"
-                  style={{ width: 80 }}
-                  min={1}
-                  max={150}
-                  step={1}
-                  value={Math.round(settings.mouseAcceleration)}
-                  onChange={(e) => {
-                    const v = Number(e.target.value || "1");
-                    if (Number.isFinite(v)) {
-                      handleChange("mouseAcceleration", Math.max(1, Math.min(150, Math.round(v))));
-                    }
-                  }}
-                />
-              </div>
-              <span className="settings-subtle-hint">Dynamic turn boost strength (1% = off-like, 150% = strongest).</span>
-            </div>
-
-            <div className="settings-row settings-row--column">
-              <div className="settings-row-top">
-                <label className="settings-label">Shortcuts</label>
-                <div className="settings-shortcut-actions">
-                  <span className="settings-value-badge">Editable</span>
-                  <button
-                    type="button"
-                    className="settings-shortcut-reset-btn"
-                    onClick={handleResetShortcuts}
-                    disabled={areShortcutsDefault}
-                  >
-                    Reset to defaults
-                  </button>
-                </div>
-              </div>
-
-              <div className="settings-shortcut-grid">
-                <label className="settings-shortcut-row">
-                  <span className="settings-shortcut-label">Toggle Stats</span>
-                  <input
-                    type="text"
-                    className={`settings-text-input settings-shortcut-input ${toggleStatsError ? "error" : ""}`}
-                    value={toggleStatsInput}
-                    onChange={(e) => setToggleStatsInput(e.target.value)}
-                    onBlur={() => handleShortcutBlur("shortcutToggleStats", toggleStatsInput, setToggleStatsInput, setToggleStatsError)}
-                    onKeyDown={handleShortcutKeyDown}
-                    placeholder="F3"
-                    spellCheck={false}
-                  />
-                </label>
-
-                <label className="settings-shortcut-row">
-                  <span className="settings-shortcut-label">Mouse Lock</span>
-                  <input
-                    type="text"
-                    className={`settings-text-input settings-shortcut-input ${togglePointerLockError ? "error" : ""}`}
-                    value={togglePointerLockInput}
-                    onChange={(e) => setTogglePointerLockInput(e.target.value)}
-                    onBlur={() => handleShortcutBlur("shortcutTogglePointerLock", togglePointerLockInput, setTogglePointerLockInput, setTogglePointerLockError)}
-                    onKeyDown={handleShortcutKeyDown}
-                    placeholder="F8"
-                    spellCheck={false}
-                  />
-                </label>
-
-                <label className="settings-shortcut-row">
-                  <span className="settings-shortcut-label">Stop Stream</span>
-                  <input
-                    type="text"
-                    className={`settings-text-input settings-shortcut-input ${stopStreamError ? "error" : ""}`}
-                    value={stopStreamInput}
-                    onChange={(e) => setStopStreamInput(e.target.value)}
-                    onBlur={() => handleShortcutBlur("shortcutStopStream", stopStreamInput, setStopStreamInput, setStopStreamError)}
-                    onKeyDown={handleShortcutKeyDown}
-                    placeholder="Ctrl+Shift+Q"
-                    spellCheck={false}
-                  />
-                </label>
-
-                <label className="settings-shortcut-row">
-                  <span className="settings-shortcut-label">Toggle Anti-AFK</span>
-                  <input
-                    type="text"
-                    className={`settings-text-input settings-shortcut-input ${toggleAntiAfkError ? "error" : ""}`}
-                    value={toggleAntiAfkInput}
-                    onChange={(e) => setToggleAntiAfkInput(e.target.value)}
-                    onBlur={() => handleShortcutBlur("shortcutToggleAntiAfk", toggleAntiAfkInput, setToggleAntiAfkInput, setToggleAntiAfkError)}
-                    onKeyDown={handleShortcutKeyDown}
-                    placeholder="Ctrl+Shift+K"
-                    spellCheck={false}
-                  />
-                </label>
-
-                <label className="settings-shortcut-row">
-                  <span className="settings-shortcut-label">Toggle Microphone</span>
-                  <input
-                    type="text"
-                    className={`settings-text-input settings-shortcut-input ${toggleMicrophoneError ? "error" : ""}`}
-                    value={toggleMicrophoneInput}
-                    onChange={(e) => setToggleMicrophoneInput(e.target.value)}
-                    onBlur={() => handleShortcutBlur("shortcutToggleMicrophone", toggleMicrophoneInput, setToggleMicrophoneInput, setToggleMicrophoneError)}
-                    onKeyDown={handleShortcutKeyDown}
-                    placeholder="Ctrl+Shift+M"
-                    spellCheck={false}
-                  />
-                </label>
-
-                <label className="settings-shortcut-row">
-                  <span className="settings-shortcut-label">ScreensShot</span>
-                  <input
-                    type="text"
-                    className={`settings-text-input settings-shortcut-input ${screenshotError ? "error" : ""}`}
-                    value={screenshotInput}
-                    onChange={(e) => setScreenshotInput(e.target.value)}
-                    onBlur={() => handleShortcutBlur("shortcutScreenshot", screenshotInput, setScreenshotInput, setScreenshotError)}
-                    onKeyDown={handleShortcutKeyDown}
-                    placeholder="F11"
-                    spellCheck={false}
-                  />
-                </label>
-                <label className="settings-shortcut-row">
-                  <span className="settings-shortcut-label">Toggle Settings Menu</span>
-                  <input
-                    type="text"
-                    value="Cmd+G / Ctrl+Shift+G"
-                    className="settings-text-input settings-shortcut-input settings-shortcut-input--static"
-                    disabled
-                  />
-                </label>
-              </div>
-
-              {(toggleStatsError || togglePointerLockError || stopStreamError || toggleAntiAfkError || toggleMicrophoneError || screenshotError) && (
-                <span className="settings-input-hint">
-                  Invalid shortcut. Use {shortcutExamples}
-                </span>
-              )}
-
-              {!toggleStatsError && !togglePointerLockError && !stopStreamError && !toggleAntiAfkError && !toggleMicrophoneError && !screenshotError && (
-                <span className="settings-shortcut-hint">
-                  {shortcutExamples}. Stop: {formatShortcutForDisplay(settings.shortcutStopStream, isMac)}. Mic: {formatShortcutForDisplay(settings.shortcutToggleMicrophone, isMac)}. ScreensShot: {formatShortcutForDisplay(settings.shortcutScreenshot, isMac)}.
-                </span>
-              )}
-            </div>
-          </div>
-        </section>
-
-        {/* ── Appearance ─────────────────────────────────── */}
-        <section className="settings-section">
-          <div className="settings-section-header">
-            <h2>Appearance</h2>
-          </div>
-          <div className="settings-rows">
-            <div className="settings-row">
-              <label className="settings-label">
-                Hide Stream Overlay Buttons
-                <span className="settings-hint">Hide microphone, fullscreen, and end-session buttons while streaming.</span>
-              </label>
-              <label className="settings-toggle">
-                <input
-                  type="checkbox"
-                  checked={settings.hideStreamButtons}
-                  onChange={(e) => handleChange("hideStreamButtons", e.target.checked)}
-                />
-                <span className="settings-toggle-track" />
-              </label>
-            </div>
-
-            <div className="settings-row">
-              <label className="settings-label">
-                Show Stats on Stream Launch
-                <span className="settings-hint">Automatically show the stats overlay when a new stream starts.</span>
-              </label>
-              <label className="settings-toggle">
-                <input
-                  type="checkbox"
-                  checked={settings.showStatsOnLaunch}
-                  onChange={(e) => handleChange("showStatsOnLaunch", e.target.checked)}
-                />
-                <span className="settings-toggle-track" />
-              </label>
-            </div>
-
-            <div className="settings-row">
-              <label className="settings-label">
-                Auto Full Screen
-                <span className="settings-hint">Automatically enter fullscreen when a stream starts or pointer lock is requested.</span>
-              </label>
-              <label className="settings-toggle">
-                <input
-                  type="checkbox"
-                  checked={settings.autoFullScreen}
-                  onChange={(e) => handleChange("autoFullScreen", e.target.checked)}
-                />
-                <span className="settings-toggle-track" />
-              </label>
-            </div>
-
-            <div className="settings-row">
-              <label className="settings-label">
-                <span className="settings-label-title">
-                  Controller Mode Library
-                  <span className="settings-inline-badge settings-inline-badge--beta">Beta</span>
-                </span>
-                <span className="settings-hint">Replace the desktop library/settings navigation with the controller-first layout only when controller mode is enabled.</span>
-              </label>
-              <label className="settings-toggle">
-                <input
-                  type="checkbox"
-                  checked={settings.controllerMode}
-                  onChange={(e) => handleChange("controllerMode", e.target.checked)}
-                />
-                <span className="settings-toggle-track" />
-              </label>
-            </div>
-
-            {settings.controllerMode && (
-              <div className="settings-controller-subsettings">
+              <div className="settings-rows">
                 <div className="settings-row">
-                  <label className="settings-label">Exit Controller Mode</label>
-                  <div>
-                    <button
-                      className="settings-exit-btn"
-                      onClick={() => handleChange("controllerMode", false)}
-                    >
-                      Exit
-                    </button>
-                  </div>
-                </div>
-
-                <div className="settings-row">
-                  <label className="settings-label">
-                    Controller UI Sounds
-                    <span className="settings-hint">Play subtle move, open, and back sounds inside controller mode only.</span>
-                  </label>
+                  <label className="settings-label">{t("settings.input.clipboardPaste")}</label>
                   <label className="settings-toggle">
                     <input
                       type="checkbox"
-                      checked={settings.controllerUiSounds}
-                      onChange={(e) => handleChange("controllerUiSounds", e.target.checked)}
+                      checked={settings.clipboardPaste}
+                      onChange={(e) => handleChange("clipboardPaste", e.target.checked)}
                     />
                     <span className="settings-toggle-track" />
                   </label>
                 </div>
 
-                <div className="settings-row">
-                  <label className="settings-label">
-                    Background Animations (Controller Mode)
-                    <span className="settings-hint">Show animated background visuals on controller-mode loading screens only.</span>
-                  </label>
-                  <label className="settings-toggle">
-                    <input
-                      type="checkbox"
-                      checked={settings.controllerBackgroundAnimations}
-                      onChange={(e) => handleChange("controllerBackgroundAnimations", e.target.checked)}
-                    />
-                    <span className="settings-toggle-track" />
-                  </label>
-                </div>
-
-                <div className="settings-row">
-                  <label className="settings-label">
-                    Auto-Load Controller Library
-                    <span className="settings-hint">Automatically open the controller library at startup when controller mode is enabled.</span>
-                  </label>
-                  <label className="settings-toggle">
-                    <input
-                      type="checkbox"
-                      checked={settings.autoLoadControllerLibrary}
-                      onChange={(e) => handleChange("autoLoadControllerLibrary", e.target.checked)}
-                    />
-                    <span className="settings-toggle-track" />
-                  </label>
-                </div>
-              </div>
-            )}
-
-            <div className="settings-row">
-              <label className="settings-label">
-                Session Elapsed Counter
-                <span className="settings-hint">Enable or disable the live session elapsed counter while streaming.</span>
-              </label>
-              <label className="settings-toggle">
-                <input
-                  type="checkbox"
-                  checked={settings.sessionCounterEnabled}
-                  onChange={(e) => handleChange("sessionCounterEnabled", e.target.checked)}
-                />
-                <span className="settings-toggle-track" />
-              </label>
-            </div>
-
-            <div className="settings-row settings-row--column">
-              <div className="settings-row-top">
-                <label className="settings-label">Session Timer Reappear</label>
-                <span className="settings-value-badge">
-                  {!settings.sessionCounterEnabled
-                    ? "Disabled"
-                    : settings.sessionClockShowEveryMinutes === 0
-                      ? "Off"
-                      : `Every ${settings.sessionClockShowEveryMinutes} min`}
-                </span>
-              </div>
-              <input
-                type="range"
-                className="settings-slider"
-                min={0}
-                max={120}
-                step={5}
-                value={settings.sessionClockShowEveryMinutes}
-                onChange={(e) => handleChange("sessionClockShowEveryMinutes", parseInt(e.target.value, 10))}
-                disabled={!settings.sessionCounterEnabled}
-              />
-              <span className="settings-subtle-hint">
-                How often the session timer pops back up while streaming (0 disables repeats).
-              </span>
-            </div>
-
-            <div className="settings-row settings-row--column">
-              <div className="settings-row-top">
-                <label className="settings-label">Session Timer Visible Time</label>
-                <span className="settings-value-badge">
-                  {settings.sessionCounterEnabled ? `${settings.sessionClockShowDurationSeconds}s` : "Disabled"}
-                </span>
-              </div>
-              <input
-                type="range"
-                className="settings-slider"
-                min={5}
-                max={120}
-                step={5}
-                value={settings.sessionClockShowDurationSeconds}
-                onChange={(e) => handleChange("sessionClockShowDurationSeconds", parseInt(e.target.value, 10))}
-                disabled={!settings.sessionCounterEnabled}
-              />
-              <span className="settings-subtle-hint">
-                How long the session timer stays visible each time it appears.
-              </span>
-            </div>
-
-            <div className="settings-row settings-row--column">
-              <span className="settings-subtle-hint">
-                Disabling the session elapsed counter stops the live elapsed timer from rendering at all. Remaining playtime indicators stay unchanged.
-              </span>
-            </div>
-
-            <div className="settings-row">
-              <label className="settings-label">
-                Discord Rich Presence
-                <span className="settings-hint">Show the game you are streaming as your Discord activity, including elapsed time.</span>
-              </label>
-              <label className="settings-toggle">
-                <input
-                  type="checkbox"
-                  checked={settings.discordRichPresence}
-                  onChange={(e) => handleChange("discordRichPresence", e.target.checked)}
-                />
-                <span className="settings-toggle-track" />
-              </label>
-            </div>
-
-            {isWin && (
-              <>
                 <div className="settings-row settings-row--column">
-                  <div className="settings-row-top">
-                    <label className="settings-label">
-                      SalsaNOW companion (optional)
-                      <span className="settings-hint">
-                        Absolute path to SalsaNOW.exe — a Windows helper that prepares GeForce NOW VM-style sessions for
-                        local Steam integration. Vendored source: <code>external/SalsaNOW</code>. Upstream:{" "}
-                        <a href="https://github.com/ap0ught/SalsaNOW" target="_blank" rel="noreferrer">
-                          ap0ught/SalsaNOW
-                        </a>
-                        . Read <code>docs/integration-salsanow.md</code> before enabling.
+                  <div className="settings-row-top settings-row-top--compact">
+                    <label className="settings-label settings-label--wrap">
+                      <span className="settings-label-title">
+                        {t("settings.input.gyroscopeControls")}
+                        <span className="settings-inline-badge settings-inline-badge--beta">{t("app.labels.beta")}</span>
                       </span>
                     </label>
+                    <label className="settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={settings.enableGyroscopeControls}
+                        onChange={(e) => handleChange("enableGyroscopeControls", e.target.checked)}
+                      />
+                      <span className="settings-toggle-track" />
+                    </label>
                   </div>
+                  <span className="settings-subtle-hint">{t("settings.input.gyroscopeControlsHint")}</span>
+                </div>
+
+                {isMac && (
+                  <div className="settings-row settings-row--column">
+                    <div className="settings-row-top settings-row-top--compact">
+                      <label className="settings-label settings-label--wrap">
+                        <span className="settings-label-title">
+                          {t("settings.input.steamControllerCompatibilityMode")}
+                          <span className="settings-inline-badge settings-inline-badge--beta">{t("app.labels.experimental")}</span>
+                        </span>
+                      </label>
+                      <label className="settings-toggle">
+                        <input
+                          type="checkbox"
+                          checked={settings.steamControllerCompatibilityMode}
+                          onChange={(e) => handleChange("steamControllerCompatibilityMode", e.target.checked)}
+                        />
+                        <span className="settings-toggle-track" />
+                      </label>
+                    </div>
+                    <span className="settings-subtle-hint">{t("settings.input.steamControllerCompatibilityModeHint")}</span>
+                  </div>
+                )}
+
+                <div className="settings-row settings-row--column">
+                  <div className="settings-row-top settings-row-top--compact">
+                    <label className="settings-label settings-label--wrap">
+                      <span className="settings-label-title">
+                        {t("settings.input.nativeCursorOverlay")}
+                        <span className="settings-inline-badge settings-inline-badge--beta">{t("app.labels.beta")}</span>
+                      </span>
+                    </label>
+                    <label className="settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={settings.nativeCursorOverlay}
+                        onChange={(e) => handleChange("nativeCursorOverlay", e.target.checked)}
+                      />
+                      <span className="settings-toggle-track" />
+                    </label>
+                  </div>
+                  <span className="settings-subtle-hint">{t("settings.input.nativeCursorOverlayHint")}</span>
+                </div>
+
+                <div className="settings-row settings-row--top-aligned">
+                  <label className="settings-label settings-label--wrap">
+                    {t("settings.game.keyboardLayout")}
+                    <span className="settings-hint">{t("settings.input.keyboardLayoutHint")}</span>
+                  </label>
+                  <div className="settings-dropdown settings-dropdown--constrained" ref={keyboardLayoutDropdownRef}>
+                    <button
+                      type="button"
+                      className={`settings-dropdown-selected ${keyboardLayoutDropdownOpen ? "open" : ""}`}
+                      onClick={() => setKeyboardLayoutDropdownOpen((open) => !open)}
+                    >
+                      <span className="settings-dropdown-selected-name">{selectedKeyboardLayoutName}</span>
+                      <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" className={`settings-dropdown-chevron ${keyboardLayoutDropdownOpen ? "flipped" : ""}`}>
+                        <path d="M4.47 5.97a.75.75 0 0 1 1.06 0L8 8.44l2.47-2.47a.75.75 0 1 1 1.06 1.06l-3 3a.75.75 0 0 1-1.06 0l-3-3a.75.75 0 0 1 0-1.06Z" />
+                      </svg>
+                    </button>
+                    {keyboardLayoutDropdownOpen && (
+                      <div className="settings-dropdown-menu settings-dropdown-menu--tall">
+                        {keyboardLayoutOptions.map((option) => (
+                          <button
+                            key={option.value}
+                            type="button"
+                            className={`settings-dropdown-item ${settings.keyboardLayout === option.value ? "active" : ""}`}
+                            onClick={() => {
+                              handleChange("keyboardLayout", option.value);
+                              setKeyboardLayoutDropdownOpen(false);
+                            }}
+                          >
+                            <span>{option.label}</span>
+                            {settings.keyboardLayout === option.value && <Check size={14} className="settings-dropdown-check" />}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Mouse Sensitivity */}
+                <div className="settings-row settings-row--column">
+                  <div className="settings-row-top">
+                    <label className="settings-label">{t("settings.input.mouseSensitivity")}</label>
+                    <span className="settings-value-badge">{settings.mouseSensitivity.toFixed(2)}x</span>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                    <input
+                      type="range"
+                      className="settings-slider"
+                      min={0.1}
+                      max={4}
+                      step={0.01}
+                      value={settings.mouseSensitivity}
+                      onChange={(e) => handleChange("mouseSensitivity", parseFloat(e.target.value))}
+                    />
+                    <input
+                      type="number"
+                      className="settings-number-input"
+                      style={{ width: 80 }}
+                      min={0.1}
+                      max={4}
+                      step={0.01}
+                      value={Number(settings.mouseSensitivity.toFixed(2))}
+                      onChange={(e) => {
+                        const v = parseFloat(e.target.value || "0");
+                        if (Number.isFinite(v)) handleChange("mouseSensitivity", Math.max(0.1, Math.min(4, v)));
+                      }}
+                    />
+                  </div>
+                  <span className="settings-subtle-hint">{t("settings.input.mouseSensitivityHint")}</span>
+                </div>
+
+                <div className="settings-row settings-row--column">
+                  <div className="settings-row-top">
+                    <label className="settings-label">{t("settings.input.mouseAccelerator")}</label>
+                    <span className="settings-value-badge">{Math.round(settings.mouseAcceleration)}%</span>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                    <input
+                      type="range"
+                      className="settings-slider"
+                      min={1}
+                      max={150}
+                      step={1}
+                      value={Math.round(settings.mouseAcceleration)}
+                      onChange={(e) => handleChange("mouseAcceleration", Math.max(1, Math.min(150, Math.round(Number(e.target.value) || 1))))}
+                    />
+                    <input
+                      type="number"
+                      className="settings-number-input"
+                      style={{ width: 80 }}
+                      min={1}
+                      max={150}
+                      step={1}
+                      value={Math.round(settings.mouseAcceleration)}
+                      onChange={(e) => {
+                        const v = Number(e.target.value || "1");
+                        if (Number.isFinite(v)) {
+                          handleChange("mouseAcceleration", Math.max(1, Math.min(150, Math.round(v))));
+                        }
+                      }}
+                    />
+                  </div>
+                  <span className="settings-subtle-hint">{t("settings.input.mouseAcceleratorHint")}</span>
+                </div>
+
+                {/* Shortcuts */}
+                <div className="settings-row settings-row--column">
+                  <div className="settings-row-top">
+                    <label className="settings-label">{t("settings.input.shortcuts")}</label>
+                    <div className="settings-shortcut-actions">
+                      <span className="settings-value-badge">{t("settings.input.editable")}</span>
+                      <button
+                        type="button"
+                        className="settings-shortcut-reset-btn"
+                        onClick={handleResetShortcuts}
+                        disabled={areShortcutsDefault}
+                      >
+                        {t("settings.input.resetToDefaults")}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="settings-shortcut-grid">
+                <div className="settings-shortcut-row">
+                  <span className="settings-shortcut-label" id="shortcut-toggle-stats-label">{t("settings.input.toggleStats")}</span>
                   <input
                     type="text"
-                    className="settings-text-input"
-                    placeholder="C:\\Path\\To\\SalsaNOW.exe"
-                    value={settings.salsaNowExePath}
-                    onChange={(e) => handleChange("salsaNowExePath", e.target.value)}
+                    id="shortcut-toggle-stats"
+                    aria-labelledby="shortcut-toggle-stats-label"
+                    readOnly
+                    className={`settings-text-input settings-shortcut-input ${toggleStatsError ? "error" : ""}`}
+                    value={toggleStatsInput}
+                    onFocus={(e) => e.target.select()}
+                    onBlur={() => handleShortcutBlur("shortcutToggleStats", toggleStatsInput)}
+                    onPaste={(e) => handleShortcutPaste("shortcutToggleStats", e)}
+                    onKeyDown={(e) => handleShortcutCaptureKeyDown("shortcutToggleStats", e)}
+                    placeholder={t("stream.shortcuts.clickHereThenPress")}
+                    title={t("stream.shortcuts.focusAndPress")}
                     spellCheck={false}
-                    autoComplete="off"
                   />
                 </div>
+
+                <div className="settings-shortcut-row">
+                  <span className="settings-shortcut-label" id="shortcut-pointer-lock-label">{t("settings.input.togglePointerLock")}</span>
+                  <input
+                    type="text"
+                    id="shortcut-pointer-lock"
+                    aria-labelledby="shortcut-pointer-lock-label"
+                    readOnly
+                    className={`settings-text-input settings-shortcut-input ${togglePointerLockError ? "error" : ""}`}
+                    value={togglePointerLockInput}
+                    onFocus={(e) => e.target.select()}
+                    onBlur={() => handleShortcutBlur("shortcutTogglePointerLock", togglePointerLockInput)}
+                    onPaste={(e) => handleShortcutPaste("shortcutTogglePointerLock", e)}
+                    onKeyDown={(e) => handleShortcutCaptureKeyDown("shortcutTogglePointerLock", e)}
+                    placeholder={t("stream.shortcuts.clickHereThenPress")}
+                    title={t("stream.shortcuts.focusAndPress")}
+                    spellCheck={false}
+                  />
+                </div>
+
+                <div className="settings-shortcut-row">
+                  <span className="settings-shortcut-label" id="shortcut-fullscreen-label">{t("settings.input.toggleFullscreen")}</span>
+                  <input
+                    type="text"
+                    id="shortcut-fullscreen"
+                    aria-labelledby="shortcut-fullscreen-label"
+                    readOnly
+                    className={`settings-text-input settings-shortcut-input ${toggleFullscreenError ? "error" : ""}`}
+                    value={toggleFullscreenInput}
+                    onFocus={(e) => e.target.select()}
+                    onBlur={() => handleShortcutBlur("shortcutToggleFullscreen", toggleFullscreenInput)}
+                    onPaste={(e) => handleShortcutPaste("shortcutToggleFullscreen", e)}
+                    onKeyDown={(e) => handleShortcutCaptureKeyDown("shortcutToggleFullscreen", e)}
+                    placeholder={t("stream.shortcuts.clickHereThenPress")}
+                    title={t("stream.shortcuts.focusAndPress")}
+                    spellCheck={false}
+                  />
+                </div>
+
+                <div className="settings-shortcut-row">
+                  <span className="settings-shortcut-label" id="shortcut-stop-stream-label">{t("settings.input.stopStream")}</span>
+                  <input
+                    type="text"
+                    id="shortcut-stop-stream"
+                    aria-labelledby="shortcut-stop-stream-label"
+                    readOnly
+                    className={`settings-text-input settings-shortcut-input ${stopStreamError ? "error" : ""}`}
+                    value={stopStreamInput}
+                    onFocus={(e) => e.target.select()}
+                    onBlur={() => handleShortcutBlur("shortcutStopStream", stopStreamInput)}
+                    onPaste={(e) => handleShortcutPaste("shortcutStopStream", e)}
+                    onKeyDown={(e) => handleShortcutCaptureKeyDown("shortcutStopStream", e)}
+                    placeholder={t("stream.shortcuts.clickHereThenPress")}
+                    title={t("stream.shortcuts.focusAndPress")}
+                    spellCheck={false}
+                  />
+                </div>
+
+                <div className="settings-shortcut-row">
+                  <span className="settings-shortcut-label" id="shortcut-anti-afk-label">{t("settings.input.toggleAntiAfk")}</span>
+                  <input
+                    type="text"
+                    id="shortcut-anti-afk"
+                    aria-labelledby="shortcut-anti-afk-label"
+                    readOnly
+                    className={`settings-text-input settings-shortcut-input ${toggleAntiAfkError ? "error" : ""}`}
+                    value={toggleAntiAfkInput}
+                    onFocus={(e) => e.target.select()}
+                    onBlur={() => handleShortcutBlur("shortcutToggleAntiAfk", toggleAntiAfkInput)}
+                    onPaste={(e) => handleShortcutPaste("shortcutToggleAntiAfk", e)}
+                    onKeyDown={(e) => handleShortcutCaptureKeyDown("shortcutToggleAntiAfk", e)}
+                    placeholder={t("stream.shortcuts.clickHereThenPress")}
+                    title={t("stream.shortcuts.focusAndPress")}
+                    spellCheck={false}
+                  />
+                </div>
+
+                <div className="settings-shortcut-row">
+                  <span className="settings-shortcut-label" id="shortcut-mic-label">{t("settings.input.toggleMicrophone")}</span>
+                  <input
+                    type="text"
+                    id="shortcut-mic"
+                    aria-labelledby="shortcut-mic-label"
+                    readOnly
+                    className={`settings-text-input settings-shortcut-input ${toggleMicrophoneError ? "error" : ""}`}
+                    value={toggleMicrophoneInput}
+                    onFocus={(e) => e.target.select()}
+                    onBlur={() => handleShortcutBlur("shortcutToggleMicrophone", toggleMicrophoneInput)}
+                    onPaste={(e) => handleShortcutPaste("shortcutToggleMicrophone", e)}
+                    onKeyDown={(e) => handleShortcutCaptureKeyDown("shortcutToggleMicrophone", e)}
+                    placeholder={t("stream.shortcuts.clickHereThenPress")}
+                    title={t("stream.shortcuts.focusAndPress")}
+                    spellCheck={false}
+                  />
+                </div>
+
+                <div className="settings-shortcut-row">
+                  <span className="settings-shortcut-label" id="shortcut-screenshot-label">{t("settings.input.screenshot")}</span>
+                  <input
+                    type="text"
+                    id="shortcut-screenshot"
+                    aria-labelledby="shortcut-screenshot-label"
+                    readOnly
+                    className={`settings-text-input settings-shortcut-input ${screenshotError ? "error" : ""}`}
+                    value={screenshotInput}
+                    onFocus={(e) => e.target.select()}
+                    onBlur={() => handleShortcutBlur("shortcutScreenshot", screenshotInput)}
+                    onPaste={(e) => handleShortcutPaste("shortcutScreenshot", e)}
+                    onKeyDown={(e) => handleShortcutCaptureKeyDown("shortcutScreenshot", e)}
+                    placeholder={t("stream.shortcuts.clickHereThenPress")}
+                    title={t("stream.shortcuts.focusAndPress")}
+                    spellCheck={false}
+                  />
+                </div>
+
+                <div className="settings-shortcut-row">
+                  <span className="settings-shortcut-label" id="shortcut-recording-label">{t("settings.input.recording")}</span>
+                  <input
+                    type="text"
+                    id="shortcut-recording"
+                    aria-labelledby="shortcut-recording-label"
+                    readOnly
+                    className={`settings-text-input settings-shortcut-input ${recordingError ? "error" : ""}`}
+                    value={recordingInput}
+                    onFocus={(e) => e.target.select()}
+                    onBlur={() => handleShortcutBlur("shortcutToggleRecording", recordingInput)}
+                    onPaste={(e) => handleShortcutPaste("shortcutToggleRecording", e)}
+                    onKeyDown={(e) => handleShortcutCaptureKeyDown("shortcutToggleRecording", e)}
+                    placeholder={t("stream.shortcuts.clickHereThenPress")}
+                    title={t("stream.shortcuts.focusAndPress")}
+                    spellCheck={false}
+                  />
+                </div>
+
+                <div className="settings-shortcut-row">
+                  <span className="settings-shortcut-label" id="shortcut-sidebar-label">{t("settings.input.toggleStreamSidebar")}</span>
+                  <input
+                    type="text"
+                    id="shortcut-sidebar"
+                    aria-labelledby="shortcut-sidebar-label"
+                    value={formatShortcutForDisplay(SIDEBAR_TOGGLE_SHORTCUT_RAW, isMac)}
+                    className="settings-text-input settings-shortcut-input settings-shortcut-input--static"
+                    readOnly
+                    tabIndex={-1}
+                  />
+                </div>
+              </div>
+
+              {(toggleStatsError || togglePointerLockError || toggleFullscreenError || stopStreamError || toggleAntiAfkError || toggleMicrophoneError || screenshotError || recordingError) && (
+                <span className="settings-input-hint">
+                  {toggleStatsError
+                    || togglePointerLockError
+                    || toggleFullscreenError
+                    || stopStreamError
+                    || toggleAntiAfkError
+                    || toggleMicrophoneError
+                    || screenshotError
+                    || recordingError}
+                </span>
+              )}
+
+              {!toggleStatsError && !togglePointerLockError && !toggleFullscreenError && !stopStreamError && !toggleAntiAfkError && !toggleMicrophoneError && !screenshotError && !recordingError && (
+                <span className="settings-shortcut-hint">
+                  {t("settings.input.shortcutHint", {
+                    examples: t("stream.shortcuts.examples"),
+                    fullscreen: formatShortcutForDisplay(settings.shortcutToggleFullscreen, isMac),
+                    stop: formatShortcutForDisplay(settings.shortcutStopStream, isMac),
+                    mic: formatShortcutForDisplay(settings.shortcutToggleMicrophone, isMac),
+                    screenshot: formatShortcutForDisplay(settings.shortcutScreenshot, isMac),
+                    recording: formatShortcutForDisplay(settings.shortcutToggleRecording, isMac),
+                  })}
+                </span>
+              )}
+                </div>
+              </div>
+            </section>
+        )}
+
+        {/* ═══ INTERFACE ══════════════════════════════════ */}
+        {showInterface && (
+          <>
+            {/* ── Appearance ── */}
+            <section className="settings-section">
+              {showAll && <div className="settings-section-context">{t("settings.sections.interface")}</div>}
+              <div className="settings-section-header">
+                <h2>{t("settings.interface.appearance")}</h2>
+              </div>
+              <div className="settings-rows">
                 <div className="settings-row">
                   <label className="settings-label">
-                    Launch SalsaNOW
-                    <span className="settings-hint">Starts the configured executable detached from OpenNOW.</span>
+                    {t("settings.interface.appLanguage")}
+                    <span className="settings-hint">{t("settings.interface.appLanguageHint")}</span>
                   </label>
+                  <div className="settings-dropdown" ref={appLanguageDropdownRef}>
+                    <button
+                      type="button"
+                      className={`settings-dropdown-selected ${appLanguageDropdownOpen ? "open" : ""}`}
+                      onClick={() => setAppLanguageDropdownOpen((open) => !open)}
+                    >
+                      <span className="settings-dropdown-selected-name">{selectedAppLanguageName}</span>
+                      <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" className={`settings-dropdown-chevron ${appLanguageDropdownOpen ? "flipped" : ""}`}>
+                        <path d="M4.47 5.97a.75.75 0 0 1 1.06 0L8 8.44l2.47-2.47a.75.75 0 1 1 1.06 1.06l-3 3a.75.75 0 0 1-1.06 0l-3-3a.75.75 0 0 1 0-1.06Z" />
+                      </svg>
+                    </button>
+                    {appLanguageDropdownOpen && (
+                      <div className="settings-dropdown-menu">
+                        {appLanguageOptions.map((option) => (
+                          <button
+                            key={option.value}
+                            type="button"
+                            className={`settings-dropdown-item ${locale === option.value ? "active" : ""}`}
+                            onClick={() => handleAppLanguageChange(option.value)}
+                          >
+                            <span>{option.label}</span>
+                            {locale === option.value && <Check size={14} className="settings-dropdown-check" />}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="settings-row">
+                  <label className="settings-label" htmlFor="appTheme">
+                    {t("settings.interface.theme") || "Theme"}
+                    <span className="settings-hint">{t("settings.interface.themeHint") || "Choose a light, dark, or system-matching theme."}</span>
+                  </label>
+                  <SelectDropdown
+                    id="appTheme"
+                    value={settings.appTheme}
+                    options={[
+                      { value: "auto", label: t("settings.interface.themeAuto") || "Auto" },
+                      { value: "light", label: t("settings.interface.themeLight") || "Light" },
+                      { value: "dark", label: t("settings.interface.themeDark") || "Dark" },
+                    ]}
+                    onChange={(value) => handleChange("appTheme", value as any)}
+                    ariaLabel={t("settings.interface.theme") || "Theme"}
+                  />
+                </div>
+
+                <div className="settings-row">
+                  <label className="settings-label">
+                    {t("settings.interface.translucentUI") || "Translucent UI"}
+                    <span className="settings-hint">{t("settings.interface.translucentUIHint") || "Enable glassmorphism and translucent overlays."}</span>
+                  </label>
+                  <label className="settings-toggle">
+                    <input
+                      type="checkbox"
+                      checked={settings.translucentUI}
+                      onChange={(e) => handleChange("translucentUI", e.target.checked)}
+                    />
+                    <span className="settings-toggle-track" />
+                  </label>
+                </div>
+
+                <div className="settings-row">
+                  <label className="settings-label">
+                    {t("settings.interface.accentColor")}
+                    <span className="settings-hint">{t("settings.interface.accentColorHint")}</span>
+                  </label>
+                  <div className="settings-dropdown" ref={accentColorDropdownRef}>
+                    <button
+                      type="button"
+                      className={`settings-dropdown-selected ${accentColorDropdownOpen ? "open" : ""}`}
+                      onClick={() => setAccentColorDropdownOpen((open) => !open)}
+                    >
+                      <span className="settings-dropdown-selected-name" style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
+                        <span
+                          aria-hidden="true"
+                          style={{
+                            width: 12,
+                            height: 12,
+                            borderRadius: 9999,
+                            background: selectedAccentColor.hex,
+                            boxShadow: `0 0 0 1px color-mix(in srgb, ${selectedAccentColor.hex} 48%, rgba(255, 255, 255, 0.22))`,
+                          }}
+                        />
+                        {t(selectedAccentColor.labelKey)}
+                      </span>
+                      <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" className={`settings-dropdown-chevron ${accentColorDropdownOpen ? "flipped" : ""}`}>
+                        <path d="M4.47 5.97a.75.75 0 0 1 1.06 0L8 8.44l2.47-2.47a.75.75 0 1 1 1.06 1.06l-3 3a.75.75 0 0 1-1.06 0l-3-3a.75.75 0 0 1 0-1.06Z" />
+                      </svg>
+                    </button>
+                    {accentColorDropdownOpen && (
+                      <div className="settings-dropdown-menu">
+                        {accentColorOptions.map((option) => (
+                          <button
+                            key={option.value}
+                            type="button"
+                            className={`settings-dropdown-item ${settings.appAccentColor === option.value ? "active" : ""}`}
+                            onClick={() => {
+                              handleChange("appAccentColor", option.value);
+                              setAccentColorDropdownOpen(false);
+                            }}
+                          >
+                            <span style={{ display: "inline-flex", alignItems: "center", gap: 10, flex: 1 }}>
+                              <span
+                                aria-hidden="true"
+                                style={{
+                                  width: 20,
+                                  height: 20,
+                                  borderRadius: 9999,
+                                  flexShrink: 0,
+                                  flex: "0 0 20px",
+                                  background: option.hex,
+                                  boxShadow: `0 0 0 1px color-mix(in srgb, ${option.hex} 48%, rgba(255, 255, 255, 0.22))`,
+                                }}
+                              />
+                              <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                {t(option.labelKey)}
+                              </span>
+                            </span>
+                            {settings.appAccentColor === option.value && <Check size={14} className="settings-dropdown-check" />}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Appearance toggles */}
+                <div className="settings-toggle-grid">
+                  <div className="settings-row">
+                    <label className="settings-label">
+                      {t("settings.interface.hideStreamOverlayButtons")}
+                      <span className="settings-hint">{t("settings.interface.hideStreamOverlayButtonsHint")}</span>
+                    </label>
+                    <label className="settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={settings.hideStreamButtons}
+                        onChange={(e) => handleChange("hideStreamButtons", e.target.checked)}
+                      />
+                      <span className="settings-toggle-track" />
+                    </label>
+                  </div>
+
+                  <div className="settings-row">
+                    <label className="settings-label">
+                      {t("settings.interface.showStatsOnStreamLaunch")}
+                      <span className="settings-hint">{t("settings.interface.showStatsOnStreamLaunchHint")}</span>
+                    </label>
+                    <label className="settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={settings.showStatsOnLaunch}
+                        onChange={(e) => handleChange("showStatsOnLaunch", e.target.checked)}
+                      />
+                      <span className="settings-toggle-track" />
+                    </label>
+                  </div>
+
+                  <div className="settings-row">
+                    <label className="settings-label">
+                      {t("settings.interface.hideServerSelector")}
+                      <span className="settings-hint">{t("settings.interface.hideServerSelectorHint")}</span>
+                    </label>
+                    <label className="settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={settings.hideServerSelector}
+                        onChange={(e) => handleChange("hideServerSelector", e.target.checked)}
+                      />
+                      <span className="settings-toggle-track" />
+                    </label>
+                  </div>
+
+                  <div className="settings-row">
+                    <label className="settings-label">
+                      {t("settings.interface.showAntiAfkIndicator")}
+                      <span className="settings-hint">{t("settings.interface.showAntiAfkIndicatorHint")}</span>
+                    </label>
+                    <label className="settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={settings.showAntiAfkIndicator}
+                        onChange={(e) => handleChange("showAntiAfkIndicator", e.target.checked)}
+                      />
+                      <span className="settings-toggle-track" />
+                    </label>
+                  </div>
+
+                  <div className="settings-row">
+                    <label className="settings-label">
+                      {t("settings.interface.autoFullScreen")}
+                      <span className="settings-hint">{t("settings.interface.autoFullScreenHint")}</span>
+                    </label>
+                    <label className="settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={settings.autoFullScreen}
+                        onChange={(e) => handleChange("autoFullScreen", e.target.checked)}
+                      />
+                      <span className="settings-toggle-track" />
+                    </label>
+                  </div>
+
+                  <div className="settings-row">
+                    <label className="settings-label">
+                      {t("settings.interface.controllerMode")}
+                      <span className="settings-hint">{t("settings.interface.controllerModeHint")}</span>
+                    </label>
+                    <label className="settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={settings.controllerMode}
+                        onChange={(e) => handleChange("controllerMode", e.target.checked)}
+                      />
+                      <span className="settings-toggle-track" />
+                    </label>
+                  </div>
+
+                  <div className="settings-row">
+                    <label className="settings-label">
+                      {t("settings.interface.escapeExitsFullscreen")}
+                      <span className="settings-hint">{t("settings.interface.escapeExitsFullscreenHint")}</span>
+                    </label>
+                    <label className="settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(settings.allowEscapeToExitFullscreen)}
+                        onChange={(e) => handleChange("allowEscapeToExitFullscreen", e.target.checked)}
+                      />
+                      <span className="settings-toggle-track" />
+                    </label>
+                  </div>
+
+                  <div className="settings-row">
+                    <label className="settings-label">
+                      {t("settings.interface.discordRichPresence")}
+                      <span className="settings-hint">{t("settings.interface.discordRichPresenceHint")}</span>
+                    </label>
+                    <label className="settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={settings.discordRichPresence}
+                        onChange={(e) => handleChange("discordRichPresence", e.target.checked)}
+                      />
+                      <span className="settings-toggle-track" />
+                    </label>
+                  </div>
+                </div>
+
+                <div className="settings-row settings-row--column">
+                  <div className="settings-row-top">
+                    <label className="settings-label">{t("settings.interface.posterSize")}</label>
+                    <span className="settings-value-badge">{posterSizePercent}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    className="settings-slider"
+                    min={POSTER_SIZE_MIN}
+                    max={POSTER_SIZE_MAX}
+                    step={POSTER_SIZE_STEP}
+                    value={posterSizePercent}
+                    onChange={(e) => handleChange("posterSizeScale", Number(e.target.value) / 100)}
+                  />
+                  <span className="settings-subtle-hint">{t("settings.interface.posterSizeHint")}</span>
+                </div>
+
+                <div className="settings-row">
+                  <label className="settings-label">
+                    {t("settings.interface.showSessionTimeRemainingInStatsOverlay")}
+                    <span className="settings-hint">{t("settings.interface.showSessionTimeRemainingInStatsOverlayHint")}</span>
+                  </label>
+                  <label className="settings-toggle">
+                    <input
+                      type="checkbox"
+                      checked={settings.showSessionTimeRemainingInStatsOverlay}
+                      onChange={(e) => handleChange("showSessionTimeRemainingInStatsOverlay", e.target.checked)}
+                    />
+                    <span className="settings-toggle-track" />
+                  </label>
+                </div>
+
+                {/* Session Counter */}
+                <div className="settings-row">
+                  <label className="settings-label">
+                    {t("settings.interface.sessionElapsedCounter")}
+                    <span className="settings-hint">{t("settings.interface.sessionElapsedCounterHint")}</span>
+                  </label>
+                  <label className="settings-toggle">
+                    <input
+                      type="checkbox"
+                      checked={settings.sessionCounterEnabled}
+                      onChange={(e) => handleChange("sessionCounterEnabled", e.target.checked)}
+                    />
+                    <span className="settings-toggle-track" />
+                  </label>
+                </div>
+
+                {settings.sessionCounterEnabled && (
+                  <>
+                    <div className="settings-row settings-row--column">
+                      <div className="settings-row-top">
+                        <label className="settings-label">{t("settings.interface.sessionTimerReappear")}</label>
+                        <span className="settings-value-badge">
+                          {settings.sessionClockShowEveryMinutes === 0
+                            ? t("settings.interface.off")
+                            : t("settings.interface.everyMinutes", { count: settings.sessionClockShowEveryMinutes })}
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        className="settings-slider"
+                        min={0}
+                        max={120}
+                        step={5}
+                        value={settings.sessionClockShowEveryMinutes}
+                        onChange={(e) => handleChange("sessionClockShowEveryMinutes", parseInt(e.target.value, 10))}
+                      />
+                      <span className="settings-subtle-hint">{t("settings.interface.sessionTimerReappearHint")}</span>
+                    </div>
+
+                    <div className="settings-row settings-row--column">
+                      <div className="settings-row-top">
+                        <label className="settings-label">{t("settings.interface.sessionTimerVisibleTime")}</label>
+                        <span className="settings-value-badge">
+                          {t("app.units.seconds", { value: settings.sessionClockShowDurationSeconds })}
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        className="settings-slider"
+                        min={5}
+                        max={120}
+                        step={5}
+                        value={settings.sessionClockShowDurationSeconds}
+                        onChange={(e) => handleChange("sessionClockShowDurationSeconds", parseInt(e.target.value, 10))}
+                      />
+                      <span className="settings-subtle-hint">{t("settings.interface.sessionTimerVisibleTimeHint")}</span>
+                    </div>
+                  </>
+                )}
+              </div>
+            </section>
+
+          </>
+        )}
+
+        {showAbout && (
+          <section className="settings-section">
+            {showAll && <div className="settings-section-context">{t("settings.sections.about")}</div>}
+            <div className="settings-section-header">
+              <h2>{t("settings.sections.about")}</h2>
+            </div>
+            <div className="settings-rows">
+              <div className="settings-row">
+                <label className="settings-label">
+                  {t("settings.about.whatsNew")}
+                  <span className="settings-hint">{t("settings.about.whatsNewHint")}</span>
+                </label>
+                <button
+                  type="button"
+                  className="settings-export-logs-btn"
+                  onClick={() => onOpenWhatsNew?.()}
+                >
+                  <Info size={16} />
+                  {t("settings.about.whatsNew")}
+                </button>
+              </div>
+
+              <div className="settings-row">
+                <label className="settings-label settings-label--wrap">
+                  <span className="settings-label-title">
+                    {t("settings.about.applicationUpdates")}
+                    <span className={`settings-inline-badge settings-inline-badge--updater settings-inline-badge--updater-${updaterState.status}`}>
+                      {updaterBadgeLabel}
+                    </span>
+                  </span>
+                  <span className="settings-hint">
+                    {t("settings.about.version", { version: updaterState.currentDisplayVersion ?? updaterState.currentVersion })} · {settings.autoCheckForUpdates
+                      ? t("settings.about.backgroundChecksOn")
+                      : t("settings.about.backgroundChecksOff")}
+                  </span>
+                  {updaterState.message ? (
+                    <span className="settings-hint settings-hint--updater-message">{updaterState.message}</span>
+                  ) : null}
+                  {updaterLastCheckedLabel ? (
+                    <span className="settings-hint">{t("settings.about.lastChecked", { value: updaterLastCheckedLabel })}</span>
+                  ) : null}
+                  {updaterState.availableVersion && updaterState.status !== "downloaded" ? (
+                    <span className="settings-hint">{t("settings.about.availableVersion", { version: updaterState.availableVersion })}</span>
+                  ) : null}
+                  {updaterState.downloadedVersion ? (
+                    <span className="settings-hint">{t("settings.about.downloadedVersion", { version: updaterState.downloadedVersion })}</span>
+                  ) : null}
+                  {updaterState.status === "downloading" && updaterState.progress ? (
+                    <span className="settings-hint">
+                      {t("settings.about.downloadProgress", { percent: updaterProgressPercent })}{updaterProgressLabel ? ` · ${updaterProgressLabel}` : ""}{updaterDownloadRateLabel ? ` · ${updaterDownloadRateLabel}` : ""}
+                    </span>
+                  ) : null}
+                </label>
+                <div className="settings-updater-actions">
                   <button
                     type="button"
                     className="settings-export-logs-btn"
-                    onClick={async () => {
-                      const r = await window.openNow.launchSalsaNowCompanion();
-                      if (!r.ok) {
-                        alert(r.error);
-                      }
+                    disabled={!updaterState.canCheck}
+                    onClick={() => {
+                      void window.openNow.checkForUpdates().catch((error) => {
+                        console.error("[Settings] Failed to trigger update check:", error);
+                      });
                     }}
                   >
-                    <Play size={16} />
-                    Launch
+                    {updaterState.status === "checking" ? <Loader size={16} className="spin" /> : <RefreshCcw size={16} />}
+                    {t("settings.about.checkForUpdates")}
                   </button>
+                  {updaterState.status === "available" ? (
+                    <button
+                      type="button"
+                      className="settings-export-logs-btn"
+                      disabled={!updaterState.canDownload}
+                      onClick={() => {
+                        void window.openNow.downloadUpdate().catch((error) => {
+                          console.error("[Settings] Failed to download update:", error);
+                        });
+                      }}
+                    >
+                      <Download size={16} />
+                      {t("settings.about.downloadUpdate")}
+                    </button>
+                  ) : null}
+                  {updaterState.status === "downloaded" ? (
+                    <button
+                      type="button"
+                      className="settings-save-btn settings-save-btn--compact"
+                      disabled={!updaterState.canInstall}
+                      onClick={() => {
+                        void window.openNow.installUpdateAndRestart().catch((error) => {
+                          console.error("[Settings] Failed to install update:", error);
+                        });
+                      }}
+                    >
+                      <RefreshCcw size={16} />
+                      {t("settings.about.restartToInstall")}
+                    </button>
+                  ) : null}
                 </div>
+              </div>
 
+              <div className="settings-row">
+                <label className="settings-label settings-label--wrap">
+                  {t("settings.about.automaticallyCheckForUpdates")}
+                  <span className="settings-hint">
+                    {t("settings.about.automaticallyCheckForUpdatesOnHint")}
+                  </span>
+                  <span className="settings-hint">
+                    {t("settings.about.automaticallyCheckForUpdatesOffHint")}
+                  </span>
+                </label>
+                <label className="settings-toggle">
+                  <input
+                    type="checkbox"
+                    checked={settings.autoCheckForUpdates}
+                    onChange={(e) => handleChange("autoCheckForUpdates", e.target.checked)}
+                  />
+                  <span className="settings-toggle-track" />
+                </label>
+              </div>
+
+              {updaterState.status === "downloading" && updaterState.progress ? (
                 <div className="settings-row settings-row--column">
-                  <div className="settings-row-top">
-                    <label className="settings-label">
-                      Share install package (HTTP)
-                      <span className="settings-hint">
-                        Hosts the file on this PC with a random link (localhost + your LAN IPs). Open the link in a
-                        browser on a machine that can reach this network segment. GeForce NOW cloud rigs usually{" "}
-                        <strong>cannot</strong> see your home LAN; use a tunnel (ngrok, Tailscale, etc.) or another transfer
-                        method unless you know your network path works.
-                      </span>
-                    </label>
+                  <div className="settings-updater-progress">
+                    <div className="settings-updater-progress-bar" style={{ width: `${updaterProgressPercent}%` }} />
                   </div>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
-                    <button
-                      type="button"
-                      className="settings-export-logs-btn"
-                      onClick={async () => {
-                        const r = await window.openNow.startSalsaNowPackageServer({ useConfiguredExe: true });
-                        if (!r.ok) {
-                          alert(r.error);
-                          return;
-                        }
-                        setSalsaPackageServe({
-                          active: true,
-                          localUrl: r.localUrl,
-                          lanUrls: r.lanUrls,
-                          fileName: r.fileName,
-                        });
-                      }}
-                    >
-                      Serve configured path
-                    </button>
-                    <button
-                      type="button"
-                      className="settings-export-logs-btn"
-                      onClick={async () => {
-                        const r = await window.openNow.startSalsaNowPackageServer({ useConfiguredExe: false });
-                        if (!r.ok) {
-                          alert(r.error);
-                          return;
-                        }
-                        setSalsaPackageServe({
-                          active: true,
-                          localUrl: r.localUrl,
-                          lanUrls: r.lanUrls,
-                          fileName: r.fileName,
-                        });
-                      }}
-                    >
-                      Pick file to serve…
-                    </button>
-                    {salsaPackageServe.active && (
-                      <button
-                        type="button"
-                        className="settings-delete-cache-btn"
-                        onClick={async () => {
-                          await window.openNow.stopSalsaNowPackageServer();
-                          setSalsaPackageServe({ active: false });
-                        }}
-                      >
-                        Stop sharing
-                      </button>
-                    )}
-                  </div>
-                  {salsaPackageServe.active && (
-                    <>
-                      <p className="settings-subtle-hint" style={{ marginTop: "0.35rem" }}>
-                        Serving <strong>{salsaPackageServe.fileName}</strong>. Copy a URL (Edge/Chrome on the target
-                        machine). Firewall may prompt the first time.
-                      </p>
-                      <textarea
-                        readOnly
-                        className="settings-text-input"
-                        rows={Math.max(2, 1 + salsaPackageServe.lanUrls.length)}
-                        style={{ width: "100%", marginTop: "0.35rem", fontFamily: "monospace", fontSize: "0.85rem" }}
-                        value={[salsaPackageServe.localUrl, ...salsaPackageServe.lanUrls].join("\n")}
-                        onFocus={(e) => e.target.select()}
-                      />
-                      {salsaPackageServe.lanUrls.length === 0 && (
-                        <span className="settings-subtle-hint">
-                          No non-local IPv4 found — only this PC can use the 127.0.0.1 link.
-                        </span>
-                      )}
-                      <button
-                        type="button"
-                        className="settings-export-logs-btn"
-                        style={{ marginTop: "0.35rem" }}
-                        onClick={async () => {
-                          const text = [salsaPackageServe.localUrl, ...salsaPackageServe.lanUrls].join("\n");
-                          try {
-                            await navigator.clipboard.writeText(text);
-                          } catch {
-                            alert("Could not copy to clipboard.");
-                          }
-                        }}
-                      >
-                        Copy all URLs
-                      </button>
-                    </>
-                  )}
                 </div>
+              ) : null}
+
+              <div className="settings-row">
+                <label className="settings-label">
+                  {t("settings.about.exportLogs")}
+                  <span className="settings-hint">{t("settings.about.exportLogsHint")}</span>
+                </label>
+                <button
+                  type="button"
+                  className="settings-export-logs-btn"
+                  onClick={async () => {
+                    try {
+                      const logs = await window.openNow.exportLogs("text");
+                      const blob = new Blob([logs], { type: "text/plain" });
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement("a");
+                      a.href = url;
+                      a.download = `opennow-logs-${new Date().toISOString().replace(/[:.]/g, "-")}.txt`;
+                      document.body.appendChild(a);
+                      a.click();
+                      document.body.removeChild(a);
+                      URL.revokeObjectURL(url);
+                    } catch (err) {
+                      console.error("[Settings] Failed to export logs:", err);
+                      alert(t("settings.about.exportLogsFailed"));
+                    }
+                  }}
+                >
+                  <FileDown size={16} />
+                  {t("settings.about.exportLogs")}
+                </button>
+              </div>
+
+              <div className="settings-row">
+                <label className="settings-label">
+                  {t("settings.about.deleteCache")}
+                  <span className="settings-hint">{t("settings.about.deleteCacheHint")}</span>
+                </label>
+                <button
+                  type="button"
+                  className="settings-delete-cache-btn"
+                  onClick={async () => {
+                    if (!window.confirm(t("settings.about.deleteCacheConfirm"))) {
+                      return;
+                    }
+                    try {
+                      await window.openNow.deleteCache();
+                      alert(t("settings.about.cacheCleared"));
+                    } catch (err) {
+                      console.error("[Settings] Failed to delete cache:", err);
+                      alert(t("settings.about.deleteCacheFailed"));
+                    }
+                  }}
+                >
+	                  <Trash2 size={16} />
+	                  {t("settings.about.deleteCache")}
+	                </button>
+              </div>
+
+            </div>
+          </section>
+                )}
               </>
             )}
-          </div>
-        </section>
-
-        {/* ── Miscellaneous ──────────────────────────────── */}
-        <section className="settings-section">
-          <div className="settings-section-header">
-            <h2>Miscellaneous</h2>
-          </div>
-          <div className="settings-rows">
-            {/* Export Logs */}
-            <div className="settings-row">
-              <label className="settings-label">
-                Export Logs
-                <span className="settings-hint">Download debug logs with sensitive data redacted for privacy</span>
-              </label>
-              <button
-                type="button"
-                className="settings-export-logs-btn"
-                onClick={async () => {
-                  try {
-                    const logs = await window.openNow.exportLogs("text");
-                    const blob = new Blob([logs], { type: "text/plain" });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement("a");
-                    a.href = url;
-                    a.download = `opennow-logs-${new Date().toISOString().replace(/[:.]/g, "-")}.txt`;
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                    URL.revokeObjectURL(url);
-                  } catch (err) {
-                    console.error("[Settings] Failed to export logs:", err);
-                    alert("Failed to export logs. Please try again.");
-                  }
-                }}
-              >
-                <FileDown size={16} />
-                Export Logs
-              </button>
-            </div>
-
-            <div className="settings-row">
-              <label className="settings-label">
-                Delete Cache
-                <span className="settings-hint">Clear all cached game data, images, and metadata</span>
-              </label>
-              <button
-                type="button"
-                className="settings-delete-cache-btn"
-                onClick={async () => {
-                  if (!window.confirm("Are you sure you want to delete all cached data? This will clear all game metadata, images, and library information.")) {
-                    return;
-                  }
-                  try {
-                    await window.openNow.deleteCache();
-                    alert("Cache cleared successfully. The app will refresh on next startup.");
-                  } catch (err) {
-                    console.error("[Settings] Failed to delete cache:", err);
-                    alert("Failed to delete cache. Please try again.");
-                  }
-                }}
-              >
-                <Trash2 size={16} />
-                Delete Cache
-              </button>
-            </div>
-          </div>
-        </section>
+          </>
+        )}
+      </div>
         </div>
 
-      ) : (
-        thanksTabContent
+      {nativeStreamerEnablePromptVisible && (
+        <div
+          className={`native-streamer-warning ${nativeStreamerEnablePromptClosing ? "native-streamer-warning--closing" : ""}`}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="native-streamer-warning-title"
+          aria-describedby="native-streamer-warning-copy"
+        >
+          <button
+            type="button"
+            className="native-streamer-warning-backdrop"
+            aria-label={t("app.actions.cancel")}
+            aria-hidden="true"
+            tabIndex={-1}
+            onClick={closeNativeStreamerEnablePrompt}
+          />
+          <div ref={nativeStreamerEnablePromptRef} className="native-streamer-warning-card" tabIndex={-1}>
+            <div className="native-streamer-warning-kicker">
+              <AlertTriangle size={14} />
+              {t("settings.nativeStreamer.enablePromptKicker")}
+            </div>
+            <h3 id="native-streamer-warning-title" className="native-streamer-warning-title">
+              {t("settings.nativeStreamer.enablePromptTitle")}
+            </h3>
+            <p id="native-streamer-warning-copy" className="native-streamer-warning-text">
+              {t("settings.nativeStreamer.enablePromptBody")}
+            </p>
+
+            <div className="native-streamer-warning-list">
+              <div className="native-streamer-warning-list-item">
+                <Cpu size={16} />
+                <span>{t("settings.nativeStreamer.enablePromptNewSessions")}</span>
+              </div>
+              <div className="native-streamer-warning-list-item">
+                <Keyboard size={16} />
+                <span>{t("settings.nativeStreamer.enablePromptShortcuts")}</span>
+              </div>
+              <div className="native-streamer-warning-list-item">
+                <Monitor size={16} />
+                <span>{t("settings.nativeStreamer.enablePromptAltTab")}</span>
+              </div>
+            </div>
+
+            <div className="native-streamer-warning-actions">
+              <button
+                type="button"
+                className="native-streamer-warning-btn native-streamer-warning-btn--secondary"
+                onClick={closeNativeStreamerEnablePrompt}
+              >
+                {t("settings.nativeStreamer.enablePromptCancel")}
+              </button>
+              <button
+                type="button"
+                className="native-streamer-warning-btn native-streamer-warning-btn--primary"
+                onClick={confirmNativeStreamerEnablePrompt}
+                ref={nativeStreamerEnablePromptConfirmRef}
+                autoFocus
+              >
+                {t("settings.nativeStreamer.enablePromptEnable")}
+              </button>
+            </div>
+            <div className="native-streamer-warning-hint">
+              <kbd>Esc</kbd> {t("settings.nativeStreamer.enablePromptEsc")}
+            </div>
+          </div>
+        </div>
       )}
-
-
-    </div>
+      {zortosCommunityProxyPromptVisible && (
+        <div
+          className={`native-streamer-warning ${zortosCommunityProxyPromptClosing ? "native-streamer-warning--closing" : ""}`}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="zortos-community-proxy-title"
+          aria-describedby="zortos-community-proxy-copy"
+        >
+          <button
+            type="button"
+            className="native-streamer-warning-backdrop"
+            aria-label={t("app.actions.cancel")}
+            aria-hidden="true"
+            tabIndex={-1}
+            disabled={zortosCommunityProxyProvisioning}
+            onClick={closeZortosCommunityProxyPrompt}
+          />
+          <div ref={zortosCommunityProxyPromptRef} className="native-streamer-warning-card" tabIndex={-1}>
+            <div className="native-streamer-warning-kicker">
+              <Heart size={14} />
+              {t("settings.video.zortosCommunityProxy.enablePromptKicker")}
+            </div>
+            <h3 id="zortos-community-proxy-title" className="native-streamer-warning-title">
+              {t("settings.video.zortosCommunityProxy.enablePromptTitle")}
+            </h3>
+            <p id="zortos-community-proxy-copy" className="native-streamer-warning-text">
+              {t("settings.video.zortosCommunityProxy.enablePromptBody")}
+            </p>
+            <p className="native-streamer-warning-text">
+              {t("settings.video.zortosCommunityProxy.enablePromptCostHint")}
+            </p>
+            {zortosCommunityProxyError && (
+              <p className="settings-community-proxy-error">{zortosCommunityProxyError}</p>
+            )}
+            <div className="native-streamer-warning-actions">
+              <button
+                type="button"
+                className="native-streamer-warning-btn native-streamer-warning-btn--primary native-streamer-warning-btn--with-icon"
+                onClick={handleOpenZortosSponsors}
+              >
+                <Heart size={15} />
+                {t("settings.video.zortosCommunityProxy.enablePromptDonate")}
+              </button>
+              <button
+                type="button"
+                className="native-streamer-warning-btn native-streamer-warning-btn--secondary"
+                onClick={() => {
+                  void confirmZortosCommunityProxyPrompt();
+                }}
+                ref={zortosCommunityProxyPromptContinueRef}
+                disabled={zortosCommunityProxyProvisioning}
+                autoFocus
+              >
+                {zortosCommunityProxyProvisioning
+                  ? t("settings.video.zortosCommunityProxy.provisioning")
+                  : t("settings.video.zortosCommunityProxy.enablePromptContinue")}
+              </button>
+            </div>
+            <div className="native-streamer-warning-hint">
+              <kbd>Esc</kbd> {t("settings.video.zortosCommunityProxy.enablePromptEsc")}
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }

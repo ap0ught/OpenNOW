@@ -1,7 +1,9 @@
-import type { ActiveSessionInfo, AuthUser, SubscriptionInfo } from "@shared/gfn";
-import { House, Library, Settings, User, LogOut, Zap, Timer, HardDrive, X, Loader2, PlayCircle } from "lucide-react";
-import { useEffect, useState, type JSX } from "react";
+import type { ActiveSessionInfo, AuthUser, SavedAccount, SubscriptionInfo } from "@shared/gfn";
+import { House, Library, Settings, User, Timer, HardDrive, X, Loader2, PlayCircle, Square, ChevronDown, Check, Plus, Store as StoreIcon } from "lucide-react";
+import { useEffect, useRef, useState, type JSX } from "react";
 import { createPortal } from "react-dom";
+import { useTranslation } from "../i18n";
+import { OpenNowLogoMark } from "./OpenNowLogoMark";
 
 interface NavbarProps {
   currentPage: "home" | "library" | "settings";
@@ -11,17 +13,24 @@ interface NavbarProps {
   activeSession: ActiveSessionInfo | null;
   activeSessionGameTitle: string | null;
   isResumingSession: boolean;
+  isTerminatingSession: boolean;
   onResumeSession: () => void;
-  onLogout: () => void;
+  onTerminateSession: () => void;
+  savedAccounts: SavedAccount[];
+  onSwitchAccount: (userId: string) => void;
+  onRemoveAccount: (userId: string) => void;
+  onAddAccount: () => void;
+  onLogoutAll: () => void;
+  controllerMode?: boolean;
 }
 
 type NavbarModalType = "time" | "storage" | null;
 
-function getTierDisplay(tier: string): { label: string; className: string } {
+function getTierDisplay(tier: string): { labelKey: string; className: string } {
   const t = tier.toUpperCase();
-  if (t === "ULTIMATE") return { label: "Ultimate", className: "tier-ultimate" };
-  if (t === "PRIORITY" || t === "PERFORMANCE") return { label: "Priority", className: "tier-priority" };
-  return { label: "Free", className: "tier-free" };
+  if (t === "ULTIMATE") return { labelKey: "app.labels.ultimate", className: "tier-ultimate" };
+  if (t === "PRIORITY" || t === "PERFORMANCE") return { labelKey: "app.labels.priority", className: "tier-priority" };
+  return { labelKey: "app.labels.free", className: "tier-free" };
 }
 
 export function Navbar({
@@ -32,22 +41,46 @@ export function Navbar({
   activeSession,
   activeSessionGameTitle,
   isResumingSession,
+  isTerminatingSession,
   onResumeSession,
-  onLogout,
+  onTerminateSession,
+  savedAccounts,
+  onSwitchAccount,
+  onRemoveAccount,
+  onAddAccount,
+  onLogoutAll,
+  controllerMode = false,
 }: NavbarProps): JSX.Element {
+  const { t } = useTranslation();
   const [modalType, setModalType] = useState<NavbarModalType>(null);
+  const [accountDropdownOpen, setAccountDropdownOpen] = useState(false);
+  const accountContainerRef = useRef<HTMLDivElement | null>(null);
 
-  const navItems = [
-    { id: "home" as const, label: "Store", icon: House },
-    { id: "library" as const, label: "Library", icon: Library },
-    { id: "settings" as const, label: "Settings", icon: Settings },
-  ];
+  const navItems = controllerMode
+    ? [
+        { id: "store", page: "home" as const, label: "Store", icon: StoreIcon },
+        { id: "library", page: "library" as const, label: t("navigation.library"), icon: Library },
+        { id: "settings", page: "settings" as const, label: t("navigation.settings"), icon: Settings },
+      ]
+    : [
+        { id: "home", page: "home" as const, label: t("navigation.home"), icon: House },
+        { id: "library", page: "library" as const, label: t("navigation.library"), icon: Library },
+        { id: "settings", page: "settings" as const, label: t("navigation.settings"), icon: Settings },
+      ];
 
   const tierInfo = user ? getTierDisplay(user.membershipTier) : null;
   const formatHours = (value: number): string => {
     if (!Number.isFinite(value)) return "0";
     const rounded = value >= 10 ? Math.round(value) : Math.round(value * 10) / 10;
     return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+  };
+  const formatHoursAndMinutes = (value: number): string => {
+    if (!Number.isFinite(value)) return "0m";
+    const totalMinutes = Math.max(0, Math.round(value * 60));
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    if (hours === 0) return `${minutes}m`;
+    return minutes === 0 ? `${hours}h` : `${hours}h ${minutes}m`;
   };
   const formatGb = (value: number): string => {
     if (!Number.isFinite(value)) return "0";
@@ -56,7 +89,7 @@ export function Navbar({
   const formatPercent = (value: number): string => {
     if (!Number.isFinite(value)) return "0%";
     const rounded = Math.max(0, Math.min(100, Math.round(value)));
-    return `${rounded}%`;
+    return t("app.units.percent", { value: rounded });
   };
   const formatDateTime = (value: string | undefined): string | null => {
     if (!value) return null;
@@ -86,8 +119,8 @@ export function Navbar({
     : toneByLeftRatio(timeLeftRatio);
   const timeLabel = subscription
     ? subscription.isUnlimited
-      ? "Unlimited time"
-      : `${formatHours(timeLeft)}h left`
+      ? t("navbar.time.unlimitedTime")
+      : t("app.units.durationLeft", { value: formatHoursAndMinutes(timeLeft) })
     : null;
 
   const storageTotal = subscription?.storageAddon?.sizeGb;
@@ -104,16 +137,28 @@ export function Navbar({
   const storageTone = toneByLeftRatio(storageLeftRatio);
   const storageLabel =
     storageHasData
-      ? `${formatGb(storageLeft ?? 0)} GB left`
+      ? t("app.units.gbLeft", { value: formatGb(storageLeft ?? 0) })
       : storageTotal !== undefined
-        ? `${formatGb(storageTotal)} GB total`
+        ? t("app.units.gbTotal", { value: formatGb(storageTotal) })
         : null;
 
   const spanStart = formatDateTime(subscription?.currentSpanStartDateTime);
   const spanEnd = formatDateTime(subscription?.currentSpanEndDateTime);
   const firstEntitlementStart = formatDateTime(subscription?.firstEntitlementStartDateTime);
-  const modalTitle = modalType === "time" ? "Playtime Details" : "Storage Details";
+  const modalTitle = modalType === "time" ? t("navbar.playtimeDetails") : t("navbar.storageDetails");
   const activeSessionTitle = activeSessionGameTitle?.trim() || null;
+  const activeUserId = user?.userId ?? null;
+
+  useEffect(() => {
+    if (!accountDropdownOpen) return;
+    const onDocumentPointerDown = (event: MouseEvent) => {
+      if (!(event.target instanceof Node) || !accountContainerRef.current?.contains(event.target)) {
+        setAccountDropdownOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", onDocumentPointerDown);
+    return () => window.removeEventListener("mousedown", onDocumentPointerDown);
+  }, [accountDropdownOpen]);
 
   useEffect(() => {
     if (!modalType) return;
@@ -147,7 +192,7 @@ export function Navbar({
                 type="button"
                 className="navbar-modal-close"
                 onClick={() => setModalType(null)}
-                title="Close"
+                title={t("app.actions.close")}
               >
                 <X size={16} />
               </button>
@@ -158,8 +203,8 @@ export function Navbar({
                 {!subscription.isUnlimited && timeTotal > 0 && (
                   <div className="navbar-meter">
                     <div className="navbar-meter-head">
-                      <span>Time Usage</span>
-                      <strong>{formatPercent(timeUsedRatio * 100)} used</strong>
+                      <span>{t("navbar.time.timeUsage")}</span>
+                      <strong>{t("navbar.time.used", { percent: formatPercent(timeUsedRatio * 100) })}</strong>
                     </div>
                     <div className="navbar-meter-track">
                       <span
@@ -168,38 +213,38 @@ export function Navbar({
                       />
                     </div>
                     <div className="navbar-meter-legend">
-                      <span>{formatHours(timeUsed)}h used</span>
-                      <span>{formatHours(timeLeft)}h left</span>
+                      <span>{t("app.units.hoursUsed", { value: formatHours(timeUsed) })}</span>
+                      <span>{t("app.units.durationLeft", { value: formatHoursAndMinutes(timeLeft) })}</span>
                     </div>
                   </div>
                 )}
-                <div className="navbar-modal-row"><span>Tier</span><strong>{subscription.membershipTier}</strong></div>
+                <div className="navbar-modal-row"><span>{t("navbar.time.tier")}</span><strong>{subscription.membershipTier}</strong></div>
                 {subscription.subscriptionType && (
-                  <div className="navbar-modal-row"><span>Type</span><strong>{subscription.subscriptionType}</strong></div>
+                  <div className="navbar-modal-row"><span>{t("navbar.time.type")}</span><strong>{subscription.subscriptionType}</strong></div>
                 )}
                 {subscription.subscriptionSubType && (
-                  <div className="navbar-modal-row"><span>Sub Type</span><strong>{subscription.subscriptionSubType}</strong></div>
+                  <div className="navbar-modal-row"><span>{t("navbar.time.subType")}</span><strong>{subscription.subscriptionSubType}</strong></div>
                 )}
-                <div className="navbar-modal-row"><span>Time Left</span><strong>{subscription.isUnlimited ? "Unlimited" : `${formatHours(timeLeft)}h`}</strong></div>
-                <div className="navbar-modal-row"><span>Total Time</span><strong>{subscription.isUnlimited ? "Unlimited" : `${formatHours(timeTotal)}h`}</strong></div>
-                <div className="navbar-modal-row"><span>Used Time</span><strong>{formatHours(timeUsed)}h</strong></div>
-                <div className="navbar-modal-row"><span>Allotted</span><strong>{formatHours(allottedHours)}h</strong></div>
-                <div className="navbar-modal-row"><span>Purchased</span><strong>{formatHours(purchasedHours)}h</strong></div>
-                <div className="navbar-modal-row"><span>Rolled Over</span><strong>{formatHours(rolledOverHours)}h</strong></div>
+                <div className="navbar-modal-row"><span>{t("navbar.time.timeLeft")}</span><strong>{subscription.isUnlimited ? t("app.labels.unlimited") : formatHoursAndMinutes(timeLeft)}</strong></div>
+                <div className="navbar-modal-row"><span>{t("navbar.time.totalTime")}</span><strong>{subscription.isUnlimited ? t("app.labels.unlimited") : t("app.units.hours", { value: formatHours(timeTotal) })}</strong></div>
+                <div className="navbar-modal-row"><span>{t("navbar.time.usedTime")}</span><strong>{t("app.units.hours", { value: formatHours(timeUsed) })}</strong></div>
+                <div className="navbar-modal-row"><span>{t("navbar.time.allotted")}</span><strong>{t("app.units.hours", { value: formatHours(allottedHours) })}</strong></div>
+                <div className="navbar-modal-row"><span>{t("navbar.time.purchased")}</span><strong>{t("app.units.hours", { value: formatHours(purchasedHours) })}</strong></div>
+                <div className="navbar-modal-row"><span>{t("navbar.time.rolledOver")}</span><strong>{t("app.units.hours", { value: formatHours(rolledOverHours) })}</strong></div>
                 {firstEntitlementStart && (
-                  <div className="navbar-modal-row"><span>First Entitlement</span><strong>{firstEntitlementStart}</strong></div>
+                  <div className="navbar-modal-row"><span>{t("navbar.time.firstEntitlement")}</span><strong>{firstEntitlementStart}</strong></div>
                 )}
-                {spanStart && <div className="navbar-modal-row"><span>Period Start</span><strong>{spanStart}</strong></div>}
-                {spanEnd && <div className="navbar-modal-row"><span>Period End</span><strong>{spanEnd}</strong></div>}
+                {spanStart && <div className="navbar-modal-row"><span>{t("navbar.time.periodStart")}</span><strong>{spanStart}</strong></div>}
+                {spanEnd && <div className="navbar-modal-row"><span>{t("navbar.time.periodEnd")}</span><strong>{spanEnd}</strong></div>}
                 {subscription.notifyUserWhenTimeRemainingInMinutes !== undefined && (
-                  <div className="navbar-modal-row"><span>Notify At (General)</span><strong>{subscription.notifyUserWhenTimeRemainingInMinutes} min</strong></div>
+                  <div className="navbar-modal-row"><span>{t("navbar.time.notifyAtGeneral")}</span><strong>{t("app.units.minutes", { value: subscription.notifyUserWhenTimeRemainingInMinutes })}</strong></div>
                 )}
                 {subscription.notifyUserOnSessionWhenRemainingTimeInMinutes !== undefined && (
-                  <div className="navbar-modal-row"><span>Notify At (In Session)</span><strong>{subscription.notifyUserOnSessionWhenRemainingTimeInMinutes} min</strong></div>
+                  <div className="navbar-modal-row"><span>{t("navbar.time.notifyAtInSession")}</span><strong>{t("app.units.minutes", { value: subscription.notifyUserOnSessionWhenRemainingTimeInMinutes })}</strong></div>
                 )}
-                {subscription.state && <div className="navbar-modal-row"><span>Plan State</span><strong>{subscription.state}</strong></div>}
+                {subscription.state && <div className="navbar-modal-row"><span>{t("navbar.time.planState")}</span><strong>{subscription.state}</strong></div>}
                 {subscription.isGamePlayAllowed !== undefined && (
-                  <div className="navbar-modal-row"><span>Gameplay Allowed</span><strong>{subscription.isGamePlayAllowed ? "Yes" : "No"}</strong></div>
+                  <div className="navbar-modal-row"><span>{t("navbar.time.gameplayAllowed")}</span><strong>{subscription.isGamePlayAllowed ? t("navbar.time.yes") : t("navbar.time.no")}</strong></div>
                 )}
               </div>
             )}
@@ -209,8 +254,8 @@ export function Navbar({
                 {storageHasData && (
                   <div className="navbar-meter">
                     <div className="navbar-meter-head">
-                      <span>Storage Usage</span>
-                      <strong>{formatPercent(storageUsedRatio * 100)} used</strong>
+                      <span>{t("navbar.storage.storageUsage")}</span>
+                      <strong>{t("navbar.time.used", { percent: formatPercent(storageUsedRatio * 100) })}</strong>
                     </div>
                     <div className="navbar-meter-track">
                       <span
@@ -219,22 +264,22 @@ export function Navbar({
                       />
                     </div>
                     <div className="navbar-meter-legend">
-                      <span>{formatGb(storageUsed ?? 0)} GB used</span>
-                      <span>{formatGb(storageLeft ?? 0)} GB left</span>
+                      <span>{t("app.units.gbUsed", { value: formatGb(storageUsed ?? 0) })}</span>
+                      <span>{t("app.units.gbLeft", { value: formatGb(storageLeft ?? 0) })}</span>
                     </div>
                   </div>
                 )}
-                <div className="navbar-modal-row"><span>Storage Left</span><strong>{storageLeft !== undefined ? `${formatGb(storageLeft)} GB` : "N/A"}</strong></div>
-                <div className="navbar-modal-row"><span>Storage Used</span><strong>{storageUsed !== undefined ? `${formatGb(storageUsed)} GB` : "N/A"}</strong></div>
-                <div className="navbar-modal-row"><span>Storage Total</span><strong>{storageTotal !== undefined ? `${formatGb(storageTotal)} GB` : "N/A"}</strong></div>
+                <div className="navbar-modal-row"><span>{t("navbar.storage.storageLeft")}</span><strong>{storageLeft !== undefined ? t("app.units.gb", { value: formatGb(storageLeft) }) : t("navbar.storage.notAvailable")}</strong></div>
+                <div className="navbar-modal-row"><span>{t("navbar.storage.storageUsed")}</span><strong>{storageUsed !== undefined ? t("app.units.gb", { value: formatGb(storageUsed) }) : t("navbar.storage.notAvailable")}</strong></div>
+                <div className="navbar-modal-row"><span>{t("navbar.storage.storageTotal")}</span><strong>{storageTotal !== undefined ? t("app.units.gb", { value: formatGb(storageTotal) }) : t("navbar.storage.notAvailable")}</strong></div>
                 {subscription.storageAddon?.regionName && (
-                  <div className="navbar-modal-row"><span>Storage Region</span><strong>{subscription.storageAddon.regionName}</strong></div>
+                  <div className="navbar-modal-row"><span>{t("navbar.storage.storageRegion")}</span><strong>{subscription.storageAddon.regionName}</strong></div>
                 )}
                 {subscription.storageAddon?.regionCode && (
-                  <div className="navbar-modal-row"><span>Storage Region Code</span><strong>{subscription.storageAddon.regionCode}</strong></div>
+                  <div className="navbar-modal-row"><span>{t("navbar.storage.storageRegionCode")}</span><strong>{subscription.storageAddon.regionCode}</strong></div>
                 )}
                 {subscription.serverRegionId && (
-                  <div className="navbar-modal-row"><span>Server Region (VPC)</span><strong>{subscription.serverRegionId}</strong></div>
+                  <div className="navbar-modal-row"><span>{t("navbar.storage.serverRegionVpc")}</span><strong>{subscription.serverRegionId}</strong></div>
                 )}
               </div>
             )}
@@ -245,10 +290,10 @@ export function Navbar({
     : null;
 
   return (
-    <nav className="navbar">
+    <nav className={`navbar${controllerMode ? " navbar--controller" : ""}`}>
       <div className="navbar-left">
         <div className="navbar-brand">
-          <Zap size={16} strokeWidth={2.5} />
+          <OpenNowLogoMark className="opennow-logo-mark" />
         </div>
         <span className="navbar-logo-text">OpenNOW</span>
       </div>
@@ -256,12 +301,14 @@ export function Navbar({
       <div className="navbar-nav">
         {navItems.map((item) => {
           const Icon = item.icon;
-          const isActive = currentPage === item.id;
+          const isActive = controllerMode
+            ? item.id === (currentPage === "home" ? "store" : currentPage)
+            : currentPage === item.page;
 
           return (
             <button
               key={item.id}
-              onClick={() => onNavigate(item.id)}
+              onClick={() => onNavigate(item.page)}
               className={`navbar-link ${isActive ? "active" : ""}`}
             >
               <Icon size={16} />
@@ -272,32 +319,48 @@ export function Navbar({
       </div>
 
       <div className="navbar-right">
-        {activeSession && (
-          <button
-            type="button"
-            className={`navbar-session-resume${isResumingSession ? " is-loading" : ""}`}
-            title={
-              activeSession.serverIp
-                ? activeSessionTitle
-                  ? `Resume active cloud session: ${activeSessionTitle}`
-                  : "Resume active cloud session"
-                : "Active session found (missing server address)"
-            }
-            onClick={onResumeSession}
-            disabled={isResumingSession || !activeSession.serverIp}
-          >
-            {isResumingSession ? <Loader2 size={14} className="navbar-session-resume-spin" /> : <PlayCircle size={14} />}
-            <span className="navbar-session-resume-text">Resume</span>
-            {activeSessionTitle && <span className="navbar-session-resume-game">{activeSessionTitle}</span>}
-          </button>
+        {activeSession && !controllerMode && (
+          <div className="navbar-session-actions">
+            <button
+              type="button"
+              className={`navbar-session-resume${isResumingSession ? " is-loading" : ""}`}
+              title={
+                activeSession.serverIp
+                  ? activeSessionTitle
+                    ? t("session.resumeActiveCloudSessionTitle", { title: activeSessionTitle })
+                    : t("session.resumeActiveCloudSession")
+                  : t("session.activeSessionMissingServerAddress")
+              }
+              onClick={onResumeSession}
+              disabled={isResumingSession || isTerminatingSession || !activeSession.serverIp}
+            >
+              {isResumingSession ? <Loader2 size={14} className="navbar-session-resume-spin" /> : <PlayCircle size={14} />}
+              <span className="navbar-session-resume-text">{t("app.actions.resume")}</span>
+              {activeSessionTitle && <span className="navbar-session-resume-game">{activeSessionTitle}</span>}
+            </button>
+            <button
+              type="button"
+              className={`navbar-session-terminate${isTerminatingSession ? " is-loading" : ""}`}
+              title={
+                activeSessionTitle
+                  ? t("session.terminateActiveCloudSessionTitle", { title: activeSessionTitle })
+                  : t("session.terminateActiveCloudSession")
+              }
+              onClick={onTerminateSession}
+              disabled={isResumingSession || isTerminatingSession}
+            >
+              {isTerminatingSession ? <Loader2 size={14} className="navbar-session-resume-spin" /> : <Square size={12} />}
+              <span className="navbar-session-terminate-text">{t("session.terminate")}</span>
+            </button>
+          </div>
         )}
         {(timeLabel || storageLabel) && (
-          <div className="navbar-subscription" aria-label="Subscription details">
+          <div className="navbar-subscription" aria-label={t("navbar.subscriptionDetails")}>
             {timeLabel && (
               <button
                 type="button"
                 className={`navbar-subscription-chip navbar-subscription-chip--${timeTone}`}
-                title="Show playtime details"
+                title={t("navbar.showPlaytimeDetails")}
                 onClick={() => setModalType("time")}
               >
                 <Timer size={14} />
@@ -308,7 +371,7 @@ export function Navbar({
               <button
                 type="button"
                 className={`navbar-subscription-chip navbar-subscription-chip--${storageTone}`}
-                title="Show storage details"
+                title={t("navbar.showStorageDetails")}
                 onClick={() => setModalType("storage")}
               >
                 <HardDrive size={14} />
@@ -319,29 +382,142 @@ export function Navbar({
         )}
         {user ? (
           <>
-            <div className="navbar-user">
-              {user.avatarUrl ? (
-                <img src={user.avatarUrl} alt={user.displayName} className="navbar-avatar" />
-              ) : (
-                <div className="navbar-avatar-fallback">
-                  <User size={14} />
+            <div className="navbar-account-container" ref={accountContainerRef}>
+              <button
+                type="button"
+                className="navbar-user navbar-user--clickable"
+                onClick={() => setAccountDropdownOpen((previous) => !previous)}
+                aria-haspopup="menu"
+                aria-expanded={accountDropdownOpen}
+                aria-controls="navbar-account-dropdown"
+              >
+                {user.avatarUrl ? (
+                  <img src={user.avatarUrl} alt={user.displayName} className="navbar-avatar" />
+                ) : (
+                  <div className="navbar-avatar-fallback">
+                    <User size={14} />
+                  </div>
+                )}
+                <div className="navbar-user-info">
+                  <span className="navbar-username">{user.displayName}</span>
+                  {tierInfo && (
+                    <span className={`navbar-tier ${tierInfo.className}`}>{t(tierInfo.labelKey)}</span>
+                  )}
+                </div>
+                <ChevronDown
+                  size={14}
+                  className={`navbar-user-chevron${accountDropdownOpen ? " is-open" : ""}`}
+                />
+              </button>
+              {accountDropdownOpen && (
+                <div
+                  id="navbar-account-dropdown"
+                  className="navbar-account-dropdown"
+                  role="menu"
+                  aria-labelledby="navbar-account-dropdown-header"
+                >
+                  <div id="navbar-account-dropdown-header" className="navbar-account-dropdown-header">
+                    {t("auth.accounts.switchAccount")}
+                  </div>
+                  <ul className="navbar-account-list">
+                    {savedAccounts.map((account) => {
+                      const accountTierInfo = getTierDisplay(account.membershipTier);
+                      const isActive = activeUserId === account.userId;
+                      const canRemove = !isActive && savedAccounts.length > 1;
+                      return (
+                        <li
+                          key={account.userId}
+                          role="none"
+                          className={`navbar-account-item${isActive ? " navbar-account-item--active" : ""}`}
+                        >
+                          <button
+                            type="button"
+                            className="navbar-account-item-main"
+                            role="menuitem"
+                            onClick={() => {
+                              if (!isActive) {
+                                void onSwitchAccount(account.userId);
+                              }
+                              setAccountDropdownOpen(false);
+                            }}
+                            disabled={isActive}
+                          >
+                            {account.avatarUrl ? (
+                              <img
+                                src={account.avatarUrl}
+                                alt={account.displayName}
+                                className="navbar-account-item-avatar"
+                              />
+                            ) : (
+                              <div className="navbar-avatar-fallback navbar-account-item-avatar">
+                                <User size={12} />
+                              </div>
+                            )}
+                            <div className="navbar-account-item-info">
+                              <span className="navbar-account-item-name">{account.displayName}</span>
+                              {account.email && <span className="navbar-account-item-email">{account.email}</span>}
+                            </div>
+                            <div className="navbar-account-item-right">
+                                <span className={`navbar-account-item-tier ${accountTierInfo.className}`}>
+                                  {t(accountTierInfo.labelKey)}
+                                </span>
+                                {isActive && (
+                                <span className="navbar-account-item-check" aria-label={t("auth.accounts.activeAccount")}>
+                                  <Check size={14} />
+                                </span>
+                              )}
+                            </div>
+                          </button>
+                          {canRemove && (
+                            <button
+                              type="button"
+                              className="navbar-account-remove"
+                              role="menuitem"
+                              aria-label={t("auth.accounts.removeNamedAccount", { name: account.displayName })}
+                              onClick={() => {
+                                setAccountDropdownOpen(false);
+                                onRemoveAccount(account.userId);
+                              }}
+                            >
+                              <X size={12} />
+                            </button>
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                  <div className="navbar-account-divider" aria-hidden="true" />
+                  <button
+                    type="button"
+                    className="navbar-account-add"
+                    role="menuitem"
+                    onClick={() => {
+                      onAddAccount();
+                      setAccountDropdownOpen(false);
+                    }}
+                  >
+                    <Plus size={14} />
+                    <span>{t("auth.accounts.addAccount")}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="navbar-account-signout-all"
+                    role="menuitem"
+                    onClick={() => {
+                      setAccountDropdownOpen(false);
+                      onLogoutAll();
+                    }}
+                  >
+                    {t("auth.accounts.signOutAllAccounts")}
+                  </button>
                 </div>
               )}
-              <div className="navbar-user-info">
-                <span className="navbar-username">{user.displayName}</span>
-                {tierInfo && (
-                  <span className={`navbar-tier ${tierInfo.className}`}>{tierInfo.label}</span>
-                )}
-              </div>
             </div>
-            <button onClick={onLogout} className="navbar-logout" title="Sign out">
-              <LogOut size={16} />
-            </button>
           </>
         ) : (
           <div className="navbar-guest">
             <User size={14} />
-            <span>Guest</span>
+            <span>{t("auth.accounts.guest")}</span>
           </div>
         )}
       </div>

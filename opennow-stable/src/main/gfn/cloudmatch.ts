@@ -1,11 +1,16 @@
 import crypto from "node:crypto";
 import dns from "node:dns";
+import { createRequire } from "node:module";
+import { createHash } from "node:crypto";
 
 import type {
   ActiveSessionInfo,
+  AppLaunchMode,
   ColorQuality,
   NegotiatedStreamProfile,
   IceServer,
+  MediaConnectionInfo,
+  StreamingFeatures,
   SessionAdAction,
   SessionAdInfo,
   SessionAdReportRequest,
@@ -24,15 +29,197 @@ import {
   colorQualityChromaFormat,
   resolveGfnKeyboardLayout,
 } from "@shared/gfn";
+import { DEFAULT_MINIMUM_FPS_FOR_REFLEX_WITHOUT_VRR } from "@shared/cloudGsync";
 
 import type { CloudMatchRequest, CloudMatchResponse, GetSessionsResponse } from "./types";
 import { SessionError } from "./errorCodes";
+import {
+  buildGfnCloudMatchClaimHeaders,
+  buildGfnCloudMatchHeaders,
+} from "./clientHeaders";
+import { getStableDeviceId } from "./deviceId";
+import { fetchWithOptionalProxy } from "./proxyFetch";
+import {
+  readCloudMatchJson,
+  throwIfCloudMatchResponseError,
+} from "./request";
 
-const GFN_USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 NVIDIACEFClient/HEAD/debb5919f6 GFN-PC/2.0.80.173";
-const GFN_CLIENT_VERSION = "2.0.80.173";
 const SESSION_MODIFY_ACTION_AD_UPDATE = 6;
 const READY_SESSION_STATUSES = new Set([2, 3]);
+const CLOUDMATCH_REQUEST_TIMEOUT_MS = 30_000;
+const CLOUDMATCH_GET_RETRIES = 2;
+const CLOUDMATCH_RETRY_DELAYS_MS = [250, 750];
+const CLOUDMATCH_RETRY_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
+const NETWORK_TEST_SESSION_TIMEOUT_MS = 8_000;
+const NETWORK_TEST_SESSION_CACHE_TTL_MS = 30 * 60 * 1000;
+
+const networkTestSessionCache = new Map<string, { sessionId: string; expiresAt: number }>();
+const require = createRequire(import.meta.url);
+
+interface CloudMatchServerInfoResponse {
+  metaData?: Array<{
+    key: string;
+    value: string;
+  }>;
+}
+
+interface NetworkTestSessionResponse {
+  requestStatus?: {
+    statusCode?: number;
+    statusDescription?: string;
+    serverId?: string;
+  };
+  netTestSession?: {
+    sessionId?: string;
+    connectionInfo?: Array<{
+      ip?: string;
+      port?: number;
+      appLevelProtocol?: number;
+    }>;
+    netTestThresholds?: {
+      recommendedBandwidthMBPS?: number;
+      requiredBandwidthMBPS?: number;
+      recommendedLatencyMS?: number;
+      requiredLatencyMS?: number;
+      recommendedPacketLossPct?: number;
+      requiredPacketLossPct?: number;
+    };
+    serverId?: string;
+  };
+}
+
+interface CloudMatchFetchOptions {
+  proxyUrl?: string;
+  timeoutMs?: number;
+  retries?: number;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchCloudMatch(
+  input: string,
+  init: RequestInit,
+  options: CloudMatchFetchOptions = {},
+): Promise<Response> {
+  const method = (init.method ?? "GET").toUpperCase();
+  const retries = options.retries ?? (method === "GET" ? CLOUDMATCH_GET_RETRIES : 0);
+  const timeoutMs = options.timeoutMs ?? CLOUDMATCH_REQUEST_TIMEOUT_MS;
+
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const response = await fetchWithOptionalProxy(input, {
+        ...init,
+        signal: controller.signal,
+      }, options.proxyUrl);
+      clearTimeout(timeout);
+
+      if (attempt < retries && CLOUDMATCH_RETRY_STATUSES.has(response.status)) {
+        await sleep(CLOUDMATCH_RETRY_DELAYS_MS[Math.min(attempt, CLOUDMATCH_RETRY_DELAYS_MS.length - 1)] ?? 0);
+        continue;
+      }
+
+      return response;
+    } catch (error) {
+      clearTimeout(timeout);
+      lastError = error;
+      if (attempt >= retries) {
+        throw error;
+      }
+
+      const retryDelay = CLOUDMATCH_RETRY_DELAYS_MS[Math.min(attempt, CLOUDMATCH_RETRY_DELAYS_MS.length - 1)];
+      await sleep(retryDelay ?? 0);
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+function normalizeCloudMatchBaseUrl(url: string): string {
+  const trimmed = url.trim();
+  const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  return withProtocol.endsWith("/") ? withProtocol.slice(0, -1) : withProtocol;
+}
+
+export function extractServerInfoRegionBases(payload: CloudMatchServerInfoResponse): string[] {
+  const metadata = payload.metaData ?? [];
+  const byKey = new Map(metadata.map((entry) => [entry.key, entry.value]));
+  const regionNames = byKey.get("gfn-regions")
+    ?.split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean) ?? [];
+  const localRegionName = byKey.get("local-region")?.trim();
+  const orderedRegionNames = [
+    ...(localRegionName ? [localRegionName] : []),
+    ...regionNames,
+  ];
+  const bases: string[] = [];
+  const seen = new Set<string>();
+
+  for (const regionName of orderedRegionNames) {
+    const regionUrl = byKey.get(regionName);
+    if (!regionUrl?.startsWith("http")) {
+      continue;
+    }
+    const normalized = normalizeCloudMatchBaseUrl(regionUrl);
+    if (!seen.has(normalized)) {
+      seen.add(normalized);
+      bases.push(normalized);
+    }
+  }
+
+  return bases;
+}
+
+function isDefaultStreamingServiceBase(baseUrl: string): boolean {
+  try {
+    const hostname = new URL(baseUrl).hostname.toLowerCase();
+    return hostname === "prod.cloudmatchbeta.nvidiagrid.net" ||
+      (hostname.startsWith("prod.") && hostname.endsWith(".nvidiagrid.net"));
+  } catch {
+    return false;
+  }
+}
+
+async function resolveCreateSessionBase(
+  base: string,
+  token: string,
+  clientId: string,
+  deviceId: string,
+  proxyUrl?: string,
+): Promise<string> {
+  if (!isDefaultStreamingServiceBase(base)) {
+    return base;
+  }
+
+  try {
+    const response = await fetchCloudMatch(`${base}/v2/serverInfo`, {
+      method: "GET",
+      headers: buildGfnCloudMatchHeaders({ token, clientId, deviceId, includeOrigin: false }),
+    }, { proxyUrl });
+    if (!response.ok) {
+      return base;
+    }
+
+    const [localRegionBase] = extractServerInfoRegionBases(
+      (await response.json()) as CloudMatchServerInfoResponse,
+    );
+    if (!localRegionBase || localRegionBase === base) {
+      return base;
+    }
+
+    console.log(`[CloudMatch] createSession resolved ${base} to local region ${localRegionBase}`);
+    return localRegionBase;
+  } catch (error) {
+    console.warn(`[CloudMatch] createSession local-region discovery failed: ${formatErrorForLog(error)}`);
+    return base;
+  }
+}
 
 const AD_ACTION_CODES: Record<SessionAdAction, number> = {
   start: 1,
@@ -47,6 +234,59 @@ const GFN_AD_MEDIA_PROFILE_ORDER = new Map<string, number>([
   ["webm", 1],
   ["hlsadaptive", 2],
 ]);
+
+// Wire values used by cloudmatch session requests. Matches the official
+// client's mapping: Default -> 1, GamepadFriendly -> 2, TouchFriendly -> 3.
+const APP_LAUNCH_MODE_WIRE_VALUES: Record<AppLaunchMode, number> = {
+  default: 1,
+  gamepadFriendly: 2,
+  touchFriendly: 3,
+};
+
+export function appLaunchModeWireValue(mode: AppLaunchMode | undefined): number {
+  return APP_LAUNCH_MODE_WIRE_VALUES[mode ?? "default"];
+}
+
+/** Wire appLaunchMode the server echoes back for an existing session, if present. */
+function echoedSessionAppLaunchMode(payload: CloudMatchResponse): number | undefined {
+  const raw = payload.session?.sessionRequestData?.appLaunchMode;
+  return typeof raw === "number" && Number.isFinite(raw) ? raw : undefined;
+}
+
+export function buildRequestedStreamingFeatures(
+  settings: StreamSettings,
+  bitDepth: number,
+  chromaFormat: number,
+  _hdrEnabled: boolean,
+): CloudMatchRequest["sessionRequestData"]["requestedStreamingFeatures"] {
+  const cloudGsync = settings.enableCloudGsync;
+
+  return {
+    reflex: shouldRequestReflex(settings),
+    bitDepth,
+    cloudGsync,
+    enabledL4S: settings.enableL4S,
+    supportedHidDevices: 0,
+    profile: 0,
+    fallbackToLogicalResolution: false,
+    chromaFormat,
+    prefilterMode: 0,
+    prefilterSharpness: 0,
+    prefilterNoiseReduction: 0,
+    hudStreamingMode: 0,
+  };
+}
+
+export function shouldRequestReflex(settings: StreamSettings): boolean {
+  if (typeof settings.cloudGsyncResolution?.reflexEnabled === "boolean") {
+    return settings.cloudGsyncResolution.reflexEnabled;
+  }
+
+  const reflexMinimum =
+    settings.cloudGsyncResolution?.capabilities.minimumFpsForReflexWithoutVrr
+    ?? DEFAULT_MINIMUM_FPS_FOR_REFLEX_WITHOUT_VRR;
+  return settings.enableCloudGsync || settings.fps >= reflexMinimum;
+}
 
 function isReadySessionStatus(status: number): boolean {
   return READY_SESSION_STATUSES.has(status);
@@ -227,7 +467,7 @@ function resolveSignaling(response: CloudMatchResponse): {
   serverIp: string;
   signalingServer: string;
   signalingUrl: string;
-  mediaConnectionInfo?: { ip: string; port: number };
+  mediaConnectionInfo?: MediaConnectionInfo;
 } {
   const connections = response.session.connectionInfo ?? [];
   const signalingConnection =
@@ -281,7 +521,7 @@ function resolveMediaConnectionInfo(
   connections: Array<{ ip?: string; port: number; usage: number; protocol?: number; resourcePath?: string }>,
   serverIp: string,
   options?: { logMissing?: boolean },
-): { ip: string; port: number } | undefined {
+): { ip: string; port: number; usage: number } | undefined {
   // Helper: extract IP from a connection entry
   const extractIp = (conn: { ip?: string; resourcePath?: string }): string | null => {
     // Try direct IP field
@@ -322,7 +562,7 @@ function resolveMediaConnectionInfo(
     const ip = extractIp(primary);
     const port = extractPort(primary);
     console.log(`[CloudMatch] resolveMediaConnectionInfo: usage=2 candidate: ip=${ip}, port=${port}`);
-    if (ip && port > 0) return { ip, port };
+    if (ip && port > 0) return { ip, port, usage: primary.usage };
   }
 
   // Priority 2: usage=17 (Alternative media path)
@@ -331,7 +571,7 @@ function resolveMediaConnectionInfo(
     const ip = extractIp(alt);
     const port = extractPort(alt);
     console.log(`[CloudMatch] resolveMediaConnectionInfo: usage=17 candidate: ip=${ip}, port=${port}`);
-    if (ip && port > 0) return { ip, port };
+    if (ip && port > 0) return { ip, port, usage: alt.usage };
   }
 
   // Priority 3: usage=14 with highest port (Alliance fallback)
@@ -343,7 +583,7 @@ function resolveMediaConnectionInfo(
     const ip = extractIp(conn) ?? serverIp;
     const port = extractPort(conn);
     console.log(`[CloudMatch] resolveMediaConnectionInfo: usage=14 candidate: ip=${ip}, port=${port} (serverIp fallback=${serverIp})`);
-    if (ip && port > 0) return { ip, port };
+    if (ip && port > 0) return { ip, port, usage: conn.usage };
   }
 
   if (options?.logMissing ?? true) {
@@ -400,41 +640,6 @@ function buildSignalingUrl(
   };
 }
 
-interface RequestHeadersOptions {
-  token: string;
-  clientId?: string;
-  deviceId?: string;
-  includeOrigin?: boolean;
-}
-
-function requestHeaders(options: RequestHeadersOptions): Record<string, string> {
-  const clientId = options.clientId ?? crypto.randomUUID();
-  const deviceId = options.deviceId ?? crypto.randomUUID();
-
-  const headers: Record<string, string> = {
-    "User-Agent": GFN_USER_AGENT,
-    Authorization: `GFNJWT ${options.token}`,
-    "Content-Type": "application/json",
-    "nv-browser-type": "CHROME",
-    "nv-client-id": clientId,
-    "nv-client-streamer": "NVIDIA-CLASSIC",
-    "nv-client-type": "NATIVE",
-    "nv-client-version": GFN_CLIENT_VERSION,
-    "nv-device-make": "UNKNOWN",
-    "nv-device-model": "UNKNOWN",
-    "nv-device-os": process.platform === "win32" ? "WINDOWS" : process.platform === "darwin" ? "MACOS" : "LINUX",
-    "nv-device-type": "DESKTOP",
-    "x-device-id": deviceId,
-  };
-
-  if (options.includeOrigin !== false) {
-    headers["Origin"] = "https://play.geforcenow.com";
-    headers["Referer"] = "https://play.geforcenow.com/";
-  }
-
-  return headers;
-}
-
 function parseResolution(input: string): { width: number; height: number } {
   const [rawWidth, rawHeight] = input.split("x");
   const width = Number.parseInt(rawWidth ?? "", 10);
@@ -447,11 +652,147 @@ function parseResolution(input: string): { width: number; height: number } {
   return { width, height };
 }
 
+function networkTestSessionCacheKey(base: string, settings: StreamSettings, token: string, proxyUrl?: string): string {
+  const { width, height } = parseResolution(settings.resolution);
+  const identityHash = createHash("sha256")
+    .update(token)
+    .update("\0")
+    .update(proxyUrl ?? "")
+    .digest("hex")
+    .slice(0, 16);
+  return `${base}\0${width}x${height}@${settings.fps}\0${identityHash}`;
+}
+
+function getCachedNetworkTestSessionId(base: string, settings: StreamSettings, token: string, proxyUrl?: string): string | null {
+  const cacheKey = networkTestSessionCacheKey(base, settings, token, proxyUrl);
+  const cached = networkTestSessionCache.get(cacheKey);
+  if (!cached) {
+    return null;
+  }
+
+  if (cached.expiresAt <= Date.now()) {
+    networkTestSessionCache.delete(cacheKey);
+    return null;
+  }
+
+  return cached.sessionId;
+}
+
+function cacheNetworkTestSessionId(
+  base: string,
+  settings: StreamSettings,
+  token: string,
+  sessionId: string,
+  proxyUrl?: string,
+): void {
+  networkTestSessionCache.set(networkTestSessionCacheKey(base, settings, token, proxyUrl), {
+    sessionId,
+    expiresAt: Date.now() + NETWORK_TEST_SESSION_CACHE_TTL_MS,
+  });
+}
+
+async function createNetworkTestSession(input: {
+  base: string;
+  token: string;
+  clientId: string;
+  deviceId: string;
+  settings: StreamSettings;
+  proxyUrl?: string;
+}): Promise<string | null> {
+  const cached = getCachedNetworkTestSessionId(input.base, input.settings, input.token, input.proxyUrl);
+  if (cached) {
+    return cached;
+  }
+
+  const { width, height } = parseResolution(input.settings.resolution);
+  const body = {
+    netTestRequestData: {
+      clientPlatformName: "windows",
+      netTestProfile: {
+        widthInPixels: width,
+        heightInPixels: height,
+        framesPerSecond: input.settings.fps,
+      },
+    },
+  };
+
+  try {
+    const response = await fetchCloudMatch(`${input.base}/v2/nettestsession`, {
+      method: "POST",
+      headers: buildGfnCloudMatchHeaders({
+        token: input.token,
+        clientId: input.clientId,
+        deviceId: input.deviceId,
+        includeOrigin: true,
+      }),
+      body: JSON.stringify(body),
+    }, {
+      proxyUrl: input.proxyUrl,
+      timeoutMs: NETWORK_TEST_SESSION_TIMEOUT_MS,
+      retries: 0,
+    });
+
+    if (!response.ok) {
+      console.warn(`[CloudMatch] nettestsession failed HTTP ${response.status}: ${(await response.text()).slice(0, 200)}`);
+      return null;
+    }
+
+    const payload = (await response.json()) as NetworkTestSessionResponse;
+    if (payload.requestStatus?.statusCode !== 1) {
+      console.warn(
+        `[CloudMatch] nettestsession API error: ${payload.requestStatus?.statusCode ?? "unknown"} ` +
+        `${payload.requestStatus?.statusDescription ?? ""}`.trim(),
+      );
+      return null;
+    }
+
+    const sessionId = payload.netTestSession?.sessionId?.trim();
+    if (!sessionId) {
+      console.warn("[CloudMatch] nettestsession response did not include a sessionId");
+      return null;
+    }
+
+    cacheNetworkTestSessionId(input.base, input.settings, input.token, sessionId, input.proxyUrl);
+    return sessionId;
+  } catch (error) {
+    console.warn(`[CloudMatch] nettestsession creation failed: ${formatErrorForLog(error)}`);
+    return null;
+  }
+}
+
 function timezoneOffsetMs(): number {
   return -new Date().getTimezoneOffset() * 60 * 1000;
 }
 
-function buildSessionRequestBody(input: SessionCreateRequest): CloudMatchRequest {
+function webRtcSessionMetadata(width: number, height: number): Array<{ key: string; value: string }> {
+  return [
+    { key: "SubSessionId", value: crypto.randomUUID() },
+    { key: "wssignaling", value: "1" },
+    { key: "GSStreamerType", value: "WebRTC" },
+    { key: "networkType", value: "Unknown" },
+    { key: "ClientImeSupport", value: "0" },
+    {
+      key: "clientPhysicalResolution",
+      value: JSON.stringify({ horizontalPixels: width, verticalPixels: height }),
+    },
+    { key: "surroundAudioInfo", value: "2" },
+  ];
+}
+
+export function shouldEnableInGameSettingsPersistence(
+  input: Pick<SessionCreateRequest, "enablePersistingInGameSettings" | "supportsInGameSettingsPersistence">,
+): boolean {
+  return (
+    input.enablePersistingInGameSettings === true &&
+    input.supportsInGameSettingsPersistence === true
+  );
+}
+
+function buildSessionRequestBody(
+  input: SessionCreateRequest,
+  deviceHashId: string,
+  networkTestSessionId: string | null = null,
+): CloudMatchRequest {
   const { width, height } = parseResolution(input.settings.resolution);
   const cq = input.settings.colorQuality;
   // IMPORTANT: hdrEnabled is a SEPARATE toggle from color quality.
@@ -469,42 +810,39 @@ function buildSessionRequestBody(input: SessionCreateRequest): CloudMatchRequest
       appId: input.appId,
       internalTitle: input.internalTitle || null,
       availableSupportedControllers: [],
-      networkTestSessionId: null,
+      networkTestSessionId,
       parentSessionId: null,
       clientIdentification: "GFN-PC",
-      deviceHashId: crypto.randomUUID(),
+      // Keep device identity stable across create -> reconnect/resume flows.
+      // The official client preserves this identity, and resume reliability depends on it.
+      deviceHashId,
       clientVersion: "30.0",
       sdkVersion: "1.0",
       streamerVersion: 1,
       clientPlatformName: "windows",
       clientRequestMonitorSettings: [
         {
+          monitorId: 0,
+          positionX: 0,
+          positionY: 0,
           widthInPixels: width,
           heightInPixels: height,
           framesPerSecond: input.settings.fps,
           sdrHdrMode: hdrEnabled ? 1 : 0,
-          displayData: {
-            desiredContentMaxLuminance: hdrEnabled ? 1000 : 0,
-            desiredContentMinLuminance: 0,
-            desiredContentMaxFrameAverageLuminance: hdrEnabled ? 500 : 0,
-          },
-          dpi: 100,
+          displayData: hdrEnabled
+            ? {
+                desiredContentMaxLuminance: 1000,
+                desiredContentMinLuminance: 0,
+                desiredContentMaxFrameAverageLuminance: 500,
+              }
+            : {},
+          hdr10PlusGamingData: null,
+          dpi: 0,
         },
       ],
       useOps: true,
       audioMode: 2,
-      metaData: [
-        { key: "SubSessionId", value: crypto.randomUUID() },
-        { key: "wssignaling", value: "1" },
-        { key: "GSStreamerType", value: "WebRTC" },
-        { key: "networkType", value: "Unknown" },
-        { key: "ClientImeSupport", value: "0" },
-        {
-          key: "clientPhysicalResolution",
-          value: JSON.stringify({ horizontalPixels: width, verticalPixels: height }),
-        },
-        { key: "surroundAudioInfo", value: "2" },
-      ],
+      metaData: webRtcSessionMetadata(width, height),
       sdrHdrMode: hdrEnabled ? 1 : 0,
       clientDisplayHdrCapabilities: hdrEnabled
         ? {
@@ -517,31 +855,18 @@ function buildSessionRequestBody(input: SessionCreateRequest): CloudMatchRequest
       remoteControllersBitmap: 0,
       clientTimezoneOffset: timezoneOffsetMs(),
       enhancedStreamMode: 1,
-      appLaunchMode: 1,
+      appLaunchMode: appLaunchModeWireValue(input.settings.appLaunchMode),
       secureRTSPSupported: false,
       partnerCustomData: "",
       accountLinked,
-      enablePersistingInGameSettings: true,
+      enablePersistingInGameSettings: shouldEnableInGameSettingsPersistence(input),
       userAge: 26,
-      requestedStreamingFeatures: {
-        reflex: input.settings.fps >= 120,
+      requestedStreamingFeatures: buildRequestedStreamingFeatures(
+        input.settings,
         bitDepth,
-        cloudGsync: input.settings.enableCloudGsync,
-        enabledL4S: input.settings.enableL4S,
-        mouseMovementFlags: 0,
-        trueHdr: hdrEnabled,
-        supportedHidDevices: 0,
-        profile: 0,
-        fallbackToLogicalResolution: false,
-        hidDevices: null,
         chromaFormat,
-        prefilterMode: 0,
-        prefilterSharpness: 0,
-        prefilterNoiseReduction: 0,
-        hudStreamingMode: 0,
-        sdrColorSpace: 2,
-        hdrColorSpace: hdrEnabled ? 4 : 0,
-      },
+        hdrEnabled,
+      ),
     },
   };
 }
@@ -613,13 +938,13 @@ function toOptionalString(value: unknown): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
-function extractQueuePosition(payload: CloudMatchResponse): number | undefined {
-  const direct = toPositiveInt(payload.session.queuePosition);
+function extractSessionQueuePosition(session: CloudMatchResponse["session"] | GetSessionsResponse["sessions"][number]): number | undefined {
+  const direct = toPositiveInt(session.queuePosition);
   if (direct !== undefined) {
     return direct;
   }
 
-  const seatSetup = payload.session.seatSetupInfo;
+  const seatSetup = session.seatSetupInfo;
   if (seatSetup) {
     const nested = toPositiveInt(seatSetup.queuePosition);
     if (nested !== undefined) {
@@ -627,7 +952,7 @@ function extractQueuePosition(payload: CloudMatchResponse): number | undefined {
     }
   }
 
-  const nestedSessionProgress = payload.session.sessionProgress;
+  const nestedSessionProgress = session.sessionProgress;
   if (nestedSessionProgress) {
     const nested = toPositiveInt(nestedSessionProgress.queuePosition);
     if (nested !== undefined) {
@@ -635,7 +960,7 @@ function extractQueuePosition(payload: CloudMatchResponse): number | undefined {
     }
   }
 
-  const nestedProgressInfo = payload.session.progressInfo;
+  const nestedProgressInfo = session.progressInfo;
   if (nestedProgressInfo) {
     const nested = toPositiveInt(nestedProgressInfo.queuePosition);
     if (nested !== undefined) {
@@ -646,12 +971,20 @@ function extractQueuePosition(payload: CloudMatchResponse): number | undefined {
   return undefined;
 }
 
-function extractSeatSetupStep(payload: CloudMatchResponse): number | undefined {
-  const raw = payload.session.seatSetupInfo?.seatSetupStep;
+function extractQueuePosition(payload: CloudMatchResponse): number | undefined {
+  return extractSessionQueuePosition(payload.session);
+}
+
+function extractSessionSeatSetupStep(session: CloudMatchResponse["session"] | GetSessionsResponse["sessions"][number]): number | undefined {
+  const raw = session.seatSetupInfo?.seatSetupStep;
   if (typeof raw === "number" && Number.isFinite(raw)) {
     return Math.trunc(raw);
   }
   return undefined;
+}
+
+function extractSeatSetupStep(payload: CloudMatchResponse): number | undefined {
+  return extractSessionSeatSetupStep(payload.session);
 }
 
 function normalizeSessionAdInfo(ad: NonNullable<CloudMatchResponse["session"]["sessionAds"]>[number], index: number): SessionAdInfo | null {
@@ -785,18 +1118,55 @@ function extractAdState(payload: CloudMatchResponse): SessionAdState | undefined
 }
 
 function toColorQuality(bitDepth?: number, chromaFormat?: number): ColorQuality | undefined {
-  if (bitDepth !== 0 && bitDepth !== 10) {
+  const normalizedBitDepth = bitDepth === 10 ? 1 : bitDepth;
+  const normalizedChromaFormat = chromaFormat === 2 ? 1 : chromaFormat;
+
+  if (normalizedBitDepth !== 0 && normalizedBitDepth !== 1) {
     return undefined;
   }
-  if (chromaFormat !== 0 && chromaFormat !== 2) {
+  if (normalizedChromaFormat !== 0 && normalizedChromaFormat !== 1) {
     return undefined;
   }
 
-  if (bitDepth === 10) {
-    return chromaFormat === 2 ? "10bit_444" : "10bit_420";
+  if (normalizedBitDepth === 1) {
+    return normalizedChromaFormat === 1 ? "10bit_444" : "10bit_420";
   }
 
-  return chromaFormat === 2 ? "8bit_444" : "8bit_420";
+  return normalizedChromaFormat === 1 ? "8bit_444" : "8bit_420";
+}
+
+function normalizeStreamingFeatures(
+  features:
+    | NonNullable<CloudMatchResponse["session"]["sessionRequestData"]>["requestedStreamingFeatures"]
+    | CloudMatchResponse["session"]["finalizedStreamingFeatures"]
+    | undefined,
+): StreamingFeatures | undefined {
+  if (!features) {
+    return undefined;
+  }
+
+  const normalized: StreamingFeatures = {};
+
+  if (typeof features.reflex === "boolean") {
+    normalized.reflex = features.reflex;
+  }
+  if (typeof features.bitDepth === "number" && Number.isFinite(features.bitDepth)) {
+    normalized.bitDepth = Math.trunc(features.bitDepth);
+  }
+  if (typeof features.cloudGsync === "boolean") {
+    normalized.cloudGsync = features.cloudGsync;
+  }
+  if (typeof features.chromaFormat === "number" && Number.isFinite(features.chromaFormat)) {
+    normalized.chromaFormat = Math.trunc(features.chromaFormat);
+  }
+  if (typeof features.enabledL4S === "boolean") {
+    normalized.enabledL4S = features.enabledL4S;
+  }
+  if ("trueHdr" in features && typeof features.trueHdr === "boolean") {
+    normalized.trueHdr = features.trueHdr;
+  }
+
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 
 function extractNegotiatedStreamProfile(payload: CloudMatchResponse): NegotiatedStreamProfile | undefined {
@@ -812,6 +1182,8 @@ function extractNegotiatedStreamProfile(payload: CloudMatchResponse): Negotiated
     finalizedFeatures?.chromaFormat ?? requestedFeatures?.chromaFormat,
   );
   const enabledL4S = finalizedFeatures?.enabledL4S ?? requestedFeatures?.enabledL4S;
+  const enabledCloudGsync = finalizedFeatures?.cloudGsync ?? requestedFeatures?.cloudGsync;
+  const enabledReflex = finalizedFeatures?.reflex ?? requestedFeatures?.reflex;
 
   const profile: NegotiatedStreamProfile = {};
 
@@ -838,6 +1210,14 @@ function extractNegotiatedStreamProfile(payload: CloudMatchResponse): Negotiated
     profile.enableL4S = enabledL4S;
   }
 
+  if (typeof enabledCloudGsync === "boolean") {
+    profile.enableCloudGsync = enabledCloudGsync;
+  }
+
+  if (typeof enabledReflex === "boolean") {
+    profile.enableReflex = enabledReflex;
+  }
+
   return Object.keys(profile).length > 0 ? profile : undefined;
 }
 
@@ -847,6 +1227,9 @@ interface ToSessionInfoOptions {
   payload: CloudMatchResponse;
   clientId?: string;
   deviceId?: string;
+  fallbackAppId?: string;
+  /** Wire appLaunchMode sent with the request, used when the server does not echo it */
+  fallbackAppLaunchMode?: number;
 }
 
 async function toSessionInfo(options: ToSessionInfoOptions): Promise<SessionInfo> {
@@ -861,6 +1244,17 @@ async function toSessionInfo(options: ToSessionInfoOptions): Promise<SessionInfo
   const queuePosition = extractQueuePosition(payload);
   const seatSetupStep = extractSeatSetupStep(payload);
   const adState = extractAdState(payload);
+  const negotiatedStreamProfile = extractNegotiatedStreamProfile(payload);
+  const requestedStreamingFeatures = normalizeStreamingFeatures(
+    payload.session.sessionRequestData?.requestedStreamingFeatures,
+  );
+  const finalizedStreamingFeatures = normalizeStreamingFeatures(
+    payload.session.finalizedStreamingFeatures,
+  );
+  const enablePersistingInGameSettings =
+    typeof payload.session.sessionRequestData?.enablePersistingInGameSettings === "boolean"
+      ? payload.session.sessionRequestData.enablePersistingInGameSettings
+      : undefined;
 
   // Debug logging to trace signaling resolution
   const connections = payload.session.connectionInfo ?? [];
@@ -880,9 +1274,13 @@ async function toSessionInfo(options: ToSessionInfoOptions): Promise<SessionInfo
     `signalingUrl=${signaling.signalingUrl}, ` +
     `connections=[${connectionSummary}]`,
   );
+  console.log(
+    `[CloudMatch] negotiated streaming features: requested=${JSON.stringify(requestedStreamingFeatures ?? {})} finalized=${JSON.stringify(finalizedStreamingFeatures ?? {})} cloudGsync=${negotiatedStreamProfile?.enableCloudGsync ?? "n/a"}, reflex=${negotiatedStreamProfile?.enableReflex ?? "n/a"}, l4s=${negotiatedStreamProfile?.enableL4S ?? "n/a"}`,
+  );
 
   return {
     sessionId: payload.session.sessionId,
+    appId: payload.session.sessionRequestData?.appId ?? options.fallbackAppId,
     status: payload.session.status,
     seatSetupStep,
     queuePosition,
@@ -893,9 +1291,13 @@ async function toSessionInfo(options: ToSessionInfoOptions): Promise<SessionInfo
     signalingServer: signaling.signalingServer,
     signalingUrl: signaling.signalingUrl,
     gpuType: payload.session.gpuType,
+    appLaunchMode: echoedSessionAppLaunchMode(payload) ?? options.fallbackAppLaunchMode,
+    enablePersistingInGameSettings,
     iceServers: await normalizeIceServers(payload),
     mediaConnectionInfo: signaling.mediaConnectionInfo,
-    negotiatedStreamProfile: extractNegotiatedStreamProfile(payload),
+    negotiatedStreamProfile,
+    requestedStreamingFeatures,
+    finalizedStreamingFeatures,
     clientId,
     deviceId,
   };
@@ -912,28 +1314,51 @@ export async function createSession(input: SessionCreateRequest): Promise<Sessio
 
   // Generate client/device IDs once for the entire session lifecycle
   const clientId = crypto.randomUUID();
-  const deviceId = crypto.randomUUID();
+  const deviceId = getStableDeviceId();
 
-  const body = buildSessionRequestBody(input);
+  const requestedBase = resolveStreamingBaseUrl(input.zone, input.streamingBaseUrl);
+  const base = await resolveCreateSessionBase(
+    requestedBase,
+    input.token,
+    clientId,
+    deviceId,
+    input.proxyUrl,
+  );
+  const networkTestSessionId = await createNetworkTestSession({
+    base,
+    token: input.token,
+    clientId,
+    deviceId,
+    settings: input.settings,
+    proxyUrl: input.proxyUrl,
+  });
+  const body = buildSessionRequestBody(input, deviceId, networkTestSessionId);
+  console.log(
+    `[CloudMatch] createSession in-game settings persistence: user=${input.enablePersistingInGameSettings === true}, ` +
+    `gameSupport=${input.supportsInGameSettingsPersistence === true}, ` +
+    `sent=${body.sessionRequestData.enablePersistingInGameSettings}, ` +
+    `networkTestSessionId=${networkTestSessionId ?? "none"}`,
+  );
 
-  const base = resolveStreamingBaseUrl(input.zone, input.streamingBaseUrl);
   const keyboardLayout = resolveGfnKeyboardLayout(input.settings.keyboardLayout ?? DEFAULT_KEYBOARD_LAYOUT, process.platform);
   const languageCode = input.settings.gameLanguage ?? "en_US";
   const url = `${base}/v2/session?${new URLSearchParams({ keyboardLayout, languageCode }).toString()}`;
-  const response = await fetch(url, {
+  const response = await fetchCloudMatch(url, {
     method: "POST",
-    headers: requestHeaders({ token: input.token, clientId, deviceId, includeOrigin: true }),
+    headers: buildGfnCloudMatchHeaders({ token: input.token, clientId, deviceId, includeOrigin: true }),
     body: JSON.stringify(body),
+  }, { proxyUrl: input.proxyUrl });
+
+  const { payload } = await readCloudMatchJson<CloudMatchResponse>(response);
+  return await toSessionInfo({
+    zone: input.zone,
+    streamingBaseUrl: base,
+    payload,
+    clientId,
+    deviceId,
+    fallbackAppId: input.appId,
+    fallbackAppLaunchMode: appLaunchModeWireValue(input.settings.appLaunchMode),
   });
-
-  const text = await response.text();
-  if (!response.ok) {
-    // Use SessionError to parse and throw detailed error
-    throw SessionError.fromResponse(response.status, text);
-  }
-
-  const payload = JSON.parse(text) as CloudMatchResponse;
-  return await toSessionInfo({ zone: input.zone, streamingBaseUrl: base, payload, clientId, deviceId });
 }
 
 export async function pollSession(input: SessionPollRequest): Promise<SessionInfo> {
@@ -946,21 +1371,17 @@ export async function pollSession(input: SessionPollRequest): Promise<SessionInf
   const deviceId = input.deviceId ?? crypto.randomUUID();
 
   const base = resolvePollStopBase(input.zone, input.streamingBaseUrl, input.serverIp);
+  const baseHost = new URL(base).hostname;
+  const pollProxyUrl = isZoneHostname(baseHost) ? input.proxyUrl : undefined;
   const url = `${base}/v2/session/${input.sessionId}`;
   // Polling should NOT include Origin/Referer headers (matches claimSession polling pattern)
-  const headers = requestHeaders({ token: input.token, clientId, deviceId, includeOrigin: false });
-  const response = await fetch(url, {
+  const headers = buildGfnCloudMatchHeaders({ token: input.token, clientId, deviceId, includeOrigin: false });
+  const response = await fetchCloudMatch(url, {
     method: "GET",
     headers,
-  });
+  }, { proxyUrl: pollProxyUrl });
 
-  const text = await response.text();
-  if (!response.ok) {
-    throw SessionError.fromResponse(response.status, text);
-  }
-
-  const payload = JSON.parse(text) as CloudMatchResponse;
-  const baseHost = new URL(base).hostname;
+  const { payload } = await readCloudMatchJson<CloudMatchResponse>(response);
 
   // Match Rust behavior: if the poll was routed through the zone load balancer
   // and the response now contains a real server IP in connectionInfo, re-poll
@@ -983,7 +1404,8 @@ export async function pollSession(input: SessionPollRequest): Promise<SessionInf
     const directBase = `https://${realServerIp}`;
     const directUrl = `${directBase}/v2/session/${input.sessionId}`;
     try {
-      const directResponse = await fetch(directUrl, {
+      // The ready-session direct real-IP re-poll intentionally bypasses the session proxy.
+      const directResponse = await fetchCloudMatch(directUrl, {
         method: "GET",
         headers,
       });
@@ -1037,23 +1459,21 @@ export async function reportSessionAd(input: SessionAdReportRequest): Promise<Se
       `cancelReason=${input.cancelReason ?? "n/a"}, errorInfo=${input.errorInfo ?? "n/a"}`,
   );
 
-  const response = await fetch(url, {
+  const response = await fetchCloudMatch(url, {
     method: "PUT",
     // Official browser requests include Origin/Referer on cross-origin ad updates.
-    headers: requestHeaders({ token: input.token, clientId, deviceId, includeOrigin: true }),
+    headers: buildGfnCloudMatchHeaders({ token: input.token, clientId, deviceId, includeOrigin: true }),
     body: JSON.stringify(requestBody),
   });
 
-  const text = await response.text();
-  if (!response.ok) {
-    console.warn(
-      `[CloudMatch] reportSessionAd: backend error status=${response.status}, sessionId=${input.sessionId}, ` +
-        `adId=${input.adId}, action=${input.action}, body=${text.slice(0, 500)}`,
-    );
-    throw SessionError.fromResponse(response.status, text);
-  }
-
-  const payload = JSON.parse(text) as CloudMatchResponse;
+  const { text, payload } = await readCloudMatchJson<CloudMatchResponse>(response, {
+    onErrorText: (text) => {
+      console.warn(
+        `[CloudMatch] reportSessionAd: backend error status=${response.status}, sessionId=${input.sessionId}, ` +
+          `adId=${input.adId}, action=${input.action}, body=${text.slice(0, 500)}`,
+      );
+    },
+  });
   if (payload.requestStatus.statusCode !== 1) {
     console.warn(
       `[CloudMatch] reportSessionAd: API error requestStatus=${payload.requestStatus.statusCode}, ` +
@@ -1083,16 +1503,12 @@ export async function stopSession(input: SessionStopRequest): Promise<void> {
 
   const base = resolvePollStopBase(input.zone, input.streamingBaseUrl, input.serverIp);
   const url = `${base}/v2/session/${input.sessionId}`;
-  const response = await fetch(url, {
+  const response = await fetchCloudMatch(url, {
     method: "DELETE",
-    headers: requestHeaders({ token: input.token, clientId, deviceId, includeOrigin: false }),
+    headers: buildGfnCloudMatchHeaders({ token: input.token, clientId, deviceId, includeOrigin: false }),
   });
 
-  if (!response.ok) {
-    const text = await response.text();
-    // Use SessionError to parse and throw detailed error
-    throw SessionError.fromResponse(response.status, text);
-  }
+  await throwIfCloudMatchResponseError(response);
 }
 
 /**
@@ -1107,22 +1523,71 @@ export async function getActiveSessions(
     throw new Error("Missing token for getting active sessions");
   }
 
-  const base = streamingBaseUrl.trim().endsWith("/")
-    ? streamingBaseUrl.trim().slice(0, -1)
-    : streamingBaseUrl.trim();
+  const base = normalizeCloudMatchBaseUrl(streamingBaseUrl);
+  const headers = buildGfnCloudMatchHeaders({
+    token,
+    deviceId: getStableDeviceId(),
+    includeOrigin: false,
+  });
+  const primary = await fetchActiveSessionsFromBase(base, headers);
+  if (primary) {
+    return primary;
+  }
+
+  for (const fallbackBase of await discoverActiveSessionFallbackBases(base, headers)) {
+    if (fallbackBase === base) {
+      continue;
+    }
+    const fallback = await fetchActiveSessionsFromBase(fallbackBase, headers);
+    if (fallback) {
+      return fallback;
+    }
+  }
+
+  return [];
+}
+
+async function discoverActiveSessionFallbackBases(
+  base: string,
+  headers: Record<string, string>,
+): Promise<string[]> {
+  try {
+    const response = await fetchCloudMatch(`${base}/v2/serverInfo`, {
+      method: "GET",
+      headers,
+    });
+    if (!response.ok) {
+      return [];
+    }
+    return extractServerInfoRegionBases((await response.json()) as CloudMatchServerInfoResponse);
+  } catch (error) {
+    console.warn(`[CloudMatch] getActiveSessions fallback discovery failed: ${formatErrorForLog(error)}`);
+    return [];
+  }
+}
+
+async function fetchActiveSessionsFromBase(
+  base: string,
+  headers: Record<string, string>,
+): Promise<ActiveSessionInfo[] | null> {
   const url = `${base}/v2/session`;
 
-  const response = await fetch(url, {
-    method: "GET",
-    headers: requestHeaders({ token, includeOrigin: false }),
-  });
+  let response: Response;
+  try {
+    response = await fetchCloudMatch(url, {
+      method: "GET",
+      headers,
+    }, { retries: 0 });
+  } catch (error) {
+    console.warn(`[CloudMatch] getActiveSessions fetch failed for ${base}: ${formatErrorForLog(error)}`);
+    return null;
+  }
 
   const text = await response.text();
 
   if (!response.ok) {
-    // Return empty list on failure (matching Rust behavior)
     console.warn(`Get sessions failed: ${response.status} - ${text.slice(0, 200)}`);
-    return [];
+    return null;
   }
 
   let sessionsResponse: GetSessionsResponse;
@@ -1146,6 +1611,18 @@ export async function getActiveSessions(
     .map((s) => {
       // Extract appId from sessionRequestData
       const appId = s.sessionRequestData?.appId ? Number(s.sessionRequestData.appId) : 0;
+
+      // The server echoes the appLaunchMode the session was created with; keep it
+      // so claim/resume requests can stay session-stable.
+      const rawAppLaunchMode = s.sessionRequestData?.appLaunchMode;
+      const appLaunchMode =
+        typeof rawAppLaunchMode === "number" && Number.isFinite(rawAppLaunchMode)
+          ? rawAppLaunchMode
+          : undefined;
+      const enablePersistingInGameSettings =
+        typeof s.sessionRequestData?.enablePersistingInGameSettings === "boolean"
+          ? s.sessionRequestData.enablePersistingInGameSettings
+          : undefined;
 
       // Prefer the real server IP from connectionInfo[usage=14] — this is the actual game server,
       // not the zone load balancer. sessionControlInfo.ip is the zone LB hostname and cannot
@@ -1175,8 +1652,13 @@ export async function getActiveSessions(
       return {
         sessionId: s.sessionId,
         appId,
+        appLaunchMode,
+        enablePersistingInGameSettings,
         gpuType: s.gpuType,
         status: s.status,
+        queuePosition: extractSessionQueuePosition(s),
+        seatSetupStep: extractSessionSeatSetupStep(s),
+        streamingBaseUrl: base,
         serverIp,
         signalingUrl,
         resolution,
@@ -1187,15 +1669,29 @@ export async function getActiveSessions(
   return activeSessions;
 }
 
+function formatErrorForLog(error: unknown): string {
+  if (error instanceof Error) {
+    const cause = error.cause instanceof Error ? `: ${error.cause.message}` : "";
+    return `${error.message}${cause}`;
+  }
+  return String(error);
+}
+
 /**
  * Build claim/resume request payload
  */
-function buildClaimRequestBody(sessionId: string, appId: string, settings: StreamSettings): unknown {
+function buildClaimRequestBody(
+  sessionId: string,
+  appId: string,
+  settings: StreamSettings,
+  sessionAppLaunchMode?: number,
+  enablePersistingInGameSettings = false,
+): unknown {
   // For RESUME claims, we must NOT attempt to renegotiate streaming parameters.
   // The session is already configured on the server side. Sending different fps, resolution,
   // codec, etc. causes HTTP 400 from the server because those parameters are immutable for
   // an already-streaming session. Only send the action and minimal required fields.
-  const deviceId = crypto.randomUUID();
+  const deviceId = getStableDeviceId();
   const subSessionId = crypto.randomUUID();
   const timezoneMs = timezoneOffsetMs();
 
@@ -1219,6 +1715,7 @@ function buildClaimRequestBody(sessionId: string, appId: string, settings: Strea
         { key: "GSStreamerType", value: "WebRTC" },
         { key: "networkType", value: "Unknown" },
         { key: "ClientImeSupport", value: "0" },
+        { key: "surroundAudioInfo", value: "2" },
       ],
       surroundAudioInfo: 0,
       clientTimezoneOffset: timezoneMs,
@@ -1226,27 +1723,18 @@ function buildClaimRequestBody(sessionId: string, appId: string, settings: Strea
       parentSessionId: null,
       appId: parseInt(appId, 10),
       streamerVersion: 1,
-      appLaunchMode: 1,
+      // Resume must not renegotiate session parameters: prefer the wire value the
+      // session was created with over whatever the UI toggles currently say.
+      appLaunchMode: sessionAppLaunchMode ?? appLaunchModeWireValue(settings.appLaunchMode),
       sdkVersion: "1.0",
       enhancedStreamMode: 1,
       useOps: true,
       clientDisplayHdrCapabilities: null,
       accountLinked: true,
       partnerCustomData: "",
-      enablePersistingInGameSettings: true,
+      enablePersistingInGameSettings,
       secureRTSPSupported: false,
       userAge: 26,
-      requestedStreamingFeatures: {
-        reflex: false,
-        bitDepth: 0,
-        // RESUME claims must not renegotiate session creation-only streaming features.
-        cloudGsync: false,
-        profile: 0,
-        fallbackToLogicalResolution: false,
-        chromaFormat: 0,
-        prefilterMode: 0,
-        hudStreamingMode: 0,
-      },
     },
     metaData: [],
   };
@@ -1261,8 +1749,8 @@ export async function claimSession(input: SessionClaimRequest): Promise<SessionI
     throw new Error("Missing token for session claim");
   }
 
-  const deviceId = crypto.randomUUID();
-  const clientId = crypto.randomUUID();
+  const deviceId = input.deviceId ?? getStableDeviceId();
+  const clientId = input.clientId ?? crypto.randomUUID();
 
   // Provide default values for optional parameters
   const appId = input.appId ?? "0";
@@ -1293,9 +1781,9 @@ export async function claimSession(input: SessionClaimRequest): Promise<SessionI
     const zoneBase = `https://${effectiveServerIp}`;
     const prefetchUrl = `${zoneBase}/v2/session/${input.sessionId}`;
     console.log(`[CloudMatch] claimSession: pre-flight query ${prefetchUrl}`);
-    const prefetchHeaders = requestHeaders({ token: input.token, clientId, deviceId, includeOrigin: false });
+    const prefetchHeaders = buildGfnCloudMatchHeaders({ token: input.token, clientId, deviceId, includeOrigin: false });
     try {
-      const prefetchResp = await fetch(prefetchUrl, { method: "GET", headers: prefetchHeaders });
+      const prefetchResp = await fetchCloudMatch(prefetchUrl, { method: "GET", headers: prefetchHeaders });
       console.log(`[CloudMatch] claimSession: pre-flight response status=${prefetchResp.status}`);
       if (prefetchResp.ok) {
         const prefetchPayload = JSON.parse(await prefetchResp.text()) as CloudMatchResponse;
@@ -1321,10 +1809,11 @@ export async function claimSession(input: SessionClaimRequest): Promise<SessionI
   // with SESSION_NOT_PAUSED. For these sessions we skip the claim PUT and poll directly.
   // Status 2/3 (ready/streaming) sessions are paused and can be RESUME'd normally.
   let preClaimStatus: number | null = null;
+  let shouldSendResumeClaim = true;
   try {
     const validationUrl = `https://${effectiveServerIp}/v2/session/${input.sessionId}`;
-    const validationHeaders = requestHeaders({ token: input.token, clientId, deviceId, includeOrigin: false });
-    const validationResp = await fetch(validationUrl, { method: "GET", headers: validationHeaders });
+    const validationHeaders = buildGfnCloudMatchHeaders({ token: input.token, clientId, deviceId, includeOrigin: false });
+    const validationResp = await fetchCloudMatch(validationUrl, { method: "GET", headers: validationHeaders });
     if (validationResp.ok) {
       const validationText = await validationResp.text();
       const validationPayload = JSON.parse(validationText) as CloudMatchResponse;
@@ -1334,6 +1823,17 @@ export async function claimSession(input: SessionClaimRequest): Promise<SessionI
       console.log(`[CloudMatch] claimSession: validation response (first 1000 chars): ${validationText.slice(0, 1000)}`);
       if (preClaimStatus === 1) {
         console.log(`[CloudMatch] claimSession: session is still launching (status=1), skipping RESUME claim — polling directly to ready state`);
+      } else if (
+        input.recoveryMode === true &&
+        (preClaimStatus === 2 || preClaimStatus === 3)
+      ) {
+        // Recovery parity: if the session is already ready/streaming, avoid sending
+        // another RESUME mutation. Repeated RESUME PUTs can rotate signaling hosts
+        // and push the session back into transient setup/cleanup states.
+        shouldSendResumeClaim = false;
+        console.log(
+          `[CloudMatch] claimSession: recoveryMode and session already ready (status=${preClaimStatus}); skipping redundant RESUME claim`,
+        );
       } else if (preClaimStatus !== 2 && preClaimStatus !== 3) {
         console.warn(`[CloudMatch] claimSession: session not in ready state (status=${preClaimStatus}), claim may fail`);
       }
@@ -1346,42 +1846,31 @@ export async function claimSession(input: SessionClaimRequest): Promise<SessionI
 
   // Only send the RESUME claim PUT if the session is in a paused state (status 2 or 3).
   // For status=1 (still launching) we bypass the claim and fall through to the polling loop.
-  if (preClaimStatus !== 1) {
-    const payload = buildClaimRequestBody(input.sessionId, appId, settings);
+  if (preClaimStatus !== 1 && shouldSendResumeClaim) {
+    const payload = buildClaimRequestBody(
+      input.sessionId,
+      appId,
+      settings,
+      input.appLaunchMode,
+      input.enablePersistingInGameSettings === true,
+    );
 
-    const headers: Record<string, string> = {
-      "User-Agent": GFN_USER_AGENT,
-      Authorization: `GFNJWT ${input.token}`,
-      "Content-Type": "application/json",
-      Origin: "https://play.geforcenow.com",
-      Referer: "https://play.geforcenow.com/",
-      "nv-client-id": clientId,
-      "nv-client-streamer": "NVIDIA-CLASSIC",
-      "nv-client-type": "NATIVE",
-      "nv-client-version": GFN_CLIENT_VERSION,
-      "nv-device-os": process.platform === "win32" ? "WINDOWS" : process.platform === "darwin" ? "MACOS" : "LINUX",
-      "nv-device-type": "DESKTOP",
-      "x-device-id": deviceId,
-    };
+    const headers = buildGfnCloudMatchClaimHeaders({ token: input.token, clientId, deviceId });
 
     console.log(`[CloudMatch] claimSession PUT ${claimUrl}`);
     console.log(`[CloudMatch] claimSession body: ${JSON.stringify(payload)}`);
-    const response = await fetch(claimUrl, {
+    const response = await fetchCloudMatch(claimUrl, {
       method: "PUT",
       headers,
       body: JSON.stringify(payload),
     });
 
-    const text = await response.text();
-
-    console.log(`[CloudMatch] claimSession response: HTTP ${response.status}`);
-    console.log(`[CloudMatch] claimSession response body FULL: ${text}`);
-
-    if (!response.ok) {
-      throw SessionError.fromResponse(response.status, text);
-    }
-
-    const apiResponse = JSON.parse(text) as CloudMatchResponse;
+    const { text, payload: apiResponse } = await readCloudMatchJson<CloudMatchResponse>(response, {
+      onText: (text) => {
+        console.log(`[CloudMatch] claimSession response: HTTP ${response.status}`);
+        console.log(`[CloudMatch] claimSession response body FULL: ${text}`);
+      },
+    });
 
     if (apiResponse.requestStatus.statusCode !== 1) {
       throw SessionError.fromResponse(200, text);
@@ -1397,9 +1886,9 @@ export async function claimSession(input: SessionClaimRequest): Promise<SessionI
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
 
-    const pollHeaders = requestHeaders({ token: input.token, clientId, deviceId, includeOrigin: false });
+    const pollHeaders = buildGfnCloudMatchHeaders({ token: input.token, clientId, deviceId, includeOrigin: false });
 
-    const pollResponse = await fetch(getUrl, {
+    const pollResponse = await fetchCloudMatch(getUrl, {
       method: "GET",
       headers: pollHeaders,
     });
@@ -1423,9 +1912,24 @@ export async function claimSession(input: SessionClaimRequest): Promise<SessionI
       // Session is ready
       const signaling = resolveSignaling(pollApiResponse);
       const queuePosition = extractQueuePosition(pollApiResponse);
+      const negotiatedStreamProfile = extractNegotiatedStreamProfile(pollApiResponse);
+      const requestedStreamingFeatures = normalizeStreamingFeatures(
+        pollApiResponse.session.sessionRequestData?.requestedStreamingFeatures,
+      );
+      const finalizedStreamingFeatures = normalizeStreamingFeatures(
+        pollApiResponse.session.finalizedStreamingFeatures,
+      );
+      const enablePersistingInGameSettings =
+        typeof pollApiResponse.session.sessionRequestData?.enablePersistingInGameSettings === "boolean"
+          ? pollApiResponse.session.sessionRequestData.enablePersistingInGameSettings
+          : undefined;
+      console.log(
+        `[CloudMatch] claimed negotiated streaming features: requested=${JSON.stringify(requestedStreamingFeatures ?? {})} finalized=${JSON.stringify(finalizedStreamingFeatures ?? {})} cloudGsync=${negotiatedStreamProfile?.enableCloudGsync ?? "n/a"}, reflex=${negotiatedStreamProfile?.enableReflex ?? "n/a"}, l4s=${negotiatedStreamProfile?.enableL4S ?? "n/a"}`,
+      );
 
       return {
         sessionId: sessionData.sessionId,
+        appId: input.appId,
         status: sessionData.status,
         queuePosition,
         zone: "", // Zone not applicable for claimed sessions
@@ -1434,9 +1938,15 @@ export async function claimSession(input: SessionClaimRequest): Promise<SessionI
         signalingServer: signaling.signalingServer,
         signalingUrl: signaling.signalingUrl,
         gpuType: sessionData.gpuType,
+        appLaunchMode: echoedSessionAppLaunchMode(pollApiResponse) ?? input.appLaunchMode,
+        enablePersistingInGameSettings,
         iceServers: await normalizeIceServers(pollApiResponse),
         mediaConnectionInfo: signaling.mediaConnectionInfo,
-        negotiatedStreamProfile: extractNegotiatedStreamProfile(pollApiResponse),
+        negotiatedStreamProfile: negotiatedStreamProfile ?? extractNegotiatedStreamProfile(pollApiResponse),
+        requestedStreamingFeatures,
+        finalizedStreamingFeatures,
+        clientId,
+        deviceId,
       };
     }
 

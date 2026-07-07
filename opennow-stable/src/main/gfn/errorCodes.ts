@@ -114,6 +114,7 @@ export enum GfnErrorCode {
   InvalidTransportRequest = 3237093720, // statusCode 88
   UserStorageNotAvailable = 3237093721, // statusCode 89
   GfnStorageNotAvailable = 3237093722, // statusCode 90
+  AppNotAllowedToStream = 3237093723, // statusCode 91
   SessionServerErrorEnd = 3237093887,
 
   // Session setup cancelled
@@ -521,8 +522,8 @@ export const ERROR_MESSAGES: Map<number, ErrorMessageEntry> = new Map([
   [
     3237093718,
     {
-      title: "Playability Level Issue",
-      description: "Your account's playability level is insufficient. This may mean another session is already running, or there's a subscription issue.",
+      title: "Membership Upgrade Required",
+      description: "Your current GeForce NOW membership is not high enough to play this game. Upgrade to a higher tier and try again.",
     },
   ],
   [
@@ -537,6 +538,13 @@ export const ERROR_MESSAGES: Map<number, ErrorMessageEntry> = new Map([
     {
       title: "Storage Error",
       description: "Service storage is not available.",
+    },
+  ],
+  [
+    3237093723,
+    {
+      title: "Streaming Not Allowed",
+      description: "This app is not allowed to stream on your current GeForce NOW account or region.",
     },
   ],
 
@@ -785,9 +793,9 @@ export class SessionError extends Error {
 
       if (descUpper.includes("INSUFFICIENT_PLAYABILITY")) {
         return {
-          title: "Session Already Active",
+          title: "Membership Upgrade Required",
           description:
-            "Another session is already running on your account. Please close it first or wait for it to timeout.",
+            "Your current GeForce NOW membership is not high enough to play this game. Upgrade to a higher tier and try again.",
         };
       }
 
@@ -872,14 +880,9 @@ export class SessionError extends Error {
       GfnErrorCode.SessionLimitExceeded, // 3237093643
       GfnErrorCode.SessionLimitPerDeviceReached, // 3237093682
       GfnErrorCode.MaxSessionNumberLimitExceeded, // 3237093715
-      GfnErrorCode.SessionInsufficientPlayabilityLevel, // 3237093718
     ];
 
     if (sessionConflictCodes.includes(this.gfnErrorCode)) {
-      return true;
-    }
-
-    if (this.statusDescription?.toUpperCase().includes("INSUFFICIENT_PLAYABILITY")) {
       return true;
     }
 

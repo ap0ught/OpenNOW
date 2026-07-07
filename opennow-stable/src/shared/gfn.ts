@@ -1,5 +1,41 @@
+import type { NativeCloudGsyncCapabilities, CloudGsyncResolution } from "./cloudGsync";
+
 export type VideoCodec = "H264" | "H265" | "AV1";
 export type VideoAccelerationPreference = "auto" | "hardware" | "software";
+export type StreamClientMode = "web" | "native";
+/**
+ * How the server-side session should present launched games.
+ * Mirrors the official client's AppLaunchMode: TV/console clients request
+ * "gamepadFriendly" so launchers (e.g. Steam) start in big picture mode.
+ */
+export type AppLaunchMode = "default" | "gamepadFriendly" | "touchFriendly";
+export type NativeStreamerBackend = "stub" | "gstreamer";
+export type NativeStreamerBackendPreference = "auto" | NativeStreamerBackend;
+export type NativeStreamerFeatureMode = "auto" | "disabled" | "forced";
+export type NativeVideoBackendPreference = "auto" | "d3d11" | "d3d12";
+export type NativeQueueMode = "auto" | "fixed" | "adaptive" | "vrr";
+
+export const NATIVE_STREAMER_WINDOWS_ONLY_MESSAGE = "experimental feature: Windows only. Mac and Linux support is being worked on";
+
+export function isNativeStreamerSupportedPlatform(platform: string): boolean {
+  const normalized = platform.toLowerCase();
+  return normalized === "win32" || normalized.startsWith("win") || normalized.includes("windows");
+}
+
+export function normalizeStreamClientModeForPlatform(mode: StreamClientMode, platform: string): StreamClientMode {
+  return mode === "native" && !isNativeStreamerSupportedPlatform(platform) ? "web" : mode;
+}
+
+export function nativeStreamerFeatureModeToEnvValue(mode: NativeStreamerFeatureMode): "auto" | "0" | "1" {
+  switch (mode) {
+    case "disabled":
+      return "0";
+    case "forced":
+      return "1";
+    default:
+      return "auto";
+  }
+}
 
 /** Color quality (bit depth + chroma subsampling), matching Rust ColorQuality enum */
 export type ColorQuality = "8bit_420" | "8bit_444" | "10bit_420" | "10bit_444";
@@ -52,14 +88,14 @@ export function resolveGfnKeyboardLayout(layout: KeyboardLayout, platform: strin
   return option?.value ?? DEFAULT_KEYBOARD_LAYOUT;
 }
 
-/** Helper: get CloudMatch bitDepth value (0 = 8-bit SDR, 10 = 10-bit HDR capable) */
+/** Helper: get CloudMatch bitDepth value (0 = 8-bit, 1 = 10-bit) */
 export function colorQualityBitDepth(cq: ColorQuality): number {
-  return cq.startsWith("10bit") ? 10 : 0;
+  return cq.startsWith("10bit") ? 1 : 0;
 }
 
-/** Helper: get CloudMatch chromaFormat value (0 = 4:2:0, 2 = 4:4:4) */
+/** Helper: get CloudMatch chromaFormat value (0 = 4:2:0, 1 = 4:4:4) */
 export function colorQualityChromaFormat(cq: ColorQuality): number {
-  return cq.endsWith("444") ? 2 : 0;
+  return cq.endsWith("444") ? 1 : 0;
 }
 
 /** Helper: does this color quality mode require HEVC or AV1? */
@@ -85,11 +121,12 @@ export function normalizeStreamPreferences(codec: VideoCodec, colorQuality: Colo
   const normalizedColorQuality = USER_FACING_COLOR_QUALITY_OPTIONS.includes(colorQuality)
     ? colorQuality
     : USER_FACING_COLOR_QUALITY_OPTIONS[0];
+  const codecCompatibleColorQuality = normalizedCodec === "H264" ? "8bit_420" : normalizedColorQuality;
 
   return {
     codec: normalizedCodec,
-    colorQuality: normalizedColorQuality,
-    migrated: normalizedCodec !== codec || normalizedColorQuality !== colorQuality,
+    colorQuality: codecCompatibleColorQuality,
+    migrated: normalizedCodec !== codec || codecCompatibleColorQuality !== colorQuality,
   };
 }
 
@@ -98,6 +135,8 @@ export function colorQualityIs10Bit(cq: ColorQuality): boolean {
   return cq.startsWith("10bit");
 }
 
+export type AppAccentColor = "green" | "blue" | "violet" | "amber" | "rose";
+export type AppTheme = "light" | "dark" | "auto";
 export type MicrophoneMode = "disabled" | "push-to-talk" | "voice-activity";
 export type AspectRatio = "16:9" | "16:10" | "21:9" | "32:9";
 export type RuntimePlatform =
@@ -125,21 +164,199 @@ export interface MicrophonePermissionResult {
   shouldUseBrowserApi: boolean;
 }
 
+export type NativeGstreamerRuntimeSource = "bundled" | "system" | "missing" | "unknown";
+
+export interface NativeGstreamerInstallInstruction {
+  distro: string;
+  command: string;
+  note?: string;
+}
+
+export interface NativeGstreamerRuntimeStatus {
+  source: NativeGstreamerRuntimeSource;
+  bundled: boolean;
+  path?: string;
+  message: string;
+  installInstructions?: NativeGstreamerInstallInstruction[];
+}
+
+export interface NativeStreamerStatus {
+  detected: boolean;
+  gstreamerAvailable: boolean;
+  supportsOfferAnswer: boolean;
+  backend?: NativeStreamerBackend;
+  fallbackReason?: string;
+  videoBackends?: NativeVideoBackendCapability[];
+  activeVideoBackend?: NativeVideoBackendCapability;
+  codecSummary?: string;
+  zeroCopySummary?: string;
+  gstreamerRuntime: NativeGstreamerRuntimeStatus;
+  message: string;
+}
+
+export function createUnsupportedNativeStreamerStatus(): NativeStreamerStatus {
+  return {
+    detected: false,
+    gstreamerAvailable: false,
+    supportsOfferAnswer: false,
+    gstreamerRuntime: {
+      source: "unknown",
+      bundled: false,
+      message: NATIVE_STREAMER_WINDOWS_ONLY_MESSAGE,
+    },
+    message: NATIVE_STREAMER_WINDOWS_ONLY_MESSAGE,
+  };
+}
+
+export type NativeVideoBackendId =
+  | "d3d12"
+  | "d3d11"
+  | "videotoolbox"
+  | "vaapi"
+  | "v4l2"
+  | "vulkan"
+  | "software"
+  | string;
+
+export interface NativeVideoCodecCapability {
+  codec: "h264" | "h265" | "av1" | string;
+  available: boolean;
+  decoder?: string;
+  parser?: string;
+  depayloader?: string;
+  reason?: string;
+}
+
+export interface NativeVideoBackendCapability {
+  backend: NativeVideoBackendId;
+  platform: "windows" | "macos" | "linux" | "cross-platform" | "other" | string;
+  codecs: NativeVideoCodecCapability[];
+  zeroCopyModes: string[];
+  sink?: string;
+  available: boolean;
+  reason?: string;
+}
+
+export interface StreamingFeatures {
+  reflex?: boolean;
+  bitDepth?: number;
+  cloudGsync?: boolean;
+  chromaFormat?: number;
+  enabledL4S?: boolean;
+  trueHdr?: boolean;
+}
+
+export interface NativeTransitionDiagnostics {
+  disableDynamicSplitEncodeUpdates?: boolean;
+  forceQueueMode?: NativeQueueMode;
+  disableTransitionFlushEscalation?: boolean;
+}
+
+/**
+ * Client-side GPU post-processing applied to the decoded stream (web client mode only).
+ * All values use UI-facing ranges; the renderer normalizes them for the shader.
+ */
+export interface VideoShaderSettings {
+  /** Master toggle for the WebGL post-processing pipeline */
+  enabled: boolean;
+  /** Contrast-adaptive sharpening strength, 0-100 (0 = off) */
+  sharpen: number;
+  /** Color saturation percentage, 0-200 (100 = neutral) */
+  saturation: number;
+  /** Contrast percentage, 50-150 (100 = neutral) */
+  contrast: number;
+  /** Brightness percentage, 50-150 (100 = neutral) */
+  brightness: number;
+  /** Vibrance boost for muted colors, 0-100 (0 = off) */
+  vibrance: number;
+  /** Animated film grain amount, 0-100 (0 = off) */
+  filmGrain: number;
+}
+
+export const DEFAULT_VIDEO_SHADER_SETTINGS: Readonly<VideoShaderSettings> = Object.freeze({
+  enabled: false,
+  sharpen: 40,
+  saturation: 100,
+  contrast: 100,
+  brightness: 100,
+  vibrance: 0,
+  filmGrain: 0,
+});
+
+function clampShaderValue(raw: unknown, min: number, max: number, fallback: number): number {
+  const value = Number(raw);
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.max(min, Math.min(max, Math.round(value)));
+}
+
+/** Normalize persisted/user-provided shader settings into safe UI ranges. */
+export function normalizeVideoShaderSettings(raw: unknown): VideoShaderSettings {
+  const defaults = DEFAULT_VIDEO_SHADER_SETTINGS;
+  if (typeof raw !== "object" || raw === null) {
+    return { ...defaults };
+  }
+  const candidate = raw as Partial<Record<keyof VideoShaderSettings, unknown>>;
+  return {
+    enabled: candidate.enabled === true,
+    sharpen: clampShaderValue(candidate.sharpen, 0, 100, defaults.sharpen),
+    saturation: clampShaderValue(candidate.saturation, 0, 200, defaults.saturation),
+    contrast: clampShaderValue(candidate.contrast, 50, 150, defaults.contrast),
+    brightness: clampShaderValue(candidate.brightness, 50, 150, defaults.brightness),
+    vibrance: clampShaderValue(candidate.vibrance, 0, 100, defaults.vibrance),
+    filmGrain: clampShaderValue(candidate.filmGrain, 0, 100, defaults.filmGrain),
+  };
+}
+
+/** True when the shader pipeline would visibly change the image. */
+export function videoShaderHasVisibleEffect(settings: VideoShaderSettings): boolean {
+  return (
+    settings.enabled &&
+    (settings.sharpen > 0 ||
+      settings.saturation !== 100 ||
+      settings.contrast !== 100 ||
+      settings.brightness !== 100 ||
+      settings.vibrance > 0 ||
+      settings.filmGrain > 0)
+  );
+}
+
 export interface Settings {
   resolution: string;
   aspectRatio: AspectRatio;
+  posterSizeScale: number;
   fps: number;
   maxBitrateMbps: number;
+  /** Recording video bitrate in Mbps; null means let MediaRecorder choose automatically */
+  recordingBitrateMbps: number | null;
+  streamClientMode: StreamClientMode;
+  nativeStreamerBackend: NativeStreamerBackendPreference;
+  nativeVideoBackend: NativeVideoBackendPreference;
+  nativeStreamerExecutablePath: string;
+  nativeCloudGsyncMode: NativeStreamerFeatureMode;
+  nativeD3dFullscreenMode: NativeStreamerFeatureMode;
+  nativeExternalRenderer: boolean;
+  showNativeStreamerStats: boolean;
   codec: VideoCodec;
   decoderPreference: VideoAccelerationPreference;
   encoderPreference: VideoAccelerationPreference;
   colorQuality: ColorQuality;
   region: string;
+  sessionProxyEnabled: boolean;
+  sessionProxyUrl: string;
   clipboardPaste: boolean;
+  /** Enable experimental gyroscope controller input mapping */
+  enableGyroscopeControls: boolean;
+  /** macOS-only workaround that restores Chromium's older HID path for Steam Controller compatibility */
+  steamControllerCompatibilityMode: boolean;
+  /** Use the WebRTC cursor_channel overlay instead of leaving cursor rendering to the stream. */
+  nativeCursorOverlay: boolean;
   mouseSensitivity: number;
   mouseAcceleration: number;
   shortcutToggleStats: string;
   shortcutTogglePointerLock: string;
+  shortcutToggleFullscreen: string;
   shortcutStopStream: string;
   shortcutToggleAntiAfk: string;
   shortcutToggleMicrophone: string;
@@ -148,16 +365,25 @@ export interface Settings {
   microphoneMode: MicrophoneMode;
   microphoneDeviceId: string;
   hideStreamButtons: boolean;
+  showAntiAfkIndicator: boolean;
   showStatsOnLaunch: boolean;
+  /** Skip the free-tier queue server selection modal and launch with default routing */
+  hideServerSelector: boolean;
+  /** Desktop UI accent preset */
+  appAccentColor: AppAccentColor;
+  /** UI Theme */
+  appTheme: AppTheme;
+  /** Use translucent overlays for settings and navbars */
+  translucentUI: boolean;
+  /** Use the large-screen controller-oriented shell and library layout */
   controllerMode: boolean;
-  controllerUiSounds: boolean;
-  autoLoadControllerLibrary: boolean;
-  /** When true, controller-mode overlays will show animated background orbs */
-  controllerBackgroundAnimations: boolean;
-  /** When true, the app will automatically enter fullscreen when controller mode triggers it */
+  /** Launch fullscreen with Controller Mode enabled, like GeForce NOW's TV mode */
+  launchInConsoleMode: boolean;
   autoFullScreen: boolean;
   favoriteGameIds: string[];
   sessionCounterEnabled: boolean;
+  /** Also show the session-limit countdown in the stats overlay while streaming */
+  showSessionTimeRemainingInStatsOverlay: boolean;
   sessionClockShowEveryMinutes: number;
   sessionClockShowDurationSeconds: number;
   windowWidth: number;
@@ -166,23 +392,29 @@ export interface Settings {
   keyboardLayout: KeyboardLayout;
   /** In-game language setting (sent to GFN servers via languageCode parameter) */
   gameLanguage: GameLanguage;
+  /** User opt-in for NVIDIA's per-game in-game graphics/settings persistence. */
+  enablePersistingInGameSettings: boolean;
   /** Experimental request for Low Latency, Low Loss, Scalable throughput on new sessions */
   enableL4S: boolean;
   /** Request Cloud G-Sync / Variable Refresh Rate on new sessions */
   enableCloudGsync: boolean;
+  /** Hidden diagnostics for native transition recovery and 240 FPS server-side stream changes */
+  nativeTransitionDiagnostics?: NativeTransitionDiagnostics;
   /** Show the currently streaming game as Discord Rich Presence activity */
   discordRichPresence: boolean;
-  /**
-   * Absolute path to SalsaNOW.exe (optional Windows companion that prepares a GeForce NOW
-   * VM-style session for local Steam integration). Empty disables launch from OpenNOW.
-   * Upstream source lives in `external/SalsaNOW` in this repository.
-   */
-  salsaNowExePath: string;
+  /** Automatically check GitHub Releases for app updates in the background */
+  autoCheckForUpdates: boolean;
+  /** When true, pressing Escape will exit fullscreen; when false Escape is sent to the game while pointer-locked */
+  allowEscapeToExitFullscreen?: boolean;
+  /** Last version for which the release highlights modal was acknowledged (empty = never) */
+  lastSeenReleaseHighlightsVersion: string;
+  /** Client-side GPU post-processing shaders applied to the stream (web client mode) */
+  videoShader: VideoShaderSettings;
 }
 
 export const DEFAULT_STREAM_PREFERENCES: Readonly<Pick<Settings, "codec" | "colorQuality">> = Object.freeze({
   codec: "H264",
-  colorQuality: "10bit_420",
+  colorQuality: "8bit_420",
 });
 
 export function getDefaultStreamPreferences(): Pick<Settings, "codec" | "colorQuality"> {
@@ -209,6 +441,7 @@ export interface AuthTokens {
   refreshToken?: string;
   idToken?: string;
   expiresAt: number;
+  authClientId?: string;
   clientToken?: string;
   clientTokenExpiresAt?: number;
   clientTokenLifetimeMs?: number;
@@ -226,6 +459,168 @@ export interface EntitledResolution {
   width: number;
   height: number;
   fps: number;
+}
+
+export interface EntitledStreamProfile {
+  resolution: string;
+  fps: number;
+}
+
+const STREAM_MODE_PRESETS: ReadonlyArray<Readonly<{
+  width: number;
+  height: number;
+  fps: readonly number[];
+}>> = Object.freeze([
+  { width: 3840, height: 2160, fps: [120, 60, 30] },
+  { width: 3456, height: 2160, fps: [120, 60, 30] },
+  { width: 3840, height: 1600, fps: [120, 60, 30] },
+  { width: 3440, height: 1440, fps: [120, 60, 30] },
+  { width: 3840, height: 1080, fps: [120, 60, 30] },
+  { width: 2560, height: 1600, fps: [120, 60, 30] },
+  { width: 2560, height: 1440, fps: [120, 60, 30] },
+  { width: 2560, height: 1080, fps: [120, 60, 30] },
+  { width: 1920, height: 1200, fps: [240, 120, 60, 30] },
+  { width: 1920, height: 1080, fps: [240, 120, 60, 30] },
+  { width: 1600, height: 1200, fps: [120, 60, 30] },
+  { width: 1680, height: 1050, fps: [120, 60, 30] },
+  { width: 1600, height: 900, fps: [120, 60, 30] },
+  { width: 1280, height: 1024, fps: [120, 60, 30] },
+  { width: 1440, height: 900, fps: [120, 60, 30] },
+  { width: 1680, height: 720, fps: [120, 60, 30] },
+  { width: 1366, height: 768, fps: [120, 60, 30] },
+  { width: 1280, height: 800, fps: [120, 60, 30] },
+  { width: 1112, height: 834, fps: [120, 60, 30] },
+  { width: 1280, height: 720, fps: [120, 60, 30] },
+  { width: 1376, height: 640, fps: [120, 60, 30] },
+  { width: 1024, height: 768, fps: [120, 60, 30] },
+]);
+
+export const SAFE_FALLBACK_STREAM_PROFILE: Readonly<EntitledStreamProfile> = Object.freeze({
+  resolution: "1920x1080",
+  fps: 60,
+});
+
+export function getSafeFallbackEntitledResolutions(): EntitledResolution[] {
+  return [{ width: 1920, height: 1080, fps: 60 }];
+}
+
+function parseResolutionValue(resolution: string): { width: number; height: number } | null {
+  const [widthText, heightText] = resolution.split("x");
+  const width = Number.parseInt(widthText ?? "", 10);
+  const height = Number.parseInt(heightText ?? "", 10);
+  return Number.isFinite(width) && width > 0 && Number.isFinite(height) && height > 0
+    ? { width, height }
+    : null;
+}
+
+function isValidEntitledResolution(resolution: EntitledResolution): boolean {
+  return Number.isFinite(resolution.width)
+    && resolution.width > 0
+    && Number.isFinite(resolution.height)
+    && resolution.height > 0
+    && Number.isFinite(resolution.fps)
+    && resolution.fps > 0;
+}
+
+function compareEntitledResolutionDescending(a: EntitledResolution, b: EntitledResolution): number {
+  const pixelDelta = b.width * b.height - a.width * a.height;
+  if (pixelDelta !== 0) return pixelDelta;
+  if (b.width !== a.width) return b.width - a.width;
+  if (b.height !== a.height) return b.height - a.height;
+  return b.fps - a.fps;
+}
+
+function normalizeEntitledResolution(resolution: EntitledResolution): EntitledResolution {
+  return {
+    width: Math.trunc(resolution.width),
+    height: Math.trunc(resolution.height),
+    fps: Math.trunc(resolution.fps),
+  };
+}
+
+function isModeCoveredByEntitlement(
+  entitlements: readonly EntitledResolution[],
+  width: number,
+  height: number,
+  fps: number,
+): boolean {
+  return entitlements.some(
+    (entitlement) =>
+      entitlement.width >= width &&
+      entitlement.height >= height &&
+      entitlement.fps >= fps,
+  );
+}
+
+export function expandEntitledStreamResolutions(
+  entitledResolutions: readonly EntitledResolution[],
+): EntitledResolution[] {
+  const validEntitlements = entitledResolutions
+    .filter(isValidEntitledResolution)
+    .map(normalizeEntitledResolution);
+  const byKey = new Map<string, EntitledResolution>();
+
+  const addResolution = (resolution: EntitledResolution): void => {
+    byKey.set(
+      `${resolution.width}x${resolution.height}@${resolution.fps}`,
+      resolution,
+    );
+  };
+
+  for (const resolution of validEntitlements) {
+    addResolution(resolution);
+  }
+
+  for (const mode of STREAM_MODE_PRESETS) {
+    for (const fps of mode.fps) {
+      if (isModeCoveredByEntitlement(validEntitlements, mode.width, mode.height, fps)) {
+        addResolution({ width: mode.width, height: mode.height, fps });
+      }
+    }
+  }
+
+  return [...byKey.values()].sort(compareEntitledResolutionDescending);
+}
+
+export function resolveEntitledStreamProfile(
+  entitledResolutions: readonly EntitledResolution[],
+  requested: EntitledStreamProfile,
+): EntitledStreamProfile | null {
+  const validEntitlements = expandEntitledStreamResolutions(entitledResolutions);
+  if (validEntitlements.length === 0) {
+    return null;
+  }
+
+  const requestedResolution = parseResolutionValue(requested.resolution);
+  const matchingResolutionEntries = requestedResolution
+    ? validEntitlements.filter(
+      (resolution) =>
+        resolution.width === requestedResolution.width &&
+        resolution.height === requestedResolution.height,
+    )
+    : [];
+  const fallbackResolution = [...validEntitlements].sort(compareEntitledResolutionDescending)[0];
+  const selectedResolutionEntries = matchingResolutionEntries.length > 0
+    ? matchingResolutionEntries
+    : validEntitlements.filter(
+      (resolution) =>
+        resolution.width === fallbackResolution.width &&
+        resolution.height === fallbackResolution.height,
+    );
+  const fpsOptions = [...new Set(selectedResolutionEntries.map((resolution) => Math.trunc(resolution.fps)))]
+    .sort((a, b) => a - b);
+  const requestedFps = Number.isFinite(requested.fps) && requested.fps > 0
+    ? Math.trunc(requested.fps)
+    : undefined;
+  const fps = requestedFps && fpsOptions.includes(requestedFps)
+    ? requestedFps
+    : [...fpsOptions].reverse().find((option) => requestedFps !== undefined && option <= requestedFps) ?? fpsOptions[0];
+  const selectedResolution = selectedResolutionEntries[0];
+
+  return {
+    resolution: `${selectedResolution.width}x${selectedResolution.height}`,
+    fps,
+  };
 }
 
 export interface StorageAddon {
@@ -265,6 +660,15 @@ export interface AuthSession {
   user: AuthUser;
 }
 
+export interface SavedAccount {
+  userId: string;
+  displayName: string;
+  email?: string;
+  avatarUrl?: string;
+  membershipTier: string;
+  providerCode: string;
+}
+
 export interface ThankYouContributor {
   login: string;
   avatarUrl: string;
@@ -277,6 +681,7 @@ export interface ThankYouSupporter {
   avatarUrl?: string;
   profileUrl?: string;
   isPrivate: boolean;
+  source: "github" | "custom" | "private";
 }
 
 export interface ThankYouDataResult {
@@ -288,6 +693,44 @@ export interface ThankYouDataResult {
 
 export interface AuthLoginRequest {
   providerIdpId?: string;
+}
+
+export interface AuthDeviceLoginStartRequest {
+  providerIdpId?: string;
+}
+
+export interface AuthDeviceLoginChallenge {
+  attemptId: string;
+  deviceCode: string;
+  userCode: string;
+  verificationUri: string;
+  verificationUriComplete: string;
+  expiresAt: number;
+  intervalSeconds: number;
+}
+
+export interface AuthDeviceLoginPollRequest {
+  attemptId: string;
+  deviceCode: string;
+}
+
+export interface AuthDeviceLoginAttemptRequest {
+  attemptId: string;
+}
+
+export type AuthDeviceLoginPollStatus =
+  | "pending"
+  | "slow_down"
+  | "expired"
+  | "access_denied"
+  | "authorized"
+  | "error";
+
+export interface AuthDeviceLoginPollResult {
+  status: AuthDeviceLoginPollStatus;
+  session?: AuthSession;
+  error?: string;
+  intervalSeconds?: number;
 }
 
 export interface AuthSessionRequest {
@@ -328,12 +771,51 @@ export interface PingResult {
 export interface GamesFetchRequest {
   token?: string;
   providerStreamingBaseUrl?: string;
+  /** Optional proxy used for GFN games catalog/list requests. */
+  proxyUrl?: string;
+  /** Stable account id used for on-disk cache scoping (avoids cache misses on token refresh). */
+  userId?: string;
+}
+
+export interface DirectLaunchRequest {
+  id: string;
+  source: "cli";
+  appId?: string;
+  title?: string;
+  receivedAt: number;
+}
+
+export interface CatalogBrowseRequest extends GamesFetchRequest {
+  searchQuery?: string;
+  sortId?: string;
+  filterIds?: string[];
+  fetchCount?: number;
 }
 
 export interface ResolveLaunchIdRequest {
   token?: string;
   providerStreamingBaseUrl?: string;
+  proxyUrl?: string;
   appIdOrUuid: string;
+}
+
+export interface ResolveStoreUrlRequest {
+  token?: string;
+  providerStreamingBaseUrl?: string;
+  proxyUrl?: string;
+  appIdOrUuid: string;
+  variantId?: string;
+  store?: string;
+}
+
+export interface MarkGameOwnedRequest extends GamesFetchRequest {
+  variantId: string;
+}
+
+export interface MarkGameOwnedResult {
+  ok: true;
+  variantId: string;
+  libraryStatus: "MANUAL";
 }
 
 export interface SubscriptionFetchRequest {
@@ -342,27 +824,219 @@ export interface SubscriptionFetchRequest {
   userId: string;
 }
 
+export interface PersistentStorageResetRequest {
+  /** Null or omitted keeps the current storage region, matching NVIDIA's storage reset flow. */
+  storageRegion?: string | null;
+}
+
+export interface PersistentStorageResetResult {
+  ok: true;
+  storageRegion: string | null;
+  message?: string;
+}
+
+export interface PersistentStorageLocation {
+  code: string;
+  name: string;
+  isAvailable: boolean;
+  isCurrent?: boolean;
+  isRecommended?: boolean;
+}
+
+export interface PersistentStorageLocationsFetchRequest {
+  serverRegionId?: string | null;
+  currentRegionCode?: string | null;
+  currentRegionName?: string | null;
+  locale?: string;
+}
+
+export interface PersistentStorageLocationsResult {
+  locations: PersistentStorageLocation[];
+  currentRegionCode?: string;
+  currentRegionName?: string;
+}
+
+export type GameAccountConnectionStatus = "not_connected" | "connected" | "expired" | "sync_error";
+
+export interface GameAccountConnection {
+  provider: string;
+  label: string;
+  sortOrder: number;
+  iconUrl?: string;
+  supportsLinking: boolean;
+  supportsSync: boolean;
+  isRequired: boolean;
+  isConnected: boolean;
+  status: GameAccountConnectionStatus;
+  displayName?: string;
+  userIdentifier?: string;
+  expiresIn?: string;
+  expiresAt?: number;
+  syncState?: string;
+  syncDate?: string;
+  syncedGames: number;
+}
+
+export interface GameAccountConnectionsResult {
+  accounts: GameAccountConnection[];
+  fetchedAt: number;
+}
+
+export interface GameAccountOperationRequest {
+  provider: string;
+  proxyUrl?: string;
+}
+
+export interface GameAccountOperationResult extends GameAccountConnectionsResult {
+  ok: true;
+  account?: GameAccountConnection;
+  message?: string;
+}
+
 export interface GameVariant {
   id: string;
   store: string;
+  storeUrl?: string;
   supportedControls: string[];
+  supportsInGameSettingsPersistence?: boolean;
+  librarySelected?: boolean;
+  inLibrary?: boolean;
+  libraryStatus?: string;
+  lastPlayedDate?: string;
+  gfnStatus?: string;
+}
+
+export const OWNED_LIBRARY_STATUSES = ["MANUAL", "PLATFORM_SYNC", "IN_LIBRARY"] as const;
+
+const GAME_STORE_ALIASES: Record<string, string> = {
+  BATTLE_NET: "BATTLE_NET",
+  BATTLENET: "BATTLE_NET",
+  EA: "EA_APP",
+  EGS: "EPIC_GAMES_STORE",
+  EPIC: "EPIC_GAMES_STORE",
+  GAIJIN_NET: "GAIJIN",
+  GOG_COM: "GOG",
+  MICROSOFT: "XBOX",
+  MICROSOFT_STORE: "XBOX",
+  ORIGIN: "EA_APP",
+  UBISOFT: "UPLAY",
+  UBISOFT_CONNECT: "UPLAY",
+  XBOX_GAME_PASS: "XBOX",
+};
+
+export function normalizeGameStore(store: string): string {
+  const key = store
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return GAME_STORE_ALIASES[key] ?? key;
+}
+
+export function isOwnedLibraryStatus(status?: string): boolean {
+  return typeof status === "string" && OWNED_LIBRARY_STATUSES.includes(status as (typeof OWNED_LIBRARY_STATUSES)[number]);
+}
+
+export function isOwnedVariant(variant: Pick<GameVariant, "libraryStatus">): boolean {
+  return isOwnedLibraryStatus(variant.libraryStatus);
 }
 
 export interface GameInfo {
+
   id: string;
   uuid?: string;
   launchAppId?: string;
   title: string;
+  shortName?: string;
   description?: string;
   longDescription?: string;
+  developerName?: string;
+  maxLocalPlayers?: number;
+  maxOnlinePlayers?: number;
   featureLabels?: string[];
   genres?: string[];
+  supportedControls?: string[];
+  nvidiaTech?: string[];
   imageUrl?: string;
+  heroImageUrl?: string;
   screenshotUrl?: string;
+  screenshotUrls?: string[];
+  imageUrlsByType?: Record<string, string[]>;
   playType?: string;
   membershipTierLabel?: string;
+  catalogSkuStrings?: GameCatalogSkuStrings;
+  publisherName?: string;
+  contentRatings?: string[];
+  playabilityState?: string;
+  availableStores?: string[];
+  searchText?: string;
+  lastPlayed?: string;
+  isInLibrary?: boolean;
   selectedVariantIndex: number;
   variants: GameVariant[];
+}
+
+export interface GameCatalogSkuStrings {
+  SKU_BASED_TAG?: string[];
+  SKU_BASED_PLAYABILITY_TEXT?: string;
+  SKU_BASED_UNPLAYABLE_DIALOG_HEADER?: string;
+  SKU_BASED_UNPLAYABLE_DIALOG_BODY_UPGRADE?: string;
+  SKU_BASED_UNPLAYABLE_DIALOG_BODY_UPGRADE_ECOMM_RESTRICTED?: string;
+}
+
+export function isGameInLibrary(game: Pick<GameInfo, "variants">): boolean {
+  return game.variants.some((variant) => isOwnedVariant(variant));
+}
+
+export function isEpicStore(store: string): boolean {
+  const key = normalizeGameStore(store);
+  return key === "EPIC_GAMES_STORE";
+}
+
+export interface CatalogFilterOption {
+  id: string;
+  rawId: string;
+  label: string;
+  groupId: string;
+  groupLabel: string;
+}
+
+export interface CatalogFilterGroup {
+  id: string;
+  label: string;
+  options: CatalogFilterOption[];
+}
+
+export interface CatalogSortOption {
+  id: string;
+  label: string;
+  orderBy: string;
+}
+
+export interface GamePanelSection {
+  id: string;
+  title: string;
+  games: GameInfo[];
+}
+
+export interface GamePanelResult {
+  id: string;
+  title: string;
+  sections: GamePanelSection[];
+}
+
+export interface CatalogBrowseResult {
+  games: GameInfo[];
+  numberReturned: number;
+  numberSupported: number;
+  totalCount: number;
+  hasNextPage: boolean;
+  endCursor?: string;
+  searchQuery: string;
+  selectedSortId: string;
+  selectedFilterIds: string[];
+  filterGroups: CatalogFilterGroup[];
+  sortOptions: CatalogSortOption[];
 }
 
 export interface StreamSettings {
@@ -379,6 +1053,20 @@ export interface StreamSettings {
   enableL4S: boolean;
   /** Request Cloud G-Sync / Variable Refresh Rate on new sessions */
   enableCloudGsync: boolean;
+  /** Renderer-selected client path; main uses this to apply native-only Cloud G-Sync gating. */
+  clientMode?: StreamClientMode;
+  /** Selected native streamer backend; stub cannot support Cloud G-Sync presentation. */
+  nativeStreamerBackend?: NativeStreamerBackendPreference;
+  /** Native-only override for Cloud G-Sync display detection. */
+  nativeCloudGsyncMode?: NativeStreamerFeatureMode;
+  /** User's raw Cloud G-Sync preference before main-process capability resolution. */
+  requestedCloudGsync?: boolean;
+  /** Diagnostics from the main-process Cloud G-Sync resolver. */
+  cloudGsyncResolution?: CloudGsyncResolution;
+  /** Hidden diagnostics for native transition recovery and 240 FPS server-side stream changes. */
+  nativeTransitionDiagnostics?: NativeTransitionDiagnostics;
+  /** Requested session app launch mode; "gamepadFriendly" asks NVIDIA to launch games big-picture style. */
+  appLaunchMode?: AppLaunchMode;
 }
 
 export interface SessionCreateRequest {
@@ -387,8 +1075,17 @@ export interface SessionCreateRequest {
   appId: string;
   internalTitle: string;
   accountLinked?: boolean;
+  /**
+   * Official clients only enable server-side in-game graphics/settings persistence
+   * when the user is entitled and has opted in. Leave disabled by default.
+   */
+  enablePersistingInGameSettings?: boolean;
+  /** Selected game variant must advertise IN_GAME_SETTINGS_PERSISTENCE_ENABLED. */
+  supportsInGameSettingsPersistence?: boolean;
+  existingSessionStrategy?: ExistingSessionStrategy;
   zone: string;
   settings: StreamSettings;
+  proxyUrl?: string;
 }
 
 export interface SessionPollRequest {
@@ -399,6 +1096,7 @@ export interface SessionPollRequest {
   sessionId: string;
   clientId?: string;
   deviceId?: string;
+  proxyUrl?: string;
 }
 
 export interface SessionStopRequest {
@@ -439,14 +1137,18 @@ export interface IceServer {
 export interface MediaConnectionInfo {
   ip: string;
   port: number;
+  usage?: number;
 }
 
 /** Server-negotiated stream profile received from CloudMatch after session ready */
 export interface NegotiatedStreamProfile {
   resolution?: string;
   fps?: number;
+  codec?: VideoCodec;
   colorQuality?: ColorQuality;
   enableL4S?: boolean;
+  enableCloudGsync?: boolean;
+  enableReflex?: boolean;
 }
 
 export interface SessionAdMediaFile {
@@ -534,6 +1236,7 @@ export function getSessionAdDurationMs(ad: SessionAdInfo | undefined): number | 
 
 export interface SessionInfo {
   sessionId: string;
+  appId?: string;
   status: number;
   queuePosition?: number;
   seatSetupStep?: number;
@@ -544,9 +1247,15 @@ export interface SessionInfo {
   signalingServer: string;
   signalingUrl: string;
   gpuType?: string;
+  /** Wire appLaunchMode the session runs with, kept session-stable for resumes */
+  appLaunchMode?: number;
+  /** Wire in-game settings persistence value the session was created with, kept session-stable for resumes */
+  enablePersistingInGameSettings?: boolean;
   iceServers: IceServer[];
   mediaConnectionInfo?: MediaConnectionInfo;
   negotiatedStreamProfile?: NegotiatedStreamProfile;
+  requestedStreamingFeatures?: StreamingFeatures;
+  finalizedStreamingFeatures?: StreamingFeatures;
   clientId?: string;
   deviceId?: string;
 }
@@ -555,12 +1264,36 @@ export interface SessionInfo {
 export interface ActiveSessionInfo {
   sessionId: string;
   appId: number;
+  /** Wire appLaunchMode the session was created with, as echoed by the server */
+  appLaunchMode?: number;
+  /** Wire in-game settings persistence value the session was created with, when echoed by the server */
+  enablePersistingInGameSettings?: boolean;
   gpuType?: string;
   status: number;
+  queuePosition?: number;
+  seatSetupStep?: number;
+  streamingBaseUrl?: string;
   serverIp?: string;
   signalingUrl?: string;
   resolution?: string;
   fps?: number;
+}
+
+export interface GfnSessionQueueState {
+  status: number;
+  queuePosition?: number;
+  seatSetupStep?: number;
+}
+
+export function isSessionReadyForConnectStatus(status: number): boolean {
+  return status === 2 || status === 3;
+}
+
+export function isGfnSessionInQueue(session: GfnSessionQueueState): boolean {
+  if (session.seatSetupStep === 1) {
+    return true;
+  }
+  return (session.queuePosition ?? 0) > 1;
 }
 
 /** Request to claim/resume an existing session */
@@ -569,14 +1302,23 @@ export interface SessionClaimRequest {
   streamingBaseUrl?: string;
   sessionId: string;
   serverIp: string;
+  clientId?: string;
+  deviceId?: string;
   appId?: string;
+  /** Session-stable wire appLaunchMode captured when the session was created */
+  appLaunchMode?: number;
+  /** In-game settings persistence value to send with the resume claim. Defaults to false. */
+  enablePersistingInGameSettings?: boolean;
   settings?: StreamSettings;
+  /** True when claim is triggered by automatic reconnect recovery logic */
+  recoveryMode?: boolean;
 }
 
 export interface SignalingConnectRequest {
   sessionId: string;
   signalingServer: string;
   signalingUrl?: string;
+  nativeStreamer?: NativeStreamerSessionContext;
 }
 
 export interface IceCandidatePayload {
@@ -591,6 +1333,100 @@ export interface SendAnswerRequest {
   nvstSdp?: string;
 }
 
+export type NativeStreamerShortcutAction =
+  | "toggleStats"
+  | "togglePointerLock"
+  | "toggleFullscreen"
+  | "stopStream"
+  | "toggleAntiAfk"
+  | "toggleMicrophone"
+  | "screenshot"
+  | "toggleRecording";
+
+export interface NativeStreamerShortcutBindings {
+  toggleStats: string;
+  togglePointerLock: string;
+  toggleFullscreen: string;
+  stopStream: string;
+  toggleAntiAfk: string;
+  toggleMicrophone: string;
+  screenshot: string;
+  toggleRecording: string;
+}
+
+export interface NativeStreamerSessionContext {
+  session: SessionInfo;
+  settings: StreamSettings;
+  shortcuts: NativeStreamerShortcutBindings;
+}
+
+export function buildNativeStreamerSessionContext(
+  session: SessionInfo,
+  settings: StreamSettings,
+  shortcuts: NativeStreamerShortcutBindings,
+): NativeStreamerSessionContext {
+  const negotiatedStreamProfile = session.negotiatedStreamProfile
+    ? {
+      ...session.negotiatedStreamProfile,
+      codec: session.negotiatedStreamProfile.codec ?? settings.codec,
+    }
+    : { codec: settings.codec };
+
+  return {
+    session: {
+      ...session,
+      negotiatedStreamProfile,
+    },
+    settings: {
+      ...settings,
+      enableCloudGsync:
+        session.negotiatedStreamProfile?.enableCloudGsync ?? settings.enableCloudGsync,
+    },
+    shortcuts,
+  };
+}
+
+export interface NativeVideoTransition {
+  transitionType: string;
+  source: string;
+  atMs: number;
+  oldCaps?: string;
+  newCaps?: string;
+  oldFramerate?: string;
+  newFramerate?: string;
+  oldMemoryMode?: string;
+  newMemoryMode?: string;
+  renderGapMs?: number;
+  requestedFps?: number;
+  capsFramerate?: string;
+  highFpsRisk?: boolean;
+  queueMode?: NativeQueueMode;
+  summary?: string;
+}
+
+export interface NativeInputPacket {
+  payload: ArrayBuffer | Uint8Array | number[];
+  partiallyReliable?: boolean;
+}
+
+export interface NativeRenderSurfaceRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface NativeRenderSurfaceUpdate {
+  rect: NativeRenderSurfaceRect | null;
+  visible: boolean;
+  deviceScaleFactor: number;
+  showStats?: boolean;
+}
+
+export interface NativeRenderSurface extends NativeRenderSurfaceUpdate {
+  windowHandle?: string;
+}
+
 export interface KeyframeRequest {
   reason: string;
   backlogFrames: number;
@@ -602,38 +1438,133 @@ export type MainToRendererSignalingEvent =
   | { type: "disconnected"; reason: string }
   | { type: "offer"; sdp: string }
   | { type: "remote-ice"; candidate: IceCandidatePayload }
+  | { type: "native-shortcut"; action: NativeStreamerShortcutAction }
+  | { type: "native-clipboard-paste" }
+  | { type: "native-input-capture-changed"; captured: boolean }
+  | { type: "native-stream-started"; message?: string }
+  | { type: "native-stream-stopped"; reason?: string }
+  | { type: "native-stream-stats"; stats: NativeStreamStats }
+  | { type: "native-stream-transition"; transition: NativeVideoTransition }
+  | { type: "native-input-ready"; protocolVersion: number }
   | { type: "error"; message: string }
   | { type: "log"; message: string };
+
+export interface NativeStreamStats {
+  codec: string;
+  resolution: string;
+  hardwareAcceleration: string;
+  memoryMode?: string;
+  zeroCopy?: boolean;
+  requestedFps?: number;
+  capsFramerate?: string;
+  bitrateKbps: number;
+  targetBitrateKbps: number;
+  bitratePerformancePercent: number;
+  decodedFps: number;
+  renderFps: number;
+  framesDecoded: number;
+  framesRendered: number;
+  framesPendingToPresent?: number;
+  sinkRendered?: number;
+  sinkDropped?: number;
+  zeroCopyD3D11: boolean;
+  zeroCopyD3D12: boolean;
+  queueMode?: NativeQueueMode;
+  queueDepthChanges?: number;
+  presentPacingChanges?: number;
+  partialFlushCount?: number;
+  completeFlushCount?: number;
+  lastTransitionType?: string;
+  lastTransitionAtMs?: number;
+  lastTransitionSummary?: string;
+  requestedStreamingFeaturesSummary?: string;
+  finalizedStreamingFeaturesSummary?: string;
+}
 
 /** Dialog result for session conflict resolution */
 export type SessionConflictChoice = "resume" | "new" | "cancel";
 
-export type SalsaNowLaunchResult =
-  | { ok: true }
-  | { ok: false; error: string };
+export type ExistingSessionStrategy = "auto-resume" | "force-new";
 
-export type SalsaNowServeStartResult =
-  | {
-      ok: true;
-      port: number;
-      token: string;
-      fileName: string;
-      localUrl: string;
-      lanUrls: string[];
-    }
-  | { ok: false; error: string };
+export type AppUpdaterStatus =
+  | "disabled"
+  | "idle"
+  | "checking"
+  | "available"
+  | "not-available"
+  | "downloading"
+  | "downloaded"
+  | "error";
+
+/** Payload sent to the renderer for the What's New modal */
+export interface ReleaseHighlightsPayload {
+  /** App version these notes are for (e.g. "0.4.2") */
+  version: string;
+  /** Display title — defaults to "OpenNOW v{version}" */
+  title: string;
+  /** Release notes in markdown format */
+  bodyMarkdown: string;
+  /** Where the body came from */
+  source: "github" | "updater-cache" | "fallback";
+}
+
+export interface AppUpdaterProgress {
+  percent: number;
+  transferred: number;
+  total: number;
+  bytesPerSecond: number;
+}
+
+export interface AppUpdaterState {
+  status: AppUpdaterStatus;
+  currentVersion: string;
+  currentDisplayVersion?: string;
+  currentBuildNumber?: string;
+  availableVersion?: string;
+  downloadedVersion?: string;
+  progress?: AppUpdaterProgress;
+  lastCheckedAt?: number;
+  message?: string;
+  errorCode?: string;
+  updateSource: "github-releases";
+  canCheck: boolean;
+  canDownload: boolean;
+  canInstall: boolean;
+  isPackaged: boolean;
+}
 
 export interface OpenNowApi {
   getAuthSession(input?: AuthSessionRequest): Promise<AuthSessionResult>;
   getLoginProviders(): Promise<LoginProvider[]>;
   getRegions(input?: RegionsFetchRequest): Promise<StreamRegion[]>;
   login(input: AuthLoginRequest): Promise<AuthSession>;
+  startDeviceLogin(input: AuthDeviceLoginStartRequest): Promise<AuthDeviceLoginChallenge>;
+  pollDeviceLogin(input: AuthDeviceLoginPollRequest): Promise<AuthDeviceLoginPollResult>;
+  completeDeviceLogin(input: AuthDeviceLoginAttemptRequest): Promise<AuthSession>;
+  cancelDeviceLogin(input: AuthDeviceLoginAttemptRequest): Promise<void>;
   logout(): Promise<void>;
+  logoutAll(): Promise<void>;
+  getSavedAccounts(): Promise<SavedAccount[]>;
+  switchAccount(userId: string): Promise<AuthSession>;
+  removeAccount(userId: string): Promise<void>;
   fetchSubscription(input: SubscriptionFetchRequest): Promise<SubscriptionInfo>;
+  fetchPersistentStorageLocations(input?: PersistentStorageLocationsFetchRequest): Promise<PersistentStorageLocationsResult>;
+  resetPersistentStorage(input?: PersistentStorageResetRequest): Promise<PersistentStorageResetResult>;
+  fetchGameAccountConnections(): Promise<GameAccountConnectionsResult>;
+  linkGameAccount(input: GameAccountOperationRequest): Promise<GameAccountOperationResult>;
+  unlinkGameAccount(input: GameAccountOperationRequest): Promise<GameAccountOperationResult>;
+  resyncGameAccount(input: GameAccountOperationRequest): Promise<GameAccountOperationResult>;
   fetchMainGames(input: GamesFetchRequest): Promise<GameInfo[]>;
+  fetchStorePanels(input: GamesFetchRequest): Promise<GamePanelResult[]>;
+  fetchFeaturedGames(input: GamesFetchRequest): Promise<GameInfo[]>;
   fetchLibraryGames(input: GamesFetchRequest): Promise<GameInfo[]>;
+  browseCatalog(input: CatalogBrowseRequest): Promise<CatalogBrowseResult>;
   fetchPublicGames(): Promise<GameInfo[]>;
   resolveLaunchAppId(input: ResolveLaunchIdRequest): Promise<string | null>;
+  resolveStoreUrl(input: ResolveStoreUrlRequest): Promise<string | null>;
+  markGameOwned(input: MarkGameOwnedRequest): Promise<MarkGameOwnedResult>;
+  getPendingDirectLaunchRequest(): Promise<DirectLaunchRequest | null>;
+  onDirectLaunchRequest(listener: (request: DirectLaunchRequest) => void): () => void;
   createSession(input: SessionCreateRequest): Promise<SessionInfo>;
   pollSession(input: SessionPollRequest): Promise<SessionInfo>;
   reportSessionAd(input: SessionAdReportRequest): Promise<SessionInfo>;
@@ -642,23 +1573,39 @@ export interface OpenNowApi {
   getActiveSessions(token?: string, streamingBaseUrl?: string): Promise<ActiveSessionInfo[]>;
   /** Claim/resume an existing session */
   claimSession(input: SessionClaimRequest): Promise<SessionInfo>;
+  getNativeStreamerStatus(): Promise<NativeStreamerStatus>;
+  getNativeCloudGsyncCapabilities(): Promise<NativeCloudGsyncCapabilities>;
   /** Show dialog asking user how to handle session conflict */
   showSessionConflictDialog(): Promise<SessionConflictChoice>;
   connectSignaling(input: SignalingConnectRequest): Promise<void>;
   disconnectSignaling(): Promise<void>;
   sendAnswer(input: SendAnswerRequest): Promise<void>;
   sendIceCandidate(input: IceCandidatePayload): Promise<void>;
+  sendNativeInput(input: NativeInputPacket): void;
+  setNativeInputPaused(paused: boolean): void;
+  updateNativeRenderSurface(input: NativeRenderSurfaceUpdate): void;
+  updateNativeShortcuts(shortcuts: NativeStreamerShortcutBindings): void;
   requestKeyframe(input: KeyframeRequest): Promise<void>;
   onSignalingEvent(listener: (event: MainToRendererSignalingEvent) => void): () => void;
   /** Listen for F11 fullscreen toggle from main process */
   onToggleFullscreen(listener: () => void): () => void;
   quitApp(): Promise<void>;
+  getUpdaterState(): Promise<AppUpdaterState>;
+  checkForUpdates(): Promise<AppUpdaterState>;
+  downloadUpdate(): Promise<AppUpdaterState>;
+  installUpdateAndRestart(): Promise<AppUpdaterState>;
+  onUpdaterStateChanged(listener: (state: AppUpdaterState) => void): () => void;
   setFullscreen(v: boolean): Promise<void>;
   toggleFullscreen(): Promise<void>;
   togglePointerLock(): Promise<void>;
+  /** Notify main process that pointer lock state changed (active = true/false). */
+  notifyPointerLockChange(active: boolean, suppressEscapeFullscreenGrace?: boolean): void;
+  /** Read plain text from the OS clipboard through Electron main process */
+  readClipboardText(): Promise<string>;
   getSettings(): Promise<Settings>;
   setSetting<K extends keyof Settings>(key: K, value: Settings[K]): Promise<void>;
   resetSettings(): Promise<Settings>;
+  selectNativeStreamerExecutable(): Promise<string | null>;
   getMicrophonePermission(): Promise<MicrophonePermissionResult>;
   /** Export logs in redacted format */
   exportLogs(format?: "text" | "json"): Promise<string>;
@@ -679,6 +1626,12 @@ export interface OpenNowApi {
 
   /** Listen for screenshot hotkey events from the main process (F11) */
   onTriggerScreenshot(listener: () => void): () => void;
+
+  /** Listen for external Escape events forwarded by the main process */
+  onExternalEscape(listener: () => void): () => void;
+
+  /** Open a trusted external URL in the OS default browser */
+  openExternalUrl(url: string): Promise<void>;
 
   /** Begin a new recording session; returns a recordingId to use for subsequent calls */
   beginRecording(input: RecordingBeginRequest): Promise<RecordingBeginResult>;
@@ -710,6 +1663,15 @@ export interface OpenNowApi {
   /** Reveal a media file path in the system file manager */
   showMediaInFolder(input: { filePath: string }): Promise<void>;
 
+  /** Trusted file:// URL for in-app playback of a video under OpenNOW media root, or null */
+  getMediaPlaybackUrl(input: { filePath: string }): Promise<string | null>;
+
+  /** Delete a media file under the OpenNOW pictures root (recordings, screenshots, etc.) */
+  deleteMediaFile(input: { filePath: string }): Promise<{ ok: boolean }>;
+
+  /** Invalidate cached / sidecar thumbnails and regenerate (returns data URL when possible) */
+  regenMediaThumbnail(input: { filePath: string }): Promise<{ ok: boolean; thumbnailDataUrl: string | null }>;
+
   deleteCache(): Promise<void>;
 
   /** Fetch current GFN queue wait times from the PrintedWaste API */
@@ -717,20 +1679,20 @@ export interface OpenNowApi {
   /** Fetch PrintedWaste server mapping metadata (includes nuked status) */
   fetchPrintedWasteServerMapping(): Promise<PrintedWasteServerMapping>;
   getThanksData(): Promise<ThankYouDataResult>;
+  provisionZortosCommunityProxy(): Promise<import("@shared/communityProxy").CommunityProxyProvisionResult>;
+  /** Set Discord rich presence activity */
+  setDiscordActivity(input: import("./discord").DiscordActivityUpdate): Promise<void>;
+  /** Clear Discord rich presence activity */
+  clearDiscordActivity(): Promise<void>;
 
-  /**
-   * Spawn SalsaNOW from `salsaNowExePath` (Windows only). Path is read from persisted settings
-   * in the main process; the renderer cannot override it.
-   */
-  launchSalsaNowCompanion(): Promise<SalsaNowLaunchResult>;
+  /** Fetch release highlights payload for a given version (defaults to current) */
+  getReleaseHighlights(version?: string): Promise<ReleaseHighlightsPayload>;
 
-  /**
-   * Host the selected file (or `salsaNowExePath` when `useConfiguredExe`) on a short-lived local HTTP server.
-   * Returns copyable URLs; see docs for limits (GeForce NOW cloud VM cannot reach your LAN by default).
-   */
-  startSalsaNowPackageServer(options: { useConfiguredExe: boolean }): Promise<SalsaNowServeStartResult>;
+  /** Mark the current version's highlights as acknowledged */
+  ackReleaseHighlights(): Promise<void>;
 
-  stopSalsaNowPackageServer(): Promise<void>;
+  /** Subscribe to automatic release-highlights show events from main process */
+  onReleaseHighlightsShow(listener: (payload: ReleaseHighlightsPayload) => void): () => void;
 }
 
 export interface ScreenshotSaveRequest {

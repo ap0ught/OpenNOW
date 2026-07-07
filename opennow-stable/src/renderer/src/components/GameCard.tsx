@@ -1,7 +1,11 @@
 import { Play, Monitor } from "lucide-react";
-import { memo } from "react";
+import { memo, useCallback, useMemo, useState } from "react";
 import type { JSX } from "react";
+import { normalizeGameStore } from "@shared/gfn";
 import type { GameInfo } from "@shared/gfn";
+import { getActiveGameAvailabilityBadge } from "../lib/gameCardStatus";
+import { getStoreOptions as getGameCardStoreOptions } from "../lib/gameCardStores";
+import { useTranslation } from "../i18n";
 
 interface GameCardProps {
   game: GameInfo;
@@ -10,13 +14,6 @@ interface GameCardProps {
   onSelect: () => void;
   selectedVariantId?: string;
   onSelectStore?: (variantId: string) => void;
-}
-
-interface StoreOption {
-  storeKey: string;
-  variantId: string;
-  displayName: string;
-  IconComponent: () => JSX.Element;
 }
 
 /* ── Official store brand icons (Simple Icons / MDI, viewBox 0 0 24 24) ── */
@@ -90,48 +87,26 @@ function DefaultStoreIcon(): JSX.Element {
 const STORE_ICON_MAP: Record<string, () => JSX.Element> = {
   STEAM: SteamIcon,
   EPIC_GAMES_STORE: EpicIcon,
-  EPIC: EpicIcon,
-  EGS: EpicIcon,
   UPLAY: UbisoftIcon,
-  UBISOFT: UbisoftIcon,
-  UBISOFT_CONNECT: UbisoftIcon,
   EA_APP: EaIcon,
-  EA: EaIcon,
-  ORIGIN: EaIcon,
-  GOG_COM: GogIcon,
   GOG: GogIcon,
-  XBOX_GAME_PASS: XboxIcon,
   XBOX: XboxIcon,
-  MICROSOFT_STORE: XboxIcon,
-  MICROSOFT: XboxIcon,
   BATTLE_NET: BattleNetIcon,
-  BATTLENET: BattleNetIcon,
 };
 
 const STORE_DISPLAY_NAME: Record<string, string> = {
   STEAM: "Steam",
   EPIC_GAMES_STORE: "Epic",
-  EPIC: "Epic",
-  EGS: "Epic",
   UPLAY: "Ubisoft",
-  UBISOFT: "Ubisoft",
-  UBISOFT_CONNECT: "Ubisoft",
   EA_APP: "EA",
-  EA: "EA",
-  ORIGIN: "EA",
-  GOG_COM: "GOG",
   GOG: "GOG",
-  XBOX_GAME_PASS: "Xbox",
   XBOX: "Xbox",
-  MICROSOFT_STORE: "Xbox",
-  MICROSOFT: "Xbox",
   BATTLE_NET: "Battle.net",
-  BATTLENET: "Battle.net",
 };
 
 /** Normalize an appStore value to the uppercase key used by the icon/name maps. */
 export function normalizeStoreKey(raw: string): string {
-  return raw.toUpperCase().replace(/[\s-]+/g, "_");
+  return normalizeGameStore(raw);
 }
 
 function formatStoreFallbackName(storeKey: string): string {
@@ -151,37 +126,21 @@ export function getStoreIconComponent(store: string): () => JSX.Element {
   return STORE_ICON_MAP[key] ?? DefaultStoreIcon;
 }
 
-function getStoreOptions(game: GameInfo): StoreOption[] {
-  const seen = new Set<string>();
-  const options: StoreOption[] = [];
-  for (const variant of game.variants) {
-    const key = normalizeStoreKey(variant.store);
-    if (key !== "UNKNOWN" && key !== "NONE" && !seen.has(key)) {
-      seen.add(key);
-      options.push({
-        storeKey: key,
-        variantId: variant.id,
-        displayName: getStoreDisplayName(variant.store),
-        IconComponent: getStoreIconComponent(variant.store),
-      });
-    }
-  }
-  return options;
-}
+const StoreBrandIcon = memo(function StoreBrandIcon({ store }: { store: string }): JSX.Element {
+  const key = normalizeStoreKey(store);
+  const IconComponent = STORE_ICON_MAP[key] ?? DefaultStoreIcon;
+  return <IconComponent />;
+});
 
-function getActiveVariantId(storeOptions: StoreOption[], selectedVariantId?: string): string | undefined {
-  if (!selectedVariantId) {
-    return storeOptions[0]?.variantId;
-  }
-  const hasSelected = storeOptions.some((option) => option.variantId === selectedVariantId);
-  return hasSelected ? selectedVariantId : storeOptions[0]?.variantId;
-}
-
-function getActiveStoreOption(storeOptions: StoreOption[], activeVariantId?: string): StoreOption | undefined {
-  if (!activeVariantId) {
-    return storeOptions[0];
-  }
-  return storeOptions.find((option) => option.variantId === activeVariantId) ?? storeOptions[0];
+function gameCardPropsAreEqual(prev: GameCardProps, next: GameCardProps): boolean {
+  return (
+    prev.game === next.game
+    && prev.isSelected === next.isSelected
+    && prev.selectedVariantId === next.selectedVariantId
+    && prev.onPlay === next.onPlay
+    && prev.onSelect === next.onSelect
+    && prev.onSelectStore === next.onSelectStore
+  );
 }
 
 export const GameCard = memo(function GameCard({
@@ -192,9 +151,30 @@ export const GameCard = memo(function GameCard({
   selectedVariantId,
   onSelectStore,
 }: GameCardProps): JSX.Element {
-  const storeOptions = getStoreOptions(game);
-  const activeVariantId = getActiveVariantId(storeOptions, selectedVariantId);
-  const activeStoreOption = getActiveStoreOption(storeOptions, activeVariantId);
+  const { t } = useTranslation();
+  const storeOptions = useMemo(
+    () => getGameCardStoreOptions(game, selectedVariantId).map((option) => ({
+      ...option,
+      displayName: getStoreDisplayName(option.store),
+    })),
+    [game, selectedVariantId],
+  );
+  const activeStoreOption = storeOptions.find((option) => option.isActive) ?? storeOptions[0];
+  const availabilityBadge = useMemo(
+    () => getActiveGameAvailabilityBadge(game, selectedVariantId),
+    [game, selectedVariantId],
+  );
+
+  const [aspectPct, setAspectPct] = useState<number | undefined>(undefined);
+
+  const handleImageLoad = useCallback((event: React.SyntheticEvent<HTMLImageElement>) => {
+    const img = event.currentTarget;
+    const w = img.naturalWidth;
+    const h = img.naturalHeight;
+    if (w && h) {
+      setAspectPct((h / w) * 100);
+    }
+  }, []);
 
   const handlePlayClick = (event: React.MouseEvent): void => {
     event.stopPropagation();
@@ -221,15 +201,23 @@ export const GameCard = memo(function GameCard({
       }}
       role="button"
       tabIndex={0}
-      aria-label={`Select ${game.title}`}
+      aria-label={t("gameCard.selectGame", { title: game.title })}
     >
-      <div className="game-card-image-wrapper">
+      <div
+        className="game-card-image-wrapper"
+        style={
+          aspectPct
+            ? (({ ["--game-aspect" as any]: `${aspectPct}%` } as unknown) as React.CSSProperties)
+            : undefined
+        }
+      >
         {game.imageUrl ? (
           <img
             src={game.imageUrl}
             alt={game.title}
             className="game-card-image"
             loading="lazy"
+            onLoad={handleImageLoad}
           />
         ) : (
           <div className="game-card-image-placeholder">
@@ -242,55 +230,70 @@ export const GameCard = memo(function GameCard({
           <button
             className="game-card-play-button"
             onClick={handlePlayClick}
-            aria-label={`Play ${game.title}`}
+            aria-label={t("gameCard.playGame", { title: game.title })}
             tabIndex={-1}
           >
             <Play size={24} fill="currentColor" />
           </button>
         </div>
-      </div>
 
-      <div className="game-card-info">
-        <h3 className="game-card-title" title={game.title}>
-          {game.title}
-        </h3>
-        {activeStoreOption && (
-          <p className="game-card-platform" title={activeStoreOption.displayName}>
-            {activeStoreOption.displayName}
-          </p>
-        )}
-        {storeOptions.length > 0 && (
-          <div className="game-card-stores">
-            {storeOptions.map((store) => {
-              const isActive = store.variantId === activeVariantId;
-              const className = `game-card-store-chip ${isActive ? "active" : ""}`;
-              const title = `${store.displayName}${isActive ? " (selected)" : ""}`;
+        <div className="game-card-info">
+          {availabilityBadge && (
+            <span className={`game-card-status-badge ${availabilityBadge.kind}`} title={availabilityBadge.status}>
+              {t(availabilityBadge.labelKey)}
+            </span>
+          )}
+          {activeStoreOption && (
+            <p className="game-card-platform" title={activeStoreOption.displayName}>
+              {activeStoreOption.displayName}
+            </p>
+          )}
+          {storeOptions.length > 0 && (
+            <div className="game-card-stores">
+              {storeOptions.map((store) => {
+                const className = [
+                  "game-card-store-chip",
+                  store.isActive ? "active" : "",
+                  store.isOwned ? "owned" : "",
+                ].filter(Boolean).join(" ");
+                const titleParts = [store.displayName];
+                if (store.isOwned) {
+                  titleParts.push(t("gameCard.owned"));
+                }
+                if (store.isActive) {
+                  titleParts.push(t("app.actions.select"));
+                }
+                const title = titleParts.join(" · ");
 
-              if (onSelectStore) {
+                if (onSelectStore) {
+                  return (
+                    <button
+                      key={store.storeKey}
+                      type="button"
+                      className={className}
+                      title={title}
+                      onClick={(event) => handleStoreClick(event, store.variantId)}
+                      aria-label={t("gameCard.store", { store: store.displayName })}
+                      aria-pressed={store.isActive}
+                    >
+                      <StoreBrandIcon store={store.store} />
+                    </button>
+                  );
+                }
+
                 return (
-                  <button
-                    key={store.storeKey}
-                    type="button"
-                    className={className}
-                    title={title}
-                    onClick={(event) => handleStoreClick(event, store.variantId)}
-                    aria-label={`${store.displayName} store`}
-                    aria-pressed={isActive}
-                  >
-                    <store.IconComponent />
-                  </button>
+                  <span key={store.storeKey} className={className} title={title}>
+                    <StoreBrandIcon store={store.store} />
+                  </span>
                 );
-              }
-
-              return (
-                <span key={store.storeKey} className={className} title={title}>
-                  <store.IconComponent />
-                </span>
-              );
-            })}
-          </div>
-        )}
+              })}
+            </div>
+          )}
+          <h3 className="game-card-title" title={game.title}>
+            {game.title}
+          </h3>
+        </div>
       </div>
     </div>
   );
-});
+}, gameCardPropsAreEqual);
