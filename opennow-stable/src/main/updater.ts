@@ -6,7 +6,8 @@ import { getAppBuildInfo } from "./appBuildInfo";
 import { pickRuntimeGitHubToken } from "./githubRuntimeToken";
 import { getLinuxUpdaterSupport } from "./linuxUpdaterSupport";
 import { writeCacheEntry } from "./releaseHighlights";
-import type { AppUpdaterState } from "@shared/gfn";
+import { applyUpdateChannel } from "./updateChannel";
+import type { AppUpdaterState, UpdateChannel } from "@shared/gfn";
 
 const { autoUpdater } = electronUpdater;
 
@@ -18,6 +19,7 @@ export interface AppUpdaterController {
   dispose(): void;
   getState(): AppUpdaterState;
   setAutomaticChecksEnabled(enabled: boolean): AppUpdaterState;
+  setUpdateChannel(channel: UpdateChannel): AppUpdaterState;
   checkForUpdates(source?: "auto" | "manual"): Promise<AppUpdaterState>;
   downloadUpdate(): Promise<AppUpdaterState>;
   quitAndInstall(): Promise<AppUpdaterState>;
@@ -26,12 +28,10 @@ export interface AppUpdaterController {
 interface AppUpdaterControllerOptions {
   onStateChanged: (state: AppUpdaterState) => void;
   automaticChecksEnabled: boolean;
+  updateChannel: UpdateChannel;
+  disabledReason?: string;
   onBeforeQuitAndInstall?: () => void;
   onQuitAndInstallError?: () => void;
-}
-
-function isPrereleaseVersion(version: string): boolean {
-  return version.includes("-");
 }
 
 function normalizeErrorMessage(error: unknown): string {
@@ -81,8 +81,10 @@ function createDisabledState(buildInfo: ReturnType<typeof getAppBuildInfo>, mess
 export function createAppUpdaterController(options: AppUpdaterControllerOptions): AppUpdaterController {
   const buildInfo = getAppBuildInfo();
   const currentVersion = buildInfo.version;
-  if (!app.isPackaged) {
-    const disabledState = createDisabledState(buildInfo, "Auto-updates are only available in packaged builds.");
+  const disabledReason = options.disabledReason
+    ?? (!app.isPackaged ? "Auto-updates are only available in packaged builds." : undefined);
+  if (disabledReason) {
+    const disabledState = createDisabledState(buildInfo, disabledReason);
     return {
       initialize() {
         options.onStateChanged(disabledState);
@@ -92,6 +94,9 @@ export function createAppUpdaterController(options: AppUpdaterControllerOptions)
         return disabledState;
       },
       setAutomaticChecksEnabled() {
+        return disabledState;
+      },
+      setUpdateChannel() {
         return disabledState;
       },
       async checkForUpdates() {
@@ -123,6 +128,9 @@ export function createAppUpdaterController(options: AppUpdaterControllerOptions)
       setAutomaticChecksEnabled() {
         return disabledState;
       },
+      setUpdateChannel() {
+        return disabledState;
+      },
       async checkForUpdates() {
         return disabledState;
       },
@@ -147,8 +155,7 @@ export function createAppUpdaterController(options: AppUpdaterControllerOptions)
   updater.autoDownload = false;
   updater.autoInstallOnAppQuit = false;
   updater.autoRunAppAfterInstall = true;
-  updater.allowPrerelease = isPrereleaseVersion(currentVersion);
-  updater.allowDowngrade = false;
+  applyUpdateChannel(updater, options.updateChannel);
   updater.fullChangelog = false;
 
   let disposed = false;
@@ -157,6 +164,7 @@ export function createAppUpdaterController(options: AppUpdaterControllerOptions)
   let checkInFlight = false;
   let downloadInFlight = false;
   let automaticChecksEnabled = options.automaticChecksEnabled;
+  let updateChannel = options.updateChannel;
   let availableUpdateInfo: UpdateInfo | null = null;
   let downloadedUpdateInfo: UpdateInfo | null = null;
 
@@ -334,6 +342,32 @@ export function createAppUpdaterController(options: AppUpdaterControllerOptions)
     setAutomaticChecksEnabled(enabled: boolean) {
       automaticChecksEnabled = enabled;
       scheduleAutomaticChecks();
+      return state;
+    },
+    setUpdateChannel(channel: UpdateChannel) {
+      if (channel === updateChannel) {
+        return state;
+      }
+
+      updateChannel = channel;
+      applyUpdateChannel(updater, channel);
+      availableUpdateInfo = null;
+      downloadedUpdateInfo = null;
+      updateState({
+        status: "idle",
+        availableVersion: undefined,
+        downloadedVersion: undefined,
+        progress: undefined,
+        message: channel === "nightly"
+          ? "Nightly channel selected. Checking for preview builds..."
+          : "Stable channel selected. Checking for regular releases...",
+        errorCode: undefined,
+      });
+      setImmediate(() => {
+        if (!disposed) {
+          void controller.checkForUpdates("manual");
+        }
+      });
       return state;
     },
     async checkForUpdates(source: "auto" | "manual" = "manual") {

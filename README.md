@@ -22,8 +22,8 @@
   <a href="https://play.google.com/store/apps/details?id=com.opencloudgaming.opennow">
     <img src="https://img.shields.io/badge/Android-Google%20Play-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="Download Android from Google Play">
   </a>
-  <a href="https://github.com/OpenCloudGaming/Opennow-homebrew">
-    <img src="https://img.shields.io/badge/Switch-Port%20Coming%20Soon-E60012?style=for-the-badge&logo=nintendoswitch&logoColor=white" alt="Switch port coming soon">
+  <a href="https://github.com/OpenCloudGaming/OpenNOW-Switch/releases/latest">
+    <img src="https://img.shields.io/github/v/release/OpenCloudGaming/OpenNOW-Switch?style=for-the-badge&label=Nintendo%20Switch&color=E60012&logo=nintendoswitch&logoColor=white" alt="Download OpenNOW for Nintendo Switch">
   </a>
   <a href="https://opennow.zortos.me">
     <img src="https://img.shields.io/badge/Docs-opennow.zortos.me-blue?style=for-the-badge" alt="Documentation">
@@ -68,9 +68,21 @@ OpenNOW is a community-built Electron app for playing GeForce NOW from an open-s
 
 Grab the latest desktop build from [GitHub Releases](https://github.com/OpenCloudGaming/OpenNOW/releases).
 
+### Run two instances on Windows
+
+OpenNOW remains single-instance by default. To open one additional, independent client, start the installed executable with the `--secondary` switch from PowerShell or a shortcut:
+
+```powershell
+& "C:\path\to\OpenNOW.exe" --secondary
+```
+
+The secondary window is titled **OpenNOW — Secondary** and uses a separate persistent profile ending in `-secondary`, including its own sign-in, settings, cookies, cache, device ID, and native-streamer runtime state. Launching the same command again focuses the existing secondary window, so at most one primary and one secondary profile run concurrently. Update OpenNOW from the primary instance; updates are disabled in the secondary instance to avoid competing over the installed application. Screenshots and recordings remain shared under `Pictures\OpenNOW` and use collision-resistant filenames.
+
+Each simultaneous cloud stream must be allowed by its GeForce NOW account. In practice, use separate accounts when running two sessions because GeForce NOW can reject or replace concurrent sessions from the same account. Only one window can be focused for keyboard and mouse input at a time; Discord Rich Presence can show only one activity when both profiles enable it.
+
 - iOS beta: [join TestFlight](https://testflight.apple.com/join/u1XPJKH2). The SwiftUI prototype currently lives on the [`kief5555/ios` branch](https://github.com/OpenCloudGaming/OpenNOW/tree/kief5555/ios/ios/OpenNOWiOS) under `ios/OpenNOWiOS/`; that folder is not present on this branch.
 - Android: download from [Google Play](https://play.google.com/store/apps/details?id=com.opencloudgaming.opennow).
-- Nintendo Switch: a homebrew port is coming soon in [OpenCloudGaming/Opennow-homebrew](https://github.com/OpenCloudGaming/Opennow-homebrew), built on top of Moonlight.
+- Nintendo Switch: download the latest native Horizon OS homebrew build from [OpenNOW-Switch Releases](https://github.com/OpenCloudGaming/OpenNOW-Switch/releases/latest). It supports controller-first catalog browsing and native WebRTC streaming with H.264 video, Opus audio, and low-latency input on modded Switch systems.
 
 For macOS users looking for a more performant OpenNOW version, Jayian1890 maintains the separate [OpenNOW-Mac](https://github.com/OpenCloudGaming/OpenNOW-Mac) repository.
 
@@ -113,9 +125,9 @@ Contributions are welcome. Read the [contributing guide](.github/CONTRIBUTING.md
 
 <a href="https://www.star-history.com/?repos=OpenCloudGaming%2FOpenNOW&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/image?repos=OpenCloudGaming/OpenNOW&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/image?repos=OpenCloudGaming/OpenNOW&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/image?repos=OpenCloudGaming/OpenNOW&type=date&legend=top-left" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=OpenCloudGaming/OpenNOW&type=date&theme=dark&legend=top-left&sealed_token=13YQdHqPNeJl_PZ60Tn1heFHwLWvLm3sH5u-7HePhBdXpG1poEyGeM3QG_jf08kKYWxfy65fe7OZDjBzuhznLOS5gdEMLDUXY6D7NCLdFIpOTHrmG_JN8Q" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=OpenCloudGaming/OpenNOW&type=date&legend=top-left&sealed_token=13YQdHqPNeJl_PZ60Tn1heFHwLWvLm3sH5u-7HePhBdXpG1poEyGeM3QG_jf08kKYWxfy65fe7OZDjBzuhznLOS5gdEMLDUXY6D7NCLdFIpOTHrmG_JN8Q" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=OpenCloudGaming/OpenNOW&type=date&legend=top-left&sealed_token=13YQdHqPNeJl_PZ60Tn1heFHwLWvLm3sH5u-7HePhBdXpG1poEyGeM3QG_jf08kKYWxfy65fe7OZDjBzuhznLOS5gdEMLDUXY6D7NCLdFIpOTHrmG_JN8Q" />
  </picture>
 </a>
 

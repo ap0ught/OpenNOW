@@ -1,9 +1,10 @@
 import type { ActiveSessionInfo, AuthUser, SavedAccount, SubscriptionInfo } from "@shared/gfn";
-import { House, Library, Settings, User, Timer, HardDrive, X, Loader2, PlayCircle, Square, ChevronDown, Check, Plus, Store as StoreIcon } from "lucide-react";
-import { useEffect, useRef, useState, type JSX } from "react";
-import { createPortal } from "react-dom";
+import { House, Library, Settings, User, Timer, HardDrive, X, PlayCircle, Square, ChevronDown, Check, Plus, Store as StoreIcon, MessageSquareText, Power } from "lucide-react";
+import { memo, useEffect, useRef, useState, type JSX } from "react";
 import { useTranslation } from "../i18n";
 import { OpenNowLogoMark } from "./OpenNowLogoMark";
+import { MotionSpinner } from "./MotionSpinner";
+import { ModalSurface } from "./ui/ModalSurface";
 
 interface NavbarProps {
   currentPage: "home" | "library" | "settings";
@@ -18,10 +19,15 @@ interface NavbarProps {
   onTerminateSession: () => void;
   savedAccounts: SavedAccount[];
   onSwitchAccount: (userId: string) => void;
-  onRemoveAccount: (userId: string) => void;
+  onRemoveAccount: (userId: string, restoreFocusTarget?: HTMLElement) => void;
   onAddAccount: () => void;
-  onLogoutAll: () => void;
+  onLogoutAll: (restoreFocusTarget?: HTMLElement) => void;
+  onExitApp: () => void;
+  onOpenFeedback?: () => void;
+  onBlockingOverlayChange?: (blocking: boolean) => void;
   controllerMode?: boolean;
+  /** Console mode only — the avatar opens the gamepad-navigable profile picker. */
+  onOpenProfilePicker?: () => void;
 }
 
 type NavbarModalType = "time" | "storage" | null;
@@ -33,7 +39,7 @@ function getTierDisplay(tier: string): { labelKey: string; className: string } {
   return { labelKey: "app.labels.free", className: "tier-free" };
 }
 
-export function Navbar({
+export const Navbar = memo(function Navbar({
   currentPage,
   onNavigate,
   user,
@@ -49,12 +55,24 @@ export function Navbar({
   onRemoveAccount,
   onAddAccount,
   onLogoutAll,
+  onExitApp,
+  onOpenFeedback,
+  onBlockingOverlayChange,
   controllerMode = false,
+  onOpenProfilePicker,
 }: NavbarProps): JSX.Element {
   const { t } = useTranslation();
   const [modalType, setModalType] = useState<NavbarModalType>(null);
   const [accountDropdownOpen, setAccountDropdownOpen] = useState(false);
   const accountContainerRef = useRef<HTMLDivElement | null>(null);
+  const accountButtonRef = useRef<HTMLButtonElement | null>(null);
+  const modalCloseButtonRef = useRef<HTMLButtonElement | null>(null);
+  const modalTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const retainedModalTypeRef = useRef<Exclude<NavbarModalType, null> | null>(null);
+  if (modalType) {
+    retainedModalTypeRef.current = modalType;
+  }
+  const renderedModalType = retainedModalTypeRef.current;
 
   const navItems = controllerMode
     ? [
@@ -145,7 +163,7 @@ export function Navbar({
   const spanStart = formatDateTime(subscription?.currentSpanStartDateTime);
   const spanEnd = formatDateTime(subscription?.currentSpanEndDateTime);
   const firstEntitlementStart = formatDateTime(subscription?.firstEntitlementStartDateTime);
-  const modalTitle = modalType === "time" ? t("navbar.playtimeDetails") : t("navbar.storageDetails");
+  const modalTitle = renderedModalType === "time" ? t("navbar.playtimeDetails") : t("navbar.storageDetails");
   const activeSessionTitle = activeSessionGameTitle?.trim() || null;
   const activeUserId = user?.userId ?? null;
 
@@ -160,45 +178,46 @@ export function Navbar({
     return () => window.removeEventListener("mousedown", onDocumentPointerDown);
   }, [accountDropdownOpen]);
 
-  useEffect(() => {
-    if (!modalType) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setModalType(null);
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      window.removeEventListener("keydown", onKeyDown);
-      document.body.style.overflow = previousOverflow;
-    };
-  }, [modalType]);
+  const closeModal = (): void => setModalType(null);
+  const openModal = (
+    nextModalType: Exclude<NavbarModalType, null>,
+    trigger: HTMLButtonElement,
+  ): void => {
+    modalTriggerRef.current = trigger;
+    onBlockingOverlayChange?.(true);
+    setModalType(nextModalType);
+  };
 
-  const modal = modalType && subscription
-    ? createPortal(
-        <div className="navbar-modal-backdrop" onClick={() => setModalType(null)}>
-          <div
-            className="navbar-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-label={modalTitle}
-            onClick={(event) => event.stopPropagation()}
-          >
+  const modal = subscription
+    ? (
+        <ModalSurface
+          open={modalType !== null}
+          onClose={closeModal}
+          onExitComplete={() => onBlockingOverlayChange?.(false)}
+          motion="compact"
+          overlayClassName="navbar-modal-backdrop"
+          backdropClassName="navbar-modal-scrim"
+          panelClassName="navbar-modal"
+          ariaLabel={modalTitle}
+          backdropLabel={t("app.actions.close")}
+          initialFocusRef={modalCloseButtonRef}
+          restoreFocusRef={modalTriggerRef}
+        >
             <div className="navbar-modal-header">
               <h3>{modalTitle}</h3>
               <button
+                ref={modalCloseButtonRef}
                 type="button"
                 className="navbar-modal-close"
-                onClick={() => setModalType(null)}
+                onClick={closeModal}
                 title={t("app.actions.close")}
+                aria-label={t("app.actions.close")}
               >
                 <X size={16} />
               </button>
             </div>
 
-            {modalType === "time" && (
+            {renderedModalType === "time" && (
               <div className="navbar-modal-body">
                 {!subscription.isUnlimited && timeTotal > 0 && (
                   <div className="navbar-meter">
@@ -249,7 +268,7 @@ export function Navbar({
               </div>
             )}
 
-            {modalType === "storage" && (
+            {renderedModalType === "storage" && (
               <div className="navbar-modal-body">
                 {storageHasData && (
                   <div className="navbar-meter">
@@ -283,9 +302,7 @@ export function Navbar({
                 )}
               </div>
             )}
-          </div>
-        </div>,
-        document.body,
+        </ModalSurface>
       )
     : null;
 
@@ -296,6 +313,18 @@ export function Navbar({
           <OpenNowLogoMark className="opennow-logo-mark" />
         </div>
         <span className="navbar-logo-text">OpenNOW</span>
+        {onOpenFeedback && !controllerMode && (
+          <button
+            type="button"
+            className="navbar-feedback-btn"
+            onClick={onOpenFeedback}
+            title={t("navbar.sendFeedback")}
+            aria-label={t("navbar.sendFeedback")}
+          >
+            <MessageSquareText size={14} />
+            <span>{t("navbar.sendFeedback")}</span>
+          </button>
+        )}
       </div>
 
       <div className="navbar-nav">
@@ -334,7 +363,7 @@ export function Navbar({
               onClick={onResumeSession}
               disabled={isResumingSession || isTerminatingSession || !activeSession.serverIp}
             >
-              {isResumingSession ? <Loader2 size={14} className="navbar-session-resume-spin" /> : <PlayCircle size={14} />}
+              {isResumingSession ? <MotionSpinner size={14} label="Resuming session" /> : <PlayCircle size={14} />}
               <span className="navbar-session-resume-text">{t("app.actions.resume")}</span>
               {activeSessionTitle && <span className="navbar-session-resume-game">{activeSessionTitle}</span>}
             </button>
@@ -349,7 +378,7 @@ export function Navbar({
               onClick={onTerminateSession}
               disabled={isResumingSession || isTerminatingSession}
             >
-              {isTerminatingSession ? <Loader2 size={14} className="navbar-session-resume-spin" /> : <Square size={12} />}
+              {isTerminatingSession ? <MotionSpinner size={14} label="Ending session" /> : <Square size={12} />}
               <span className="navbar-session-terminate-text">{t("session.terminate")}</span>
             </button>
           </div>
@@ -361,7 +390,7 @@ export function Navbar({
                 type="button"
                 className={`navbar-subscription-chip navbar-subscription-chip--${timeTone}`}
                 title={t("navbar.showPlaytimeDetails")}
-                onClick={() => setModalType("time")}
+                onClick={(event) => openModal("time", event.currentTarget)}
               >
                 <Timer size={14} />
                 <span>{timeLabel}</span>
@@ -372,7 +401,7 @@ export function Navbar({
                 type="button"
                 className={`navbar-subscription-chip navbar-subscription-chip--${storageTone}`}
                 title={t("navbar.showStorageDetails")}
-                onClick={() => setModalType("storage")}
+                onClick={(event) => openModal("storage", event.currentTarget)}
               >
                 <HardDrive size={14} />
                 <span>{storageLabel}</span>
@@ -380,10 +409,34 @@ export function Navbar({
             )}
           </div>
         )}
-        {user ? (
+        {user && controllerMode ? (
+          // The dropdown below is mouse-only — it closes on a document mousedown
+          // and has no keyboard or gamepad path, so it is unreachable with a
+          // controller. In console mode the avatar opens the profile picker
+          // instead, which is fully navigable.
+          <button
+            type="button"
+            className="navbar-user navbar-user--clickable navbar-user--console"
+            onClick={() => onOpenProfilePicker?.()}
+            aria-label={t("auth.accounts.switchAccount")}
+          >
+            {user.avatarUrl ? (
+              <img src={user.avatarUrl} alt="" className="navbar-avatar" />
+            ) : (
+              <div className="navbar-avatar-fallback">
+                <User size={14} />
+              </div>
+            )}
+            <div className="navbar-user-info">
+              <span className="navbar-username">{user.displayName}</span>
+              {tierInfo && <span className={`navbar-tier ${tierInfo.className}`}>{t(tierInfo.labelKey)}</span>}
+            </div>
+          </button>
+        ) : user ? (
           <>
             <div className="navbar-account-container" ref={accountContainerRef}>
               <button
+                ref={accountButtonRef}
                 type="button"
                 className="navbar-user navbar-user--clickable"
                 onClick={() => setAccountDropdownOpen((previous) => !previous)}
@@ -436,7 +489,8 @@ export function Navbar({
                             role="menuitem"
                             onClick={() => {
                               if (!isActive) {
-                                void onSwitchAccount(account.userId);
+                                if (account.hasPin) onOpenProfilePicker?.();
+                                else void onSwitchAccount(account.userId);
                               }
                               setAccountDropdownOpen(false);
                             }}
@@ -476,7 +530,7 @@ export function Navbar({
                               aria-label={t("auth.accounts.removeNamedAccount", { name: account.displayName })}
                               onClick={() => {
                                 setAccountDropdownOpen(false);
-                                onRemoveAccount(account.userId);
+                                onRemoveAccount(account.userId, accountButtonRef.current ?? undefined);
                               }}
                             >
                               <X size={12} />
@@ -505,10 +559,23 @@ export function Navbar({
                     role="menuitem"
                     onClick={() => {
                       setAccountDropdownOpen(false);
-                      onLogoutAll();
+                      onLogoutAll(accountButtonRef.current ?? undefined);
                     }}
                   >
                     {t("auth.accounts.signOutAllAccounts")}
+                  </button>
+                  <div className="navbar-account-divider" aria-hidden="true" />
+                  <button
+                    type="button"
+                    className="navbar-account-exit"
+                    role="menuitem"
+                    onClick={() => {
+                      setAccountDropdownOpen(false);
+                      onExitApp();
+                    }}
+                  >
+                    <Power size={14} />
+                    <span>{t("app.actions.exit")}</span>
                   </button>
                 </div>
               )}
@@ -524,4 +591,4 @@ export function Navbar({
       {modal}
     </nav>
   );
-}
+});

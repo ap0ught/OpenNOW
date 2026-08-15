@@ -1,15 +1,26 @@
-import { Play, Monitor } from "lucide-react";
-import { memo, useCallback, useMemo, useState } from "react";
+import { Eye, Play, Monitor } from "lucide-react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import type { JSX } from "react";
-import { normalizeGameStore } from "@shared/gfn";
+import { m } from "motion/react";
 import type { GameInfo } from "@shared/gfn";
 import { getActiveGameAvailabilityBadge } from "../lib/gameCardStatus";
-import { getStoreOptions as getGameCardStoreOptions } from "../lib/gameCardStores";
+import {
+  getActiveStoreOption,
+  getStoreOptions as getGameCardStoreOptions,
+  getStoreDisplayName,
+  normalizeStoreKey,
+} from "../lib/gameCardStores";
 import { useTranslation } from "../i18n";
+
+// Re-exported for the many call sites that still reach for these through the
+// card module; the implementations live in lib/gameCardStores so pure modules
+// can use them without pulling in React.
+export { getStoreDisplayName, normalizeStoreKey };
 
 interface GameCardProps {
   game: GameInfo;
   isSelected?: boolean;
+  surface?: "home" | "library";
   onPlay: () => void;
   onSelect: () => void;
   selectedVariantId?: string;
@@ -94,33 +105,6 @@ const STORE_ICON_MAP: Record<string, () => JSX.Element> = {
   BATTLE_NET: BattleNetIcon,
 };
 
-const STORE_DISPLAY_NAME: Record<string, string> = {
-  STEAM: "Steam",
-  EPIC_GAMES_STORE: "Epic",
-  UPLAY: "Ubisoft",
-  EA_APP: "EA",
-  GOG: "GOG",
-  XBOX: "Xbox",
-  BATTLE_NET: "Battle.net",
-};
-
-/** Normalize an appStore value to the uppercase key used by the icon/name maps. */
-export function normalizeStoreKey(raw: string): string {
-  return normalizeGameStore(raw);
-}
-
-function formatStoreFallbackName(storeKey: string): string {
-  return storeKey
-    .toLowerCase()
-    .replace(/_/g, " ")
-    .replace(/\b\w/g, (match) => match.toUpperCase());
-}
-
-export function getStoreDisplayName(store: string): string {
-  const key = normalizeStoreKey(store);
-  return STORE_DISPLAY_NAME[key] ?? formatStoreFallbackName(key);
-}
-
 export function getStoreIconComponent(store: string): () => JSX.Element {
   const key = normalizeStoreKey(store);
   return STORE_ICON_MAP[key] ?? DefaultStoreIcon;
@@ -132,10 +116,17 @@ const StoreBrandIcon = memo(function StoreBrandIcon({ store }: { store: string }
   return <IconComponent />;
 });
 
+const GAME_CARD_FALLBACK_ASPECT: Record<"home" | "library", number> = {
+  home: 56.25,
+  library: 150,
+};
+const gameCardAspectByImageUrl = new Map<string, number>();
+
 function gameCardPropsAreEqual(prev: GameCardProps, next: GameCardProps): boolean {
   return (
     prev.game === next.game
     && prev.isSelected === next.isSelected
+    && prev.surface === next.surface
     && prev.selectedVariantId === next.selectedVariantId
     && prev.onPlay === next.onPlay
     && prev.onSelect === next.onSelect
@@ -146,6 +137,7 @@ function gameCardPropsAreEqual(prev: GameCardProps, next: GameCardProps): boolea
 export const GameCard = memo(function GameCard({
   game,
   isSelected = false,
+  surface = "home",
   onPlay,
   onSelect,
   selectedVariantId,
@@ -159,22 +151,44 @@ export const GameCard = memo(function GameCard({
     })),
     [game, selectedVariantId],
   );
-  const activeStoreOption = storeOptions.find((option) => option.isActive) ?? storeOptions[0];
+  const activeStoreOption = getActiveStoreOption(storeOptions);
   const availabilityBadge = useMemo(
     () => getActiveGameAvailabilityBadge(game, selectedVariantId),
     [game, selectedVariantId],
   );
 
-  const [aspectPct, setAspectPct] = useState<number | undefined>(undefined);
+  const fallbackAspectPct = GAME_CARD_FALLBACK_ASPECT[surface];
+  const [aspectPct, setAspectPct] = useState(
+    () => (
+      surface === "library" && game.imageUrl
+        ? gameCardAspectByImageUrl.get(game.imageUrl)
+        : undefined
+    ) ?? fallbackAspectPct,
+  );
+
+  useEffect(() => {
+    setAspectPct(
+      (
+        surface === "library" && game.imageUrl
+          ? gameCardAspectByImageUrl.get(game.imageUrl)
+          : undefined
+      ) ?? fallbackAspectPct,
+    );
+  }, [fallbackAspectPct, game.imageUrl, surface]);
 
   const handleImageLoad = useCallback((event: React.SyntheticEvent<HTMLImageElement>) => {
+    if (surface !== "library") return;
     const img = event.currentTarget;
     const w = img.naturalWidth;
     const h = img.naturalHeight;
     if (w && h) {
-      setAspectPct((h / w) * 100);
+      const measuredAspectPct = (h / w) * 100;
+      if (game.imageUrl) {
+        gameCardAspectByImageUrl.set(game.imageUrl, measuredAspectPct);
+      }
+      setAspectPct(measuredAspectPct);
     }
-  }, []);
+  }, [game.imageUrl, surface]);
 
   const handlePlayClick = (event: React.MouseEvent): void => {
     event.stopPropagation();
@@ -187,22 +201,17 @@ export const GameCard = memo(function GameCard({
   };
 
   return (
-    <div
+    <m.article
       className={`game-card ${isSelected ? "selected" : ""}`}
-      onClick={onSelect}
-      onKeyDown={(event) => {
-        if (event.target !== event.currentTarget) {
-          return;
-        }
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          onPlay();
-        }
-      }}
-      role="button"
-      tabIndex={0}
-      aria-label={t("gameCard.selectGame", { title: game.title })}
+      whileHover={{ y: -2, scale: 1.01 }}
+      whileTap={{ scale: 0.985 }}
     >
+      <button
+        type="button"
+        className="game-card-details-hit-target"
+        onClick={onSelect}
+        aria-label={t("gameCard.viewDetailsFor", { title: game.title })}
+      />
       <div
         className="game-card-image-wrapper"
         style={
@@ -231,7 +240,6 @@ export const GameCard = memo(function GameCard({
             className="game-card-play-button"
             onClick={handlePlayClick}
             aria-label={t("gameCard.playGame", { title: game.title })}
-            tabIndex={-1}
           >
             <Play size={24} fill="currentColor" />
           </button>
@@ -243,50 +251,54 @@ export const GameCard = memo(function GameCard({
               {t(availabilityBadge.labelKey)}
             </span>
           )}
-          {activeStoreOption && (
-            <p className="game-card-platform" title={activeStoreOption.displayName}>
-              {activeStoreOption.displayName}
-            </p>
-          )}
-          {storeOptions.length > 0 && (
-            <div className="game-card-stores">
-              {storeOptions.map((store) => {
-                const className = [
-                  "game-card-store-chip",
-                  store.isActive ? "active" : "",
-                  store.isOwned ? "owned" : "",
-                ].filter(Boolean).join(" ");
-                const titleParts = [store.displayName];
-                if (store.isOwned) {
-                  titleParts.push(t("gameCard.owned"));
-                }
-                if (store.isActive) {
-                  titleParts.push(t("app.actions.select"));
-                }
-                const title = titleParts.join(" · ");
+          {(activeStoreOption || storeOptions.length > 0) && (
+            <div className="game-card-storefront">
+              {activeStoreOption && (
+                <p className="game-card-platform" title={activeStoreOption.displayName}>
+                  {activeStoreOption.displayName}
+                </p>
+              )}
+              {storeOptions.length > 0 && (
+                <div className="game-card-stores">
+                  {storeOptions.map((store) => {
+                    const className = [
+                      "game-card-store-chip",
+                      store.isActive ? "active" : "",
+                      store.isOwned ? "owned" : "",
+                    ].filter(Boolean).join(" ");
+                    const titleParts = [store.displayName];
+                    if (store.isOwned) {
+                      titleParts.push(t("gameCard.owned"));
+                    }
+                    if (store.isActive) {
+                      titleParts.push(t("app.actions.select"));
+                    }
+                    const title = titleParts.join(" · ");
 
-                if (onSelectStore) {
-                  return (
-                    <button
-                      key={store.storeKey}
-                      type="button"
-                      className={className}
-                      title={title}
-                      onClick={(event) => handleStoreClick(event, store.variantId)}
-                      aria-label={t("gameCard.store", { store: store.displayName })}
-                      aria-pressed={store.isActive}
-                    >
-                      <StoreBrandIcon store={store.store} />
-                    </button>
-                  );
-                }
+                    if (onSelectStore) {
+                      return (
+                        <button
+                          key={store.storeKey}
+                          type="button"
+                          className={className}
+                          title={title}
+                          onClick={(event) => handleStoreClick(event, store.variantId)}
+                          aria-label={t("gameCard.store", { store: store.displayName })}
+                          aria-pressed={store.isActive}
+                        >
+                          <StoreBrandIcon store={store.store} />
+                        </button>
+                      );
+                    }
 
-                return (
-                  <span key={store.storeKey} className={className} title={title}>
-                    <StoreBrandIcon store={store.store} />
-                  </span>
-                );
-              })}
+                    return (
+                      <span key={store.storeKey} className={className} title={title}>
+                        <StoreBrandIcon store={store.store} />
+                      </span>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
           <h3 className="game-card-title" title={game.title}>
@@ -294,6 +306,10 @@ export const GameCard = memo(function GameCard({
           </h3>
         </div>
       </div>
-    </div>
+      <span className="game-card-details-label" aria-hidden="true">
+        <Eye size={15} />
+        {t("gameCard.viewDetails")}
+      </span>
+    </m.article>
   );
 }, gameCardPropsAreEqual);

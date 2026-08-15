@@ -6,12 +6,14 @@ export interface CatalogCardActions {
   onPlayGame: (game: GameInfo) => void;
   onSelectGame: (gameId: string) => void;
   onSelectGameVariant: (gameId: string, variantId: string) => void;
+  onOpenDetails: (game: GameInfo) => void;
 }
 
 export interface GameCardListItemProps {
   game: GameInfo;
   selectedVariantId?: string;
   isSelected?: boolean;
+  surface?: "home" | "library";
   actionsRef: RefObject<CatalogCardActions>;
 }
 
@@ -23,6 +25,7 @@ function gameCardListItemPropsAreEqual(
     prev.game === next.game
     && prev.selectedVariantId === next.selectedVariantId
     && prev.isSelected === next.isSelected
+    && prev.surface === next.surface
     && prev.actionsRef === next.actionsRef
   );
 }
@@ -31,11 +34,13 @@ export const GameCardListItem = memo(function GameCardListItem({
   game,
   selectedVariantId,
   isSelected = false,
+  surface = "home",
   actionsRef,
 }: GameCardListItemProps) {
   const handleSelect = useCallback(() => {
     actionsRef.current?.onSelectGame(game.id);
-  }, [actionsRef, game.id]);
+    actionsRef.current?.onOpenDetails(game);
+  }, [actionsRef, game]);
 
   const handlePlay = useCallback(() => {
     actionsRef.current?.onPlayGame(game);
@@ -50,6 +55,7 @@ export const GameCardListItem = memo(function GameCardListItem({
       game={game}
       isSelected={isSelected}
       selectedVariantId={selectedVariantId}
+      surface={surface}
       onSelect={handleSelect}
       onPlay={handlePlay}
       onSelectStore={handleSelectStore}

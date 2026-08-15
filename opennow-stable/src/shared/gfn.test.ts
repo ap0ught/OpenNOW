@@ -10,12 +10,19 @@ import {
   createUnsupportedNativeStreamerStatus,
   isEpicStore,
   isGameInLibrary,
+  isNativeDirectXBackendSupported,
+  isNativeExternalRendererSupported,
   isNativeStreamerSupportedPlatform,
+  isNvstTransportSupported,
   isOwnedLibraryStatus,
   isOwnedVariant,
-  NATIVE_STREAMER_WINDOWS_ONLY_MESSAGE,
+  NATIVE_STREAMER_UNSUPPORTED_PLATFORM_MESSAGE,
   getDefaultStreamPreferences,
+  normalizeCodecPreference,
+  normalizeFallbackCodecPreference,
   normalizeGameStore,
+  normalizeNativeExternalRendererForPlatform,
+  normalizeTransportModeForPlatform,
   normalizeStreamPreferences,
   normalizeStreamClientModeForPlatform,
 } from "./gfn";
@@ -183,16 +190,18 @@ test("buildNativeStreamerSessionContext forwards requested/finalized streaming f
   assert.equal(context.shortcuts.toggleRecording, "F12");
 });
 
-test("normalizes native stream client mode to web on non-Windows platforms", () => {
-  assert.equal(normalizeStreamClientModeForPlatform("native", "linux"), "web");
-  assert.equal(normalizeStreamClientModeForPlatform("native", "darwin"), "web");
+test("keeps native stream client mode on supported desktop platforms", () => {
+  assert.equal(normalizeStreamClientModeForPlatform("native", "linux"), "native");
+  assert.equal(normalizeStreamClientModeForPlatform("native", "darwin"), "native");
   assert.equal(normalizeStreamClientModeForPlatform("web", "linux"), "web");
   assert.equal(normalizeStreamClientModeForPlatform("native", "win32"), "native");
+  assert.equal(normalizeStreamClientModeForPlatform("native", "android"), "web");
 });
 
-test("defaults H264 streaming to 8-bit SDR-compatible color quality", () => {
+test("defaults codec selection and fallback to automatic negotiation", () => {
   assert.deepEqual(getDefaultStreamPreferences(), {
-    codec: "H264",
+    codec: "auto",
+    fallbackCodec: "auto",
     colorQuality: "8bit_420",
   });
 });
@@ -210,14 +219,44 @@ test("normalizes H264 stream preferences away from high bit-depth modes", () => 
   });
 });
 
-test("uses the exact Windows-only unsupported native streamer status message", () => {
+test("normalizes legacy and invalid saved codec preferences", () => {
+  assert.equal(normalizeCodecPreference("H265"), "H265");
+  assert.equal(normalizeCodecPreference("auto"), "auto");
+  assert.equal(normalizeCodecPreference("VP9"), "auto");
+  assert.equal(normalizeCodecPreference(undefined), "auto");
+  assert.equal(normalizeFallbackCodecPreference("AV1"), "AV1");
+  assert.equal(normalizeFallbackCodecPreference("invalid"), "auto");
+  assert.equal(normalizeFallbackCodecPreference(null), "auto");
+});
+
+test("reports unsupported native streamer status on unknown platforms only", () => {
   assert.equal(isNativeStreamerSupportedPlatform("win32"), true);
-  assert.equal(isNativeStreamerSupportedPlatform("linux"), false);
+  assert.equal(isNativeStreamerSupportedPlatform("linux"), true);
+  assert.equal(isNativeStreamerSupportedPlatform("darwin"), true);
+  assert.equal(isNativeStreamerSupportedPlatform("android"), false);
+});
+
+test("isNativeExternalRendererSupported is Windows-only", () => {
+  assert.equal(isNativeExternalRendererSupported("win32"), true);
+  assert.equal(isNativeExternalRendererSupported("windows"), true);
+  assert.equal(isNativeExternalRendererSupported("linux"), false);
+  assert.equal(isNativeExternalRendererSupported("darwin"), false);
+  assert.equal(isNativeDirectXBackendSupported("win32"), true);
+  assert.equal(isNativeDirectXBackendSupported("linux"), false);
+  assert.equal(normalizeNativeExternalRendererForPlatform(true, "linux"), false);
+  assert.equal(normalizeNativeExternalRendererForPlatform(true, "win32"), true);
+  assert.equal(normalizeNativeExternalRendererForPlatform(false, "win32"), false);
 
   const status = createUnsupportedNativeStreamerStatus();
   assert.equal(status.detected, false);
   assert.equal(status.gstreamerAvailable, false);
   assert.equal(status.supportsOfferAnswer, false);
-  assert.equal(status.message, NATIVE_STREAMER_WINDOWS_ONLY_MESSAGE);
-  assert.equal(status.gstreamerRuntime.message, NATIVE_STREAMER_WINDOWS_ONLY_MESSAGE);
+  assert.equal(status.message, NATIVE_STREAMER_UNSUPPORTED_PLATFORM_MESSAGE);
+  assert.equal(status.gstreamerRuntime.message, NATIVE_STREAMER_UNSUPPORTED_PLATFORM_MESSAGE);
+});
+
+test("NVST transport stays disabled and normalizes to WebRTC", () => {
+  assert.equal(isNvstTransportSupported("win32"), false);
+  assert.equal(normalizeTransportModeForPlatform("nvst", "win32", "native"), "webrtc");
+  assert.equal(normalizeTransportModeForPlatform("webrtc", "win32", "native"), "webrtc");
 });
