@@ -1,6 +1,0 @@
-node_modules
-dist
-dist-electron
-dist-release
-dist-local-build
-*.log
