@@ -21,7 +21,7 @@ function Request-Catalog([string]$Method, [hashtable]$Params) {
     if (-not $read.Wait(45000)) { throw "$Method timed out" }
     $line = $read.Result
     $bytes = [Text.Encoding]::UTF8.GetByteCount($line)
-    if ($bytes -gt 1048576) { throw "$Method exceeded the 1 MiB protocol limit ($bytes bytes)" }
+    if ($bytes -gt 1048576) { throw "$Method exceeded the 1 MiB Store page budget ($bytes bytes)" }
     $script:maximumBytes = [Math]::Max($script:maximumBytes, $bytes)
     $response = $line | ConvertFrom-Json
     if ($response.id -ne $id -or -not $response.ok) { throw "$Method failed: $($response.error.message)" }
