@@ -332,10 +332,19 @@ impl StreamerService {
             .ok_or_else(|| invalid("Embedded streamer did not report video backends"))?;
         for backend in backends.iter_mut() {
             let name = backend["backend"].as_str().unwrap_or("");
-            let matches = !matches!(name, "software" | "ffmpeg")
-                && (requested_backend == "auto"
-                    || requested_backend == name
-                    || (requested_backend == "nvdec" && name == "cuda"));
+            // `auto` deliberately means hardware only: software decoding is a
+            // last resort the user has to ask for. An explicit choice, however,
+            // must be honoured even when it names one of those backends, or
+            // selecting it would be silently discarded and the user would get a
+            // "no hardware backend" failure for a path the app just refused to
+            // try. SettingsState.qml applies the same hardware-only rule to
+            // `auto`; keep the two in step.
+            let matches = if requested_backend == "auto" {
+                !matches!(name, "software" | "ffmpeg")
+            } else {
+                requested_backend == name
+                    || (requested_backend == "nvdec" && name == "cuda")
+            };
             if !matches {
                 backend["available"] = json!(false);
             }
@@ -479,8 +488,53 @@ impl StreamerService {
                 _ => &["av1", "h265", "h264"],
             };
             candidates.iter().find(|codec| codec_available(&selected, codec)).copied()
-                .ok_or_else(|| StreamerError { code: "streamer_codec_unavailable",
-                    message: "No available hardware codec supports the requested color mode. Try 8-bit 4:2:0 in Stream settings.".to_owned() })?
+                .ok_or_else(|| StreamerError {
+                    code: "streamer_codec_unavailable",
+                    message: {
+                        // Name the mode that actually failed, and only offer the
+                        // 8-bit 4:2:0 fallback when it is not already selected.
+                        // Telling a user who is already on 8bit_420 to "try
+                        // 8-bit 4:2:0" reads as a broken app and sends them in
+                        // circles. Append what the probe rejected so the message
+                        // is actionable instead of generic.
+                        let requested_mode = if hdr {
+                            format!("{color} with HDR")
+                        } else {
+                            color.to_owned()
+                        };
+                        let mut message =
+                            format!("No hardware codec supports the requested {requested_mode}.");
+                        if hdr || color != "8bit_420" {
+                            message.push_str(" Try 8-bit 4:2:0 without HDR in Stream settings.");
+                        }
+                        let mut rejected = Vec::new();
+                        for backend in capabilities["videoBackends"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                        {
+                            if backend["available"].as_bool() == Some(true) {
+                                continue;
+                            }
+                            if let Some(reason) = backend["reason"]
+                                .as_str()
+                                .filter(|reason| !reason.is_empty())
+                            {
+                                rejected.push(format!(
+                                    "{}: {reason}",
+                                    backend["backend"].as_str().unwrap_or("unknown")
+                                ));
+                            }
+                        }
+                        if !rejected.is_empty() {
+                            message.push_str(&format!(
+                                " Rejected by the video probe — {}.",
+                                rejected.join("; ")
+                            ));
+                        }
+                        message
+                    },
+                })?
         } else {
             let codec =
                 normalize_codec_name(&requested).ok_or_else(|| invalid("Unknown video codec"))?;
@@ -2237,6 +2291,91 @@ mod tests {
         )
         .unwrap_err();
         assert!(!error.message.contains("Select Auto"));
+    }
+
+    #[test]
+    fn explicit_software_backends_are_honoured_while_auto_stays_hardware_only() {
+        let capabilities = json!({"protocolVersion":STREAMER_PROTOCOL_VERSION,"videoBackends":[
+            {"backend":"vulkan","available":false,"reason":"vulkan queue isolation failed"},
+            {"backend":"ffmpeg","available":true,"codecs":[
+                {"codec":"h264","available":true}, {"codec":"h265","available":true}, {"codec":"av1","available":true}
+            ]},
+            {"backend":"software","available":true,"codecs":[{"codec":"h264","available":true}]}
+        ]});
+        // auto deliberately ignores the non-hardware backends, so with vulkan
+        // down there is nothing left to decode with.
+        let auto = StreamerService::embedded_session_settings(
+            &json!({"codec":"auto","colorQuality":"8bit_420"}),
+            &capabilities,
+        )
+        .unwrap_err();
+        assert_eq!(auto.code, "streamer_backend_unavailable");
+
+        // An explicit request must not be discarded. Silently dropping it is what
+        // made selecting ffmpeg/software report "no hardware backend" for a path
+        // the app refused to try.
+        let ffmpeg = StreamerService::embedded_session_settings(
+            &json!({"codec":"auto","nativeVideoBackend":"ffmpeg","colorQuality":"8bit_420"}),
+            &capabilities,
+        )
+        .unwrap();
+        assert_eq!(ffmpeg["codec"], "av1");
+        let software = StreamerService::embedded_session_settings(
+            &json!({"codec":"auto","nativeVideoBackend":"software","colorQuality":"8bit_420"}),
+            &capabilities,
+        )
+        .unwrap();
+        assert_eq!(software["codec"], "h264");
+    }
+
+    #[test]
+    fn codec_unavailable_message_does_not_prescribe_the_mode_already_selected() {
+        let capabilities = json!({"protocolVersion":STREAMER_PROTOCOL_VERSION,"videoBackends":[
+            {"backend":"vulkan","available":true,"codecs":[
+                {"codec":"h264","available":false}, {"codec":"h265","available":false}, {"codec":"av1","available":false}
+            ]}
+        ]});
+        let sdr = StreamerService::embedded_session_settings(
+            &json!({"codec":"auto","colorQuality":"8bit_420"}),
+            &capabilities,
+        )
+        .unwrap_err();
+        assert_eq!(sdr.code, "streamer_codec_unavailable");
+        // The user is already on 8bit_420; telling them to try it is the bug.
+        assert!(sdr.message.contains("8bit_420"));
+        assert!(!sdr
+            .message
+            .contains("Try 8-bit 4:2:0 in Stream settings"));
+
+        let advanced = StreamerService::embedded_session_settings(
+            &json!({"codec":"auto","colorQuality":"10bit_420"}),
+            &capabilities,
+        )
+        .unwrap_err();
+        assert!(advanced.message.contains("10bit_420"));
+        assert!(advanced
+            .message
+            .contains("Try 8-bit 4:2:0 without HDR in Stream settings"));
+    }
+
+    #[test]
+    fn codec_unavailable_message_names_the_backends_the_probe_rejected() {
+        let capabilities = json!({"protocolVersion":STREAMER_PROTOCOL_VERSION,"videoBackends":[
+            {"backend":"vulkan","available":true,"codecs":[
+                {"codec":"h264","available":false}, {"codec":"h265","available":false}, {"codec":"av1","available":false}
+            ]},
+            {"backend":"cuda","available":false,"reason":"CUDA unavailable"},
+            {"backend":"vaapi","available":false,"reason":"VA-API decoder init failed"}
+        ]});
+        let error = StreamerService::embedded_session_settings(
+            &json!({"codec":"auto","colorQuality":"8bit_420"}),
+            &capabilities,
+        )
+        .unwrap_err();
+        assert!(error.message.contains("CUDA unavailable"));
+        assert!(error.message.contains("VA-API decoder init failed"));
+        // The live backend has no failure reason and must not be listed as rejected.
+        assert!(!error.message.contains("vulkan: "));
     }
 
     #[test]
