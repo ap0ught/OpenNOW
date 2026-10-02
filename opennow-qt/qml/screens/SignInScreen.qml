@@ -129,13 +129,17 @@ FocusScope {
                         spacing: 0
                         visible: root.qrSize > 0
                         property real cellSize: root.qrSize > 0 ? Math.floor(248 / root.qrSize) : 0
+                        function cellIsDark(rowIndex, columnIndex) {
+                            const row = root.qrRows[rowIndex]
+                            return row !== undefined && row !== null && row.charAt(columnIndex) === "1"
+                        }
                         Repeater {
                             model: root.qrSize * root.qrSize
                             Rectangle {
                                 required property int index
                                 width: qrGrid.cellSize
                                 height: qrGrid.cellSize
-                                color: root.qrRows[Math.floor(index / root.qrSize)].charAt(index % root.qrSize) === "1" ? "#000000" : "#FFFFFF"
+                                color: qrGrid.cellIsDark(Math.floor(index / root.qrSize), index % root.qrSize) ? "#000000" : "#FFFFFF"
                             }
                         }
                     }
