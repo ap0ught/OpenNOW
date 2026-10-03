@@ -2100,6 +2100,7 @@
       "s_color_quality_13": "H.264 supports 8-bit YUV 4:2:0 only",
       "s_color_quality_14": "AV1 supports YUV 4:2:0; use H.265 for 4:4:4",
       "s_color_quality_15": "4:4:4 profiles use H.265",
+      "s_color_quality_20": "Not reported by the selected decoder",
       "s_color_quality_16": "H.265 / AV1",
       "s_color_quality_17": "8-bit",
       "s_color_quality_18": "10-bit",

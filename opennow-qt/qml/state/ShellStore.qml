@@ -662,6 +662,10 @@ QtObject {
         return settingsOwner.codecNamesFromCapabilities(capabilities)
     }
 
+    function colorQualityAvailable(colorQuality, codecName) {
+        return settingsOwner.colorQualityAvailable(colorQuality, codecName)
+    }
+
     function acceptNativeCapabilities(capabilities) {
         nativeRuntimeCapabilities = capabilities || ({})
         const codecs = codecNamesFromCapabilities(nativeRuntimeCapabilities)

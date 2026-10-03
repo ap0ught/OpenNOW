@@ -94,6 +94,31 @@ QtObject {
         check(!ShellStore.codecAvailable("h264"), "unavailable software backend must disable its codecs")
         const brokenFfmpeg = find(ffmpegItems, "settingsChoice-ffmpeg")
         check(brokenFfmpeg && !brokenFfmpeg.enabled, "an unavailable software choice must stay disabled")
+        // Colour profiles are a device fact too. A backend that only advertises 8-bit
+        // 4:2:0 must not offer 10-bit or 4:4:4, which the previous codec-name-only rule
+        // happily allowed and the core then rejected at prepare time.
+        ShellStore.settings = {codec:"auto", nativeVideoBackend:"auto"}
+        ShellStore.acceptNativeCapabilities({protocolVersion:7,videoBackends:[
+            {backend:"vaapi",available:true,codecs:[
+                {codec:"h265",available:true,colorQualities:["8bit_420"]}]}]})
+        check(ShellStore.colorQualityAvailable("8bit_420","auto"), "a reported profile must stay selectable")
+        check(!ShellStore.colorQualityAvailable("10bit_420","auto"), "an unreported bit depth must be gated off")
+        check(!ShellStore.colorQualityAvailable("8bit_444","auto"), "an unreported chroma must be gated off")
+        ShellStore.settings = {codec:"h265", nativeVideoBackend:"auto"}
+        ShellStore.acceptNativeCapabilities({protocolVersion:7,videoBackends:[
+            {backend:"vaapi",available:true,codecs:[
+                {codec:"h265",available:true,colorQualities:["8bit_420","10bit_420","10bit_444"]}]}]})
+        check(ShellStore.colorQualityAvailable("10bit_444","h265"), "a measured 4:4:4 profile must be offered")
+        check(!ShellStore.colorQualityAvailable("8bit_444","h265"), "a profile the decoder never reported must be gated off")
+        // A probe that measures no colour profiles at all must not gate anything,
+        // otherwise platforms without that data would lose every colour option.
+        ShellStore.acceptNativeCapabilities({protocolVersion:7,videoBackends:[
+            {backend:"d3d11",available:true,codecs:[{codec:"h265",available:true}]}]})
+        check(ShellStore.colorQualityAvailable("10bit_444","h265"),
+            "missing colour evidence must not disable the choice")
+        ShellStore.nativeRuntimeReady = false
+        check(!ShellStore.colorQualityAvailable("8bit_420","h265"),
+            "colour choices must fail closed while the probe is pending")
         ffmpegItems.destroy()
         codecs.destroy(); backend.destroy()
         return true

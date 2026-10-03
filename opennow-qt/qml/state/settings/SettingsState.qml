@@ -56,24 +56,55 @@ QtObject {
         settingsRequestId = coreClient.request("settings.get", {})
     }
 
+    function selectedBackendEntries(capabilities) {
+        const source = capabilities === undefined ? nativeRuntimeCapabilities : capabilities
+        const backends = source && source.videoBackends ? source.videoBackends : []
+        const requested = String(settings.nativeVideoBackend || "auto")
+        return backends.filter(backend => {
+            if (!backend.available)
+                return false
+            // Same rule the core applies in embedded_session_settings: "auto" means
+            // hardware only, while an explicit choice selects exactly the backend it
+            // names. Keeping the two in step is what stops an explicit software pick
+            // from silently producing an empty capability set.
+            if (requested === "auto")
+                return ["software", "ffmpeg"].indexOf(backend.backend) < 0
+            return requested === backend.backend
+                || (requested === "nvdec" && backend.backend === "cuda")
+        })
+    }
+
+    function colorQualityAvailable(colorQuality, codecName) {
+        if (!nativeRuntimeReady)
+            return false
+        const wanted = String(codecName || "auto").toLowerCase()
+        let reported = false
+        for (const backend of root.selectedBackendEntries()) {
+            for (const codec of backend.codecs || []) {
+                if (!codec.available)
+                    continue
+                const name = String(codec.codec || "").toLowerCase()
+                if (wanted !== "auto" && name !== wanted)
+                    continue
+                if (!Array.isArray(codec.colorQualities))
+                    continue
+                reported = true
+                // Answer the device question from what the decoder reported, not from
+                // the codec name: bit depth and chroma support vary per backend.
+                if (codec.colorQualities.indexOf(colorQuality) >= 0)
+                    return true
+            }
+        }
+        // No probe measured colour profiles for this codec, so there is nothing to
+        // gate on. Leave the choice alone rather than disabling every option.
+        return !reported
+    }
+
     function codecNamesFromCapabilities(capabilities, hdrOnly) {
         const result = []
-        const backends = capabilities && capabilities.videoBackends
-            ? capabilities.videoBackends : []
+        const backends = root.selectedBackendEntries(capabilities)
         for (let backendIndex = 0; backendIndex < backends.length; ++backendIndex) {
-            const backend = backends[backendIndex]
-            const requested = String(settings.nativeVideoBackend || "auto")
-            // "auto" means hardware only, matching the core. An explicit choice
-            // of ffmpeg/software must still contribute its codecs, otherwise
-            // selecting one disables every codec in the UI and leaves the user
-            // with no selectable option at all.
-            const softwareOnly = requested === "auto"
-                && ["software", "ffmpeg"].indexOf(backend.backend) >= 0
-            if (!backend.available || softwareOnly
-                    || (requested !== "auto" && requested !== backend.backend
-                    && !(requested === "nvdec" && backend.backend === "cuda")))
-                continue
-            const codecs = backend.codecs || []
+            const codecs = backends[backendIndex].codecs || []
             for (let codecIndex = 0; codecIndex < codecs.length; ++codecIndex) {
                 const codec = codecs[codecIndex]
                 const name = String(codec.codec || "").toLowerCase()

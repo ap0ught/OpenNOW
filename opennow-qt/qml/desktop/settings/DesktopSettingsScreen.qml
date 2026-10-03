@@ -68,12 +68,8 @@ FocusScope {
     function setChoice(key, value) {
         const normalized = String(value || "").toLowerCase()
         const codec = String(root.valueSetting("codec", "auto")).toLowerCase()
-        if (key === "colorQuality") {
-            if (codec === "h264" && normalized !== "8bit_420")
-                return
-            if (codec === "av1" && normalized.indexOf("444") >= 0)
-                return
-        }
+        if (key === "colorQuality" && root.colorQualityWireUnavailable(codec, normalized))
+            return
         const currentQuality = String(root.valueSetting("colorQuality", "8bit_420"))
         root.setSetting(key, value)
         if (key === "colorQuality")
@@ -90,15 +86,35 @@ FocusScope {
         return values.map(value => typeof value === "object" ? value : ({ kind: "choice", label: String(value), value: value }))
     }
 
+    // GFN cannot carry these profiles for the codec at all. That is a protocol
+    // limit, identical on every machine, so it stays a fixed rule. Whether the
+    // selected decoder can actually decode the remaining profiles is a device
+    // fact and is answered from the probe instead of guessed from the codec name.
+    function colorQualityWireUnavailable(codec, quality) {
+        if (codec === "h264")
+            return quality !== "8bit_420"
+        return codec === "av1" && quality.indexOf("444") >= 0
+    }
+
     function colorQualityItems() {
         const codec = String(root.valueSetting("codec", "auto")).toLowerCase()
-        const h264 = codec === "h264"
-        const chroma444Unavailable = h264 || codec === "av1"
+        const item = (label, detail, quality, wireDetail) => {
+            const wireUnavailable = root.colorQualityWireUnavailable(codec, quality)
+            const supported = ShellStore.colorQualityAvailable(quality, codec)
+            return {
+                kind: "choice",
+                label: label,
+                detail: wireUnavailable ? wireDetail
+                    : supported ? detail : qsTr("Not reported by the selected decoder"),
+                disabled: wireUnavailable || !supported,
+                value: quality
+            }
+        }
         return [
-            {kind:"choice", label:qsTr("8-bit, YUV 4:2:0"), detail:qsTr("All codecs"), value:"8bit_420"},
-            {kind:"choice", label:qsTr("8-bit, YUV 4:4:4"), detail:chroma444Unavailable ? qsTr("H.265 required") : qsTr("Sharper color"), value:"8bit_444", disabled:chroma444Unavailable},
-            {kind:"choice", label:qsTr("10-bit, YUV 4:2:0"), detail:h264 ? qsTr("H.265 / AV1 required") : qsTr("Smoother gradients"), value:"10bit_420", disabled:h264},
-            {kind:"choice", label:qsTr("10-bit, YUV 4:4:4"), detail:chroma444Unavailable ? qsTr("H.265 required") : qsTr("Highest color quality"), value:"10bit_444", disabled:chroma444Unavailable}
+            item(qsTr("8-bit, YUV 4:2:0"), qsTr("All codecs"), "8bit_420", qsTr("All codecs")),
+            item(qsTr("8-bit, YUV 4:4:4"), qsTr("Sharper color"), "8bit_444", qsTr("H.265 required")),
+            item(qsTr("10-bit, YUV 4:2:0"), qsTr("Smoother gradients"), "10bit_420", qsTr("H.265 / AV1 required")),
+            item(qsTr("10-bit, YUV 4:4:4"), qsTr("Highest color quality"), "10bit_444", qsTr("H.265 required"))
         ]
     }
 
