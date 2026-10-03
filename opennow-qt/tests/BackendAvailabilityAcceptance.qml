@@ -73,6 +73,28 @@ QtObject {
         check(!ShellStore.hdrDecoderAvailable(), "software decode must not enable HDR")
         ShellStore.nativeRuntimeReady = false
         check(!ShellStore.hdrDecoderAvailable(), "stale HDR capabilities must fail closed")
+        // "auto" is hardware only, so a software backend must not contribute codecs. If it
+        // did, picking Auto would offer decoders the core refuses to use at prepare time.
+        ShellStore.nativeRuntimeReady = true
+        ShellStore.acceptNativeCapabilities({protocolVersion:7,videoBackends:[
+            {backend:"ffmpeg",available:true,codecs:[{codec:"h264",available:true}]},
+            {backend:"software",available:true,codecs:[{codec:"h264",available:true}]}]})
+        ShellStore.settings = {codec:"h264", nativeVideoBackend:"auto"}
+        check(!ShellStore.codecAvailable("h264"), "auto must not offer software decoders")
+        // An explicit software choice has to keep contributing its codecs. Excluding them
+        // unconditionally disabled every codec in the UI, leaving nothing selectable at all.
+        ShellStore.settings = {codec:"h264", nativeVideoBackend:"ffmpeg"}
+        check(ShellStore.codecAvailable("h264"), "explicit ffmpeg must keep its codecs selectable")
+        const ffmpegItems = backendComponent.createObject(parent)
+        const ffmpeg = find(ffmpegItems, "settingsChoice-ffmpeg")
+        check(ffmpeg && ffmpeg.enabled, "the ffmpeg software choice must be offered and selectable")
+        ShellStore.acceptNativeCapabilities({protocolVersion:7,videoBackends:[
+            {backend:"ffmpeg",available:false,reason:"probe failed",codecs:[
+                {codec:"h264",available:false}]}]})
+        check(!ShellStore.codecAvailable("h264"), "unavailable software backend must disable its codecs")
+        const brokenFfmpeg = find(ffmpegItems, "settingsChoice-ffmpeg")
+        check(brokenFfmpeg && !brokenFfmpeg.enabled, "an unavailable software choice must stay disabled")
+        ffmpegItems.destroy()
         codecs.destroy(); backend.destroy()
         return true
     }

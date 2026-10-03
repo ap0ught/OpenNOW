@@ -63,7 +63,13 @@ QtObject {
         for (let backendIndex = 0; backendIndex < backends.length; ++backendIndex) {
             const backend = backends[backendIndex]
             const requested = String(settings.nativeVideoBackend || "auto")
-            if (!backend.available || ["software", "ffmpeg"].indexOf(backend.backend) >= 0
+            // "auto" means hardware only, matching the core. An explicit choice
+            // of ffmpeg/software must still contribute its codecs, otherwise
+            // selecting one disables every codec in the UI and leaves the user
+            // with no selectable option at all.
+            const softwareOnly = requested === "auto"
+                && ["software", "ffmpeg"].indexOf(backend.backend) >= 0
+            if (!backend.available || softwareOnly
                     || (requested !== "auto" && requested !== backend.backend
                     && !(requested === "nvdec" && backend.backend === "cuda")))
                 continue
@@ -241,20 +247,32 @@ QtObject {
         const backends = nativeRuntimeCapabilities.videoBackends || []
         const result = [{label: qsTr("Auto (recommended)"), value: "auto",
             detail: qsTr("Use a supported native backend")}]
+        const isSoftware = value => ["ffmpeg", "software"].indexOf(value) >= 0
         const choices = Qt.platform.os === "windows"
             ? [{label:"DirectX 11", value:"d3d11"}, {label:"DirectX 12", value:"d3d12"}, {label:"Vulkan", value:"vulkan"}]
             : Qt.platform.os === "osx"
                 ? [{label:"Metal / VideoToolbox", value:"videotoolbox"}]
                 : backends.filter(backend => ["vulkan", "cuda", "vaapi", "v4l2"].indexOf(backend.backend) >= 0)
                     .map(backend => ({label:String(backend.backend).toUpperCase(), value:backend.backend}))
+                    // Offer the non-hardware decoders explicitly. "Auto" never
+                    // selects them, by design, but a user whose hardware paths all
+                    // fail would otherwise have no way to get a picture at all.
+                    // The core honours an explicit choice, and the probe reports
+                    // honestly which of these can decode on this machine.
+                    .concat(backends.filter(backend => isSoftware(backend.backend))
+                        .map(backend => ({
+                            label: backend.backend === "ffmpeg" ? qsTr("FFmpeg (software)") : qsTr("Software decoder"),
+                            value: backend.backend
+                        })))
         for (const choice of choices) {
             const backend = backends.find(backend => backend.backend === choice.value)
             result.push(Object.assign({}, choice, {
                 disabled: !nativeRuntimeReady || !backend || !backend.available,
                 detail: !nativeRuntimeReady ? qsTr("Checking hardware…")
                     : !backend ? qsTr("Not supported by this stream view")
-                    : backend.available ? qsTr("Hardware decoding")
-                    : String(backend.reason || qsTr("Unavailable on this device"))
+                    : backend.available
+                        ? (isSoftware(choice.value) ? qsTr("Software decoding — slower, but works without hardware") : qsTr("Hardware decoding"))
+                        : String(backend.reason || qsTr("Unavailable on this device"))
             }))
         }
         return result

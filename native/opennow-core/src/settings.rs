@@ -276,6 +276,11 @@ impl SettingsStore {
                 "vulkan",
                 "videotoolbox",
                 "software",
+                // The standalone probe reports the FFmpeg software decoder under its
+                // own backend name, and Stream settings now offers it explicitly. Without
+                // this entry settings.set silently normalised an explicit "ffmpeg" back
+                // to "auto", so the choice looked accepted and then had no effect.
+                "ffmpeg",
             ],
             "auto",
         );
@@ -921,6 +926,42 @@ fn defaults() -> Map<String, Value> {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn every_offered_video_backend_is_an_accepted_setting() {
+        // Stream settings offers these names from the probe, so the choice list and the
+        // setting whitelist must not drift: an unlisted name is silently normalised back
+        // to "auto", which makes the UI look accepted while the core keeps using "auto".
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = env::temp_dir().join(format!("opennow-backend-settings-{unique}"));
+        let mut store = SettingsStore::load(Some(directory.clone())).unwrap();
+        for backend in [
+            "auto",
+            "d3d11",
+            "d3d12",
+            "nvdec",
+            "cuda",
+            "vaapi",
+            "v4l2",
+            "vulkan",
+            "videotoolbox",
+            "software",
+            "ffmpeg",
+        ] {
+            store.set("nativeVideoBackend", json!(backend)).unwrap();
+            assert_eq!(
+                store.all()["nativeVideoBackend"],
+                json!(backend),
+                "nativeVideoBackend must accept {backend}"
+            );
+        }
+        store.set("nativeVideoBackend", json!("banana")).unwrap();
+        assert_eq!(store.all()["nativeVideoBackend"], json!("auto"));
+        fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn updater_preferences_are_independent_and_preserved() {
