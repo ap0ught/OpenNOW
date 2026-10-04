@@ -950,7 +950,29 @@ fn open_decoder(
             }
             #[cfg(feature = "vaapi")]
             {
-                crate::video::open_vaapi(format)
+                // The native decoder opens a 16x16 context before it knows the
+                // stream size, which some drivers refuse outright. FFmpeg's
+                // VA-API decoder is the same hardware path with a context built
+                // at the negotiated size, so use it instead of failing the
+                // session over the dependency's placeholder shape.
+                match crate::video::open_vaapi(format) {
+                    Ok(decoder) => Ok(decoder),
+                    #[cfg(feature = "ffmpeg")]
+                    Err(native) => crate::video::FfmpegDecoder::open(
+                        config.codec,
+                        format,
+                        crate::video::FfmpegMode::Vaapi,
+                    )
+                    .map(|decoder| Box::new(decoder) as Box<dyn VideoDecoder>)
+                    .map_err(|fallback| {
+                        Error::unavailable(
+                            Subsystem::VaApi,
+                            format!("{native}; FFmpeg VA-API: {fallback}"),
+                        )
+                    }),
+                    #[cfg(not(feature = "ffmpeg"))]
+                    Err(native) => Err(native),
+                }
             }
             #[cfg(not(feature = "vaapi"))]
             {
