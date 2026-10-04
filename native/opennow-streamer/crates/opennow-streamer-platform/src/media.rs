@@ -1160,10 +1160,29 @@ impl MediaSession {
             stream,
             audio_device,
         } = config;
-        let LinuxVideoPath::Hardware(decoder_preference) = linux_selection.path else {
-            return Err(linux_selection.fallback_reason.unwrap_or_else(|| {
-                "embedded Linux output requires a native NV12 decoder".to_owned()
-            }));
+        // An explicitly chosen software backend is honoured here rather than
+        // refused. The CPU NV12 presenter below is a real, bounded upload path
+        // (`PreparedLinuxFrame::Cpu`), and it is the only way to reach a picture
+        // on a machine whose Qt Vulkan device cannot import the decoder's
+        // DMA-BUF — measured on an RX Vega M, where
+        // VK_EXT_image_drm_format_modifier is absent, so no hardware decoder's
+        // output can ever be imported. Refusing the user's explicit choice left
+        // "embedded Linux output requires a native NV12 decoder" as the only
+        // outcome, on a host that has no native path to present.
+        let decoder_preference = match linux_selection.path {
+            LinuxVideoPath::Hardware(preference) => preference,
+            LinuxVideoPath::Software => {
+                if let Some(reason) = linux_selection.fallback_reason.clone() {
+                    feedback
+                        .send(crate::MediaFeedback::BackendFallback {
+                            from: "Linux GPU decoder",
+                            to: "CPU NV12 decode and upload",
+                            reason,
+                        })
+                        .ok();
+                }
+                opennow_streamer_platform_linux::DecoderPreference::SoftwareOnly
+            }
         };
         let format = opennow_streamer_platform_linux::StreamFormat::video_default(
             stream.width,
