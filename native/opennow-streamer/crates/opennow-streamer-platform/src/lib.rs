@@ -958,7 +958,32 @@ mod tests {
                     assert!(colors.is_empty());
                     assert!(backend.zero_copy_modes.is_empty());
                 } else {
-                    assert!(colors.iter().all(|color| *color == "8bit_420"));
+                    // 8-bit 4:2:0 everywhere, plus 10-bit 4:2:0 only where the
+                    // decoder actually advertises a ten-bit VA-API profile and
+                    // only for the codecs that can carry it. The blanket
+                    // "everything is 8bit_420" form of this assertion passed
+                    // only while the ten-bit promotion was inert (no `ffmpeg`
+                    // feature); with the features the product ships, VA-API
+                    // HEVC legitimately reports 10bit_420.
+                    assert!(
+                        colors
+                            .iter()
+                            .all(|color| matches!(*color, "8bit_420" | "10bit_420")),
+                        "{} {} reported {colors:?}",
+                        backend.backend,
+                        codec.codec
+                    );
+                    for color in &colors {
+                        if *color == "10bit_420" {
+                            assert!(
+                                matches!(codec.codec, "h265" | "av1"),
+                                "{} {} cannot carry 10-bit 4:2:0",
+                                backend.backend,
+                                codec.codec
+                            );
+                            assert_eq!(codec.hdr_supported, Some(true));
+                        }
+                    }
                 }
             }
         }
