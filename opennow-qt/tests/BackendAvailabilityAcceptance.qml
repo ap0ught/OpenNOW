@@ -73,6 +73,53 @@ QtObject {
         check(!ShellStore.hdrDecoderAvailable(), "software decode must not enable HDR")
         ShellStore.nativeRuntimeReady = false
         check(!ShellStore.hdrDecoderAvailable(), "stale HDR capabilities must fail closed")
+        // "auto" is hardware only, so a software backend must not contribute codecs. If it
+        // did, picking Auto would offer decoders the core refuses to use at prepare time.
+        ShellStore.nativeRuntimeReady = true
+        ShellStore.acceptNativeCapabilities({protocolVersion:7,videoBackends:[
+            {backend:"ffmpeg",available:true,codecs:[{codec:"h264",available:true}]},
+            {backend:"software",available:true,codecs:[{codec:"h264",available:true}]}]})
+        ShellStore.settings = {codec:"h264", nativeVideoBackend:"auto"}
+        check(!ShellStore.codecAvailable("h264"), "auto must not offer software decoders")
+        // An explicit software choice has to keep contributing its codecs. Excluding them
+        // unconditionally disabled every codec in the UI, leaving nothing selectable at all.
+        ShellStore.settings = {codec:"h264", nativeVideoBackend:"ffmpeg"}
+        check(ShellStore.codecAvailable("h264"), "explicit ffmpeg must keep its codecs selectable")
+        const ffmpegItems = backendComponent.createObject(parent)
+        const ffmpeg = find(ffmpegItems, "settingsChoice-ffmpeg")
+        check(ffmpeg && ffmpeg.enabled, "the ffmpeg software choice must be offered and selectable")
+        ShellStore.acceptNativeCapabilities({protocolVersion:7,videoBackends:[
+            {backend:"ffmpeg",available:false,reason:"probe failed",codecs:[
+                {codec:"h264",available:false}]}]})
+        check(!ShellStore.codecAvailable("h264"), "unavailable software backend must disable its codecs")
+        const brokenFfmpeg = find(ffmpegItems, "settingsChoice-ffmpeg")
+        check(brokenFfmpeg && !brokenFfmpeg.enabled, "an unavailable software choice must stay disabled")
+        // Colour profiles are a device fact too. A backend that only advertises 8-bit
+        // 4:2:0 must not offer 10-bit or 4:4:4, which the previous codec-name-only rule
+        // happily allowed and the core then rejected at prepare time.
+        ShellStore.settings = {codec:"auto", nativeVideoBackend:"auto"}
+        ShellStore.acceptNativeCapabilities({protocolVersion:7,videoBackends:[
+            {backend:"vaapi",available:true,codecs:[
+                {codec:"h265",available:true,colorQualities:["8bit_420"]}]}]})
+        check(ShellStore.colorQualityAvailable("8bit_420","auto"), "a reported profile must stay selectable")
+        check(!ShellStore.colorQualityAvailable("10bit_420","auto"), "an unreported bit depth must be gated off")
+        check(!ShellStore.colorQualityAvailable("8bit_444","auto"), "an unreported chroma must be gated off")
+        ShellStore.settings = {codec:"h265", nativeVideoBackend:"auto"}
+        ShellStore.acceptNativeCapabilities({protocolVersion:7,videoBackends:[
+            {backend:"vaapi",available:true,codecs:[
+                {codec:"h265",available:true,colorQualities:["8bit_420","10bit_420","10bit_444"]}]}]})
+        check(ShellStore.colorQualityAvailable("10bit_444","h265"), "a measured 4:4:4 profile must be offered")
+        check(!ShellStore.colorQualityAvailable("8bit_444","h265"), "a profile the decoder never reported must be gated off")
+        // A probe that measures no colour profiles at all must not gate anything,
+        // otherwise platforms without that data would lose every colour option.
+        ShellStore.acceptNativeCapabilities({protocolVersion:7,videoBackends:[
+            {backend:"d3d11",available:true,codecs:[{codec:"h265",available:true}]}]})
+        check(ShellStore.colorQualityAvailable("10bit_444","h265"),
+            "missing colour evidence must not disable the choice")
+        ShellStore.nativeRuntimeReady = false
+        check(!ShellStore.colorQualityAvailable("8bit_420","h265"),
+            "colour choices must fail closed while the probe is pending")
+        ffmpegItems.destroy()
         codecs.destroy(); backend.destroy()
         return true
     }

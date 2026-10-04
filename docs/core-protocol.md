@@ -2,9 +2,18 @@
 
 The Qt shell and Rust application core communicate over newline-delimited UTF-8
 JSON on inherited standard input/output. Standard error is reserved for redacted
-diagnostics. A line is limited to 1 MiB. Unknown, malformed or oversized protocol
+diagnostics. A line is limited to 16 MiB. Unknown, malformed or oversized protocol
 messages terminate the core connection instead of leaving the shell in an
 ambiguous state.
+
+The line bound is set by the largest legitimate single result, not by the
+envelope. `catalog.library.list` and `catalog.public.list` are the only methods
+without a per-result size budget: the core aggregates the whole owned library (or
+public catalog) into one result, has no continuation cursor, and the shell needs
+the complete set so Home, Library, collections and session titles can resolve it.
+A 628-game library encodes to about 1.6 MiB, and the core clamps `limit` at 2000,
+so the realistic worst case is roughly 5 MiB. Every other catalog method is
+bounded to 768 KiB as described below.
 
 ## Handshake
 
@@ -62,9 +71,9 @@ protocol 1 and does not change the handshake or existing artwork fields.
 
 ### Store pagination (`catalog.storePages.v1`)
 
-The protocol-1 envelope and 1 MiB limit are unchanged. This additive capability
-advertises cursor pagination and separate storefront presentation. The existing
-`catalog.store.list` method now caps `limit` at 100 (default 100), returning one
+The protocol-1 envelope and the 16 MiB line limit are unchanged. This additive
+capability advertises cursor pagination and separate storefront presentation. The
+existing `catalog.store.list` method now caps `limit` at 100 (default 100), returning one
 complete upstream page instead of aggregating thousands of games.
 
 Fresh upstream pages request up to 100 games. Existing cached pages may contain

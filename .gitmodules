@@ -1,0 +1,3 @@
+[submodule "external/SalsaNOW"]
+	path = external/SalsaNOW
+	url = https://github.com/ap0ught/SalsaNOW.git

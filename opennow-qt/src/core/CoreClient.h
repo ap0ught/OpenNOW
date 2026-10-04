@@ -19,7 +19,15 @@ class CoreClient final : public QObject
 
 public:
     static constexpr int CurrentProtocolVersion = 1;
-    static constexpr qsizetype MaximumLineBytes = 1024 * 1024;
+    // Hard transport bound for one protocol line. It must stay above the largest
+    // legitimate result, which is catalog.library.list: the core aggregates the
+    // whole owned library into a single unbounded result (no cursor, no 768 KiB
+    // budget like the Store methods) and the shell asks for the entire library so
+    // Home, Library, collections and session titles can resolve it. A 628-game
+    // library encodes to about 1.6 MiB and the core clamps `limit` at 2000, so the
+    // worst case is roughly 5 MiB. 16 MiB keeps that headroom while still failing
+    // fast on a genuinely malformed line.
+    static constexpr qsizetype MaximumLineBytes = 16 * 1024 * 1024;
     static constexpr qsizetype MaximumQueuedEvents = 512;
     static QString graphicsPreference(const QString &program);
 

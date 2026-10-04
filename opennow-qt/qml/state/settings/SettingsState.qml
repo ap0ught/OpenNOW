@@ -56,18 +56,55 @@ QtObject {
         settingsRequestId = coreClient.request("settings.get", {})
     }
 
+    function selectedBackendEntries(capabilities) {
+        const source = capabilities === undefined ? nativeRuntimeCapabilities : capabilities
+        const backends = source && source.videoBackends ? source.videoBackends : []
+        const requested = String(settings.nativeVideoBackend || "auto")
+        return backends.filter(backend => {
+            if (!backend.available)
+                return false
+            // Same rule the core applies in embedded_session_settings: "auto" means
+            // hardware only, while an explicit choice selects exactly the backend it
+            // names. Keeping the two in step is what stops an explicit software pick
+            // from silently producing an empty capability set.
+            if (requested === "auto")
+                return ["software", "ffmpeg"].indexOf(backend.backend) < 0
+            return requested === backend.backend
+                || (requested === "nvdec" && backend.backend === "cuda")
+        })
+    }
+
+    function colorQualityAvailable(colorQuality, codecName) {
+        if (!nativeRuntimeReady)
+            return false
+        const wanted = String(codecName || "auto").toLowerCase()
+        let reported = false
+        for (const backend of root.selectedBackendEntries()) {
+            for (const codec of backend.codecs || []) {
+                if (!codec.available)
+                    continue
+                const name = String(codec.codec || "").toLowerCase()
+                if (wanted !== "auto" && name !== wanted)
+                    continue
+                if (!Array.isArray(codec.colorQualities))
+                    continue
+                reported = true
+                // Answer the device question from what the decoder reported, not from
+                // the codec name: bit depth and chroma support vary per backend.
+                if (codec.colorQualities.indexOf(colorQuality) >= 0)
+                    return true
+            }
+        }
+        // No probe measured colour profiles for this codec, so there is nothing to
+        // gate on. Leave the choice alone rather than disabling every option.
+        return !reported
+    }
+
     function codecNamesFromCapabilities(capabilities, hdrOnly) {
         const result = []
-        const backends = capabilities && capabilities.videoBackends
-            ? capabilities.videoBackends : []
+        const backends = root.selectedBackendEntries(capabilities)
         for (let backendIndex = 0; backendIndex < backends.length; ++backendIndex) {
-            const backend = backends[backendIndex]
-            const requested = String(settings.nativeVideoBackend || "auto")
-            if (!backend.available || ["software", "ffmpeg"].indexOf(backend.backend) >= 0
-                    || (requested !== "auto" && requested !== backend.backend
-                    && !(requested === "nvdec" && backend.backend === "cuda")))
-                continue
-            const codecs = backend.codecs || []
+            const codecs = backends[backendIndex].codecs || []
             for (let codecIndex = 0; codecIndex < codecs.length; ++codecIndex) {
                 const codec = codecs[codecIndex]
                 const name = String(codec.codec || "").toLowerCase()
@@ -241,20 +278,32 @@ QtObject {
         const backends = nativeRuntimeCapabilities.videoBackends || []
         const result = [{label: qsTr("Auto (recommended)"), value: "auto",
             detail: qsTr("Use a supported native backend")}]
+        const isSoftware = value => ["ffmpeg", "software"].indexOf(value) >= 0
         const choices = Qt.platform.os === "windows"
             ? [{label:"DirectX 11", value:"d3d11"}, {label:"DirectX 12", value:"d3d12"}, {label:"Vulkan", value:"vulkan"}]
             : Qt.platform.os === "osx"
                 ? [{label:"Metal / VideoToolbox", value:"videotoolbox"}]
                 : backends.filter(backend => ["vulkan", "cuda", "vaapi", "v4l2"].indexOf(backend.backend) >= 0)
                     .map(backend => ({label:String(backend.backend).toUpperCase(), value:backend.backend}))
+                    // Offer the non-hardware decoders explicitly. "Auto" never
+                    // selects them, by design, but a user whose hardware paths all
+                    // fail would otherwise have no way to get a picture at all.
+                    // The core honours an explicit choice, and the probe reports
+                    // honestly which of these can decode on this machine.
+                    .concat(backends.filter(backend => isSoftware(backend.backend))
+                        .map(backend => ({
+                            label: backend.backend === "ffmpeg" ? qsTr("FFmpeg (software)") : qsTr("Software decoder"),
+                            value: backend.backend
+                        })))
         for (const choice of choices) {
             const backend = backends.find(backend => backend.backend === choice.value)
             result.push(Object.assign({}, choice, {
                 disabled: !nativeRuntimeReady || !backend || !backend.available,
                 detail: !nativeRuntimeReady ? qsTr("Checking hardware…")
                     : !backend ? qsTr("Not supported by this stream view")
-                    : backend.available ? qsTr("Hardware decoding")
-                    : String(backend.reason || qsTr("Unavailable on this device"))
+                    : backend.available
+                        ? (isSoftware(choice.value) ? qsTr("Software decoding — slower, but works without hardware") : qsTr("Hardware decoding"))
+                        : String(backend.reason || qsTr("Unavailable on this device"))
             }))
         }
         return result

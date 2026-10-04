@@ -2006,6 +2006,82 @@ pub(crate) fn probe_vulkan() -> std::result::Result<(Vec<&'static str>, String),
     }
 }
 
+/// Extensions a Vulkan device must expose before FFmpeg can decode `codec`
+/// through Vulkan Video.
+fn video_decode_extension(codec: crate::VideoCodec) -> (&'static CStr, &'static CStr) {
+    let decode = match codec {
+        crate::VideoCodec::H264 => ash::khr::video_decode_h264::NAME,
+        crate::VideoCodec::H265 => ash::khr::video_decode_h265::NAME,
+        crate::VideoCodec::Av1 => ash::khr::video_decode_av1::NAME,
+    };
+    (ash::khr::video_queue::NAME, decode)
+}
+
+/// Returns the first missing Vulkan Video extension for `codec`, or `None` when
+/// `available` already contains every extension the path needs.
+fn missing_video_decode_extension(
+    codec: crate::VideoCodec,
+    available: &[&str],
+) -> Option<&'static CStr> {
+    let (queue, decode) = video_decode_extension(codec);
+    [queue, ash::khr::video_decode_queue::NAME, decode]
+        .into_iter()
+        .find(|required| {
+            !available
+                .iter()
+                .any(|name| required.to_str().is_ok_and(|required| required == *name))
+        })
+}
+
+/// Fails when no Vulkan device can decode `codec` through Vulkan Video.
+///
+/// Creating a Vulkan device is not evidence that it can decode video.
+/// FFmpeg's `av_hwdevice_ctx_create(AV_HWDEVICE_TYPE_VULKAN)` succeeds on any
+/// machine with a working Vulkan driver, so opening `h264_vulkan` there proves
+/// nothing: the decoder gets selected, the session connects, and the first
+/// frame cannot be decoded or exported. Measured on an RX Vega M (Mesa 26.2,
+/// RADV): 210 device extensions and not one video extension, so Vulkan Video
+/// decode cannot work there at all.
+///
+/// The shared in-process device validates the same extensions in
+/// `vulkan_device.rs`; this covers the standalone FFmpeg path, which creates its
+/// own device.
+pub(crate) fn require_vulkan_video_decode(
+    codec: crate::VideoCodec,
+) -> std::result::Result<String, String> {
+    let entry = unsafe { Entry::load() }.map_err(|error| error.to_string())?;
+    let create = vk::InstanceCreateInfo::default();
+    let instance = unsafe { entry.create_instance(&create, None) }.map_err(|error| {
+        format!("Vulkan loader cannot create an instance for the video decode probe: {error}")
+    })?;
+    let devices = unsafe { instance.enumerate_physical_devices() }.unwrap_or_default();
+    let mut rejected = None;
+    for device in devices {
+        let properties = unsafe { instance.get_physical_device_properties(device) };
+        let device_name = unsafe { CStr::from_ptr(properties.device_name.as_ptr()) }
+            .to_string_lossy()
+            .into_owned();
+        let available = unsafe { instance.enumerate_device_extension_properties(device) }
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|extension| {
+                (unsafe { CStr::from_ptr(extension.extension_name.as_ptr()) }).to_str().ok()
+            })
+            .collect::<Vec<_>>();
+        match missing_video_decode_extension(codec, &available) {
+            Some(missing) => {
+                rejected.get_or_insert_with(|| format!("{device_name} does not expose {missing:?}"));
+            }
+            None => {
+                unsafe { instance.destroy_instance(None) };
+                return Ok(format!("{device_name} exposes Vulkan Video decode"));
+            }
+        }
+    }
+    unsafe { instance.destroy_instance(None) };
+    Err(rejected.unwrap_or_else(|| "Vulkan found no physical device".to_owned()))
+}
+
 fn select_device(
     instance: &Instance,
     surface_loader: &ash::khr::surface::Instance,
@@ -2375,6 +2451,70 @@ mod tests {
         assert_eq!(
             choose_present_mode(&[vk::PresentModeKHR::FIFO]),
             vk::PresentModeKHR::FIFO
+        );
+    }
+
+    /// The extension gate is the difference between "a Vulkan device exists"
+    /// and "this device can decode video". Measured on an RX Vega M: 210
+    /// device extensions, no video extension among them, so Vulkan Video decode
+    /// is impossible there even though FFmpeg opens `h264_vulkan` without
+    /// complaint.
+    #[test]
+    fn video_decode_gate_rejects_a_device_with_no_video_extensions() {
+        let measured_vega_m = [
+            "VK_KHR_swapchain",
+            "VK_EXT_external_memory_dma_buf",
+            "VK_EXT_image_drm_format_modifier",
+            "VK_EXT_physical_device_drm",
+        ];
+        for codec in [crate::VideoCodec::H264, crate::VideoCodec::H265] {
+            assert_eq!(
+                missing_video_decode_extension(codec, &measured_vega_m),
+                Some(ash::khr::video_queue::NAME),
+                "{codec:?} must be rejected without VK_KHR_video_queue"
+            );
+        }
+    }
+
+    #[test]
+    fn video_decode_gate_accepts_a_device_with_the_decode_extensions() {
+        let nvidia_like = [
+            "VK_KHR_swapchain",
+            ash::khr::video_queue::NAME.to_str().unwrap(),
+            ash::khr::video_decode_queue::NAME.to_str().unwrap(),
+            ash::khr::video_decode_h264::NAME.to_str().unwrap(),
+            ash::khr::video_decode_h265::NAME.to_str().unwrap(),
+            ash::khr::video_decode_av1::NAME.to_str().unwrap(),
+        ];
+        for codec in [
+            crate::VideoCodec::H264,
+            crate::VideoCodec::H265,
+            crate::VideoCodec::Av1,
+        ] {
+            assert_eq!(
+                missing_video_decode_extension(codec, &nvidia_like),
+                None,
+                "{codec:?} must be accepted on a device with the decode queue"
+            );
+        }
+        // The queue alone is not enough: the codec-specific extension decides.
+        let queue_only = [
+            ash::khr::video_queue::NAME.to_str().unwrap(),
+            ash::khr::video_decode_queue::NAME.to_str().unwrap(),
+        ];
+        assert_eq!(
+            missing_video_decode_extension(crate::VideoCodec::H264, &queue_only),
+            Some(ash::khr::video_decode_h264::NAME)
+        );
+        // Nor is a decode queue for another codec.
+        let h265_only = [
+            ash::khr::video_queue::NAME.to_str().unwrap(),
+            ash::khr::video_decode_queue::NAME.to_str().unwrap(),
+            ash::khr::video_decode_h265::NAME.to_str().unwrap(),
+        ];
+        assert_eq!(
+            missing_video_decode_extension(crate::VideoCodec::Av1, &h265_only),
+            Some(ash::khr::video_decode_av1::NAME)
         );
     }
 }

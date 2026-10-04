@@ -213,21 +213,47 @@ impl MediaRuntime {
         let supported = matches!(requested, "auto" | "videotoolbox");
         #[cfg(target_os = "linux")]
         let supported = requested == "auto"
-            || (matches!(requested, "vulkan" | "cuda" | "nvdec" | "vaapi" | "v4l2")
-                && self.video_backends().iter().any(|backend| {
-                    backend.available
-                        && (backend.backend == requested
-                            || (requested == "nvdec" && backend.backend == "cuda"))
-                }));
+            || (matches!(
+                requested,
+                "vulkan" | "cuda" | "nvdec" | "vaapi" | "v4l2" | "ffmpeg" | "software"
+            ) && self.video_backends().iter().any(|backend| {
+                backend.available
+                    && (backend.backend == requested
+                        || (requested == "nvdec" && backend.backend == "cuda")
+                        || (requested == "ffmpeg" && backend.backend == "software"))
+            }));
         #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
         let supported = requested == "auto";
         if supported {
-            Ok(())
-        } else {
-            Err(format!(
-                "Backend {requested} is not supported by this embedded stream view. Select Auto in Stream settings."
-            ))
+            return Ok(());
         }
+        #[cfg(target_os = "linux")]
+        {
+            // Name what the probe found instead of prescribing a mode. On Linux
+            // Stream settings offers five backends, so "select Auto" was both
+            // unactionable and frequently wrong: the user had already chosen,
+            // and on a host with no hardware decoder Auto is precisely what
+            // cannot work.
+            let available = self
+                .video_backends()
+                .into_iter()
+                .filter(|backend| backend.available)
+                .map(|backend| backend.backend)
+                .collect::<Vec<_>>();
+            let mut message = format!(
+                "Backend {requested} is not supported by this embedded stream view."
+            );
+            if available.is_empty() {
+                message.push_str(" No video backend is available on this device.");
+            } else {
+                message.push_str(&format!(" Available: {}.", available.join(", ")));
+            }
+            Err(message)
+        }
+        #[cfg(not(target_os = "linux"))]
+        Err(format!(
+            "Backend {requested} is not supported by this embedded stream view. Select Auto in Stream settings."
+        ))
     }
 
     pub fn start_with_backend(
@@ -1983,6 +2009,48 @@ mod tests {
         assert!(vulkan.codecs.iter().all(|codec| !codec.available));
         assert!(runtime.validate_backend("vulkan").is_err());
         assert!(runtime.validate_backend("auto").is_ok());
+        runtime.shutdown();
+    }
+
+    /// The embedded Linux stream view must accept the software backends that
+    /// Stream settings offers. Measured on an RX Vega M: every hardware decode
+    /// path works right up to the presenter and then fails, because Qt's Vulkan
+    /// device cannot import DMA-BUF without
+    /// VK_EXT_image_drm_format_modifier. The CPU NV12 upload presenter is the
+    /// only route to a picture there, so refusing an explicit "software"
+    /// choice left the user with no working option at all.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn embedded_linux_honours_an_explicit_software_backend() {
+        let (_graphics, frames) = crate::RenderThreadGraphics::new(|| {});
+        let runtime = super::create_embedded_runtime(frames);
+        let available = |name: &str| {
+            runtime
+                .video_backends()
+                .into_iter()
+                .any(|backend| backend.backend == name && backend.available)
+        };
+        for backend in ["software", "ffmpeg"] {
+            if available(backend) {
+                assert!(
+                    runtime.validate_backend(backend).is_ok(),
+                    "{backend} is offered by Stream settings and must be honoured"
+                );
+            }
+        }
+        runtime.shutdown();
+    }
+
+    /// A rejected backend must not be answered with an action the user has
+    /// already taken, or one that cannot work here.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn embedded_linux_backend_rejection_names_the_alternatives() {
+        let (_graphics, frames) = crate::RenderThreadGraphics::new(|| {});
+        let runtime = super::create_embedded_runtime(frames);
+        let error = runtime.validate_backend("banana").unwrap_err();
+        assert!(error.contains("banana"), "{error}");
+        assert!(!error.contains("Select Auto"), "{error}");
         runtime.shutdown();
     }
 

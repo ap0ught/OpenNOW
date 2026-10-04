@@ -320,7 +320,13 @@ pub(crate) fn video_backends() -> Vec<VideoBackendCapability> {
     vec![
         multi_codec_capability("vulkan", "vulkan-video", capabilities, window_system, false),
         multi_codec_capability("cuda", "cuda", capabilities, window_system, false),
-        h264_capability("vaapi", "vaapi-h264", capabilities, window_system),
+        h264_capability(
+            "vaapi",
+            "vaapi-h264",
+            Some("vaapi-ffmpeg-h264"),
+            capabilities,
+            window_system,
+        ),
         v4l2_capability(capabilities, window_system),
         multi_codec_capability(
             "ffmpeg",
@@ -336,7 +342,7 @@ fn v4l2_capability(
     capabilities: &LinuxCapabilitySnapshot,
     window_system: &str,
 ) -> VideoBackendCapability {
-    let mut backend = h264_capability("v4l2", "v4l2-h264", capabilities, window_system);
+    let mut backend = h264_capability("v4l2", "v4l2-h264", None, capabilities, window_system);
     let decoder = capabilities.decoder("v4l2-h265");
     let presentation = capabilities.presentation_available(window_system);
     let codec = backend
@@ -439,15 +445,29 @@ fn multi_codec_capability(
 fn h264_capability(
     backend: &'static str,
     decoder_name: &str,
+    alternative_decoder_name: Option<&str>,
     capabilities: &LinuxCapabilitySnapshot,
     window_system: &str,
 ) -> VideoBackendCapability {
     let decoder = capabilities.decoder(decoder_name);
-    let h264_available = decoder.available;
-    let h264_reason = if !decoder.available {
-        Some(static_reason(decoder.detail))
-    } else {
+    // Two probes can serve the same backend. `vaapi` has a native decoder and
+    // FFmpeg's VA-API decoder; they are two implementations of one hardware
+    // path, so either one opening H.264 makes the backend available. Probing
+    // only the native decoder reported an absent backend on Mesa VCN, which
+    // rejects that decoder's 16x16 placeholder context with a resolution error
+    // that says nothing about the hardware.
+    let alternative = alternative_decoder_name.map(|name| capabilities.decoder(name));
+    let h264_available =
+        decoder.available || alternative.as_ref().is_some_and(|alt| alt.available);
+    let h264_reason = if h264_available {
         None
+    } else {
+        let mut detail = decoder.detail;
+        if let Some(alt) = alternative {
+            detail.push_str("; FFmpeg VA-API: ");
+            detail.push_str(&alt.detail);
+        }
+        Some(static_reason(detail))
     };
     VideoBackendCapability {
         backend,
@@ -510,6 +530,83 @@ mod tests {
         assert!(reason.contains("h264:"));
         assert!(reason.contains("h265: MEDIA_IOC_REQUEST_ALLOC failed"));
         assert!(reason.contains("os error 13"));
+    }
+
+    fn fail_probe(
+        capabilities: &mut LinuxCapabilitySnapshot,
+        name: &'static str,
+        detail: &str,
+    ) {
+        let probe = capabilities
+            .decoders
+            .iter_mut()
+            .find(|probe| probe.name == name)
+            .expect("snapshot must contain the probe");
+        probe.available = false;
+        probe.detail = detail.to_owned();
+    }
+
+    #[test]
+    fn vaapi_is_available_when_only_the_ffmpeg_decoder_opens_h264() {
+        // Measured on an RX Vega M (Mesa 26.2, VCN 1.x): the native decoder's
+        // 16x16 placeholder context is rejected with a resolution error while
+        // the same H.264 decode succeeds at any real stream size. Reporting the
+        // backend unavailable there left the session with no hardware codec.
+        let native_detail = "VA-API cannot create the initial H.264 decoder context: resolution not supported";
+        let mut capabilities = snapshot(false, false, true, true, vec!["wayland"]);
+        fail_probe(&mut capabilities, "vaapi-h264", native_detail);
+        capabilities.decoders.push(capability("vaapi-ffmpeg-h264", true));
+
+        let backend = h264_capability(
+            "vaapi",
+            "vaapi-h264",
+            Some("vaapi-ffmpeg-h264"),
+            &capabilities,
+            "wayland",
+        );
+        assert!(backend.available, "FFmpeg VA-API can decode what the native probe missed");
+        assert!(backend.reason.is_none());
+        assert!(
+            backend
+                .codecs
+                .iter()
+                .find(|codec| codec.codec == "h264")
+                .unwrap()
+                .available
+        );
+        assert_eq!(backend.zero_copy_modes, vec!["vaapi-drm-prime-dmabuf-vulkan"]);
+        // Auto must now select the hardware path instead of falling back to
+        // software decode.
+        assert_eq!(
+            select_embedded_fallback(
+                "auto",
+                crate::MediaStreamConfig::default(),
+                std::slice::from_ref(&backend)
+            )
+            .path,
+            LinuxVideoPath::Hardware(DecoderPreference::HardwareOnly)
+        );
+
+        // With both decoders failing, both failure reasons must survive.
+        let mut dead = snapshot(false, false, true, true, vec!["wayland"]);
+        fail_probe(&mut dead, "vaapi-h264", native_detail);
+        dead.decoders.push(BackendCapability {
+            name: "vaapi-ffmpeg-h264",
+            available: false,
+            detail: "FFmpeg was built without the h264_vaapi decoder".to_owned(),
+        });
+        let failed = h264_capability(
+            "vaapi",
+            "vaapi-h264",
+            Some("vaapi-ffmpeg-h264"),
+            &dead,
+            "wayland",
+        );
+        assert!(!failed.available);
+        let reason = failed.reason.unwrap();
+        assert!(reason.contains("resolution not supported"), "{reason}");
+        assert!(reason.contains("FFmpeg VA-API"), "{reason}");
+        assert!(reason.contains("h264_vaapi"), "{reason}");
     }
 
     #[test]
@@ -644,7 +741,7 @@ mod tests {
         let mut backends = vec![
             multi_codec_capability("vulkan", "vulkan-video", &capabilities, "x11", false),
             multi_codec_capability("ffmpeg", "ffmpeg-software", &capabilities, "x11", false),
-            h264_capability("vaapi", "vaapi-h264", &capabilities, "x11"),
+            h264_capability("vaapi", "vaapi-h264", None, &capabilities, "x11"),
         ];
         let stream = crate::MediaStreamConfig::default();
         let unavailable = select_embedded_fallback("auto", stream, &backends);

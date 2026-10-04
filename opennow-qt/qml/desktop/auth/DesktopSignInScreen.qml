@@ -592,17 +592,21 @@ FocusScope {
                                 Grid {
                                     id: qrGrid
                                     anchors.centerIn: parent
-                                    columns: root.challenge && root.challenge.qrRows ? root.challenge.qrRows.length : 0
+                                    columns: qrGrid.qrRows.length
                                     visible: columns > 0
                                     property var qrRows: root.challenge && root.challenge.qrRows ? root.challenge.qrRows : []
                                     property real cell: columns > 0 ? Math.floor(DesktopTokens.px(126) / columns) : 0
+                                    function cellIsDark(rowIndex, columnIndex) {
+                                        const row = qrGrid.qrRows[rowIndex]
+                                        return row !== undefined && row !== null && row.charAt(columnIndex) === "1"
+                                    }
                                     Repeater {
                                         model: qrGrid.columns * qrGrid.columns
                                         Rectangle {
                                             required property int index
                                             width: qrGrid.cell
                                             height: qrGrid.cell
-                                            color: qrGrid.qrRows[Math.floor(index / qrGrid.columns)].charAt(index % qrGrid.columns) === "1" ? "#0B0F1A" : "#FFFFFF"
+                                            color: qrGrid.cellIsDark(Math.floor(index / qrGrid.columns), index % qrGrid.columns) ? "#0B0F1A" : "#FFFFFF"
                                         }
                                     }
                                 }

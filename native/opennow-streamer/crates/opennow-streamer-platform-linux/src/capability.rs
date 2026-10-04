@@ -1,8 +1,8 @@
 use crate::VideoCodec;
 use crate::audio::{AudioBackend, probe_audio_backend};
 use crate::video::{
-    probe_ffmpeg_cuda, probe_ffmpeg_software, probe_ffmpeg_vulkan, probe_v4l2_devices,
-    probe_v4l2_request, probe_vaapi,
+    probe_ffmpeg_cuda, probe_ffmpeg_software, probe_ffmpeg_vaapi, probe_ffmpeg_vulkan,
+    probe_v4l2_devices, probe_v4l2_request, probe_vaapi,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +83,12 @@ pub fn probe_video_capabilities() -> (Vec<BackendCapability>, PresentationCapabi
     (
         vec![
             BackendCapability::from_probe("vaapi-h264", probe_vaapi()),
+            // The same H.264 VA-API decode path through FFmpeg's VA-API decoder.
+            // It exists as a fallback, not as a separate backend: Mesa's VCN
+            // driver rejects the native decoder's 16x16 placeholder context, so
+            // probing only the native decoder reported a working H.264 decoder
+            // as absent and left the session with no hardware backend at all.
+            BackendCapability::from_probe("vaapi-ffmpeg-h264", probe_ffmpeg_vaapi(VideoCodec::H264)),
             BackendCapability::from_probe("v4l2-h264", v4l2),
             BackendCapability::from_probe("v4l2-h265", probe_v4l2_request()),
             BackendCapability::from_probe(

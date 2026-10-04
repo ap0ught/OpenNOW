@@ -15,10 +15,25 @@ ffmpeg-bundled = [
     "ffmpeg",
     "dep:ffmpeg-sys-next",
     "ffmpeg-next/build",
+    # `build-portable` is a feature of ffmpeg-sys-next, not of ffmpeg-next.
+    # Naming ffmpeg-next here was invalid and survived only because cargo skips
+    # full feature validation while the lockfile stays fresh: any manifest edit
+    # re-resolved and failed the build. The effect while it was unapplied was
+    # silent and worse than a compile error: ffmpeg-sys-next's build script
+    # then tuned the bundled FFmpeg with -march=native instead of a portable
+    # baseline.
     "ffmpeg-sys-next/build-portable",
     "ffmpeg-sys-next/build-nvdec",
     "ffmpeg-sys-next/build-vulkan",
     "ffmpeg-sys-next/build-vaapi",
+    # DRM PRIME export. Zero-copy presentation hands VA-API and Vulkan Video
+    # surfaces to the presenter as DMA-BUF objects, and FFmpeg only compiles
+    # those paths (vaapi_map_to_drm, vulkan_map_to_drm) when libdrm is enabled.
+    # The bundled build used to configure with --disable-libdrm, so the
+    # DRM-PRIME pixel format still existed while every export path was compiled
+    # out: the first decoded frame failed with "DMA-BUF export failed: Invalid
+    # argument" while the capability probe still advertised the backend.
+    "ffmpeg-sys-next/build-lib-drm",
 ]
 
 [dependencies]

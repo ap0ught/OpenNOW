@@ -72,6 +72,43 @@ struct HardwareFormatSelection {
     exportable_vulkan_frames: bool,
 }
 
+
+/// Software AV1 decode is not available in FFmpeg's built-in `av1` decoder.
+///
+/// That decoder exists only to front-end hardware acceleration: without a
+/// hardware device `av1_decode_get_format` returns `AVERROR(ENOSYS)` on the
+/// first real packet, which reached the user as "FFmpeg software av1 packet
+/// submission failed: Function not implemented" — *after* the capability
+/// probe had advertised AV1 as decodable, because opening the decoder
+/// succeeds and only decoding fails.
+///
+/// A build that carries a real software AV1 decoder (libdav1d, libaom) is
+/// honoured; this host's bundled FFmpeg has neither.
+fn software_decoder_rejection(
+    codec: VideoCodec,
+    software_alternatives: &[&str],
+) -> Option<&'static str> {
+    match codec {
+        VideoCodec::Av1 if software_alternatives.is_empty() => Some(
+            "FFmpeg's built-in av1 decoder only fronts hardware acceleration and returns \"Function not implemented\" for software decode; this build carries no software AV1 decoder",
+        ),
+        _ => None,
+    }
+}
+
+/// Software AV1 decoders this build might provide instead of the stub.
+const SOFTWARE_AV1_DECODERS: [&str; 2] = ["libdav1d", "libaom-av1"];
+
+fn available_software_alternatives(codec: VideoCodec) -> Vec<&'static str> {
+    match codec {
+        VideoCodec::Av1 => SOFTWARE_AV1_DECODERS
+            .into_iter()
+            .filter(|name| ffmpeg::decoder::find_by_name(name).is_some())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 impl FfmpegDecoder {
     pub(crate) fn supports_vaapi_ten_bit(codec: VideoCodec) -> bool {
         initialize_ffmpeg().is_ok()
@@ -108,6 +145,12 @@ impl FfmpegDecoder {
         shared_device: Option<Arc<crate::SharedVulkanDevice>>,
     ) -> Result<Self> {
         format.validate()?;
+        if mode == FfmpegMode::Software
+            && let Some(reason) =
+                software_decoder_rejection(codec, &available_software_alternatives(codec))
+        {
+            return Err(Error::unavailable(Subsystem::Ffmpeg, reason));
+        }
         if format.pixel_format.is_444() && (mode != FfmpegMode::Vulkan || shared_device.is_none()) {
             return Err(Error::unavailable(
                 Subsystem::Ffmpeg,
@@ -118,6 +161,17 @@ impl FfmpegDecoder {
             validate_request_profile(codec, format)?;
             super::v4l2_request::probe()
                 .map_err(|reason| Error::unavailable(Subsystem::V4l2, reason))?;
+        }
+        // A Vulkan device existing is not evidence that it can decode video.
+        // Without this gate FFmpeg opens `h264_vulkan` on any machine with a
+        // Vulkan driver, the decoder is selected ahead of the working VA-API
+        // path, and the session fails at the first frame. The shared device
+        // has already validated the same extensions, so only the standalone
+        // path needs the check.
+        #[cfg(feature = "vulkan")]
+        if mode == FfmpegMode::Vulkan && shared_device.is_none() {
+            crate::presentation::require_vulkan_video_decode(codec)
+                .map_err(|reason| Error::unavailable(Subsystem::Vulkan, reason))?;
         }
         if (format.color_transfer != ColorTransfer::Sdr || format.pixel_format.is_ten_bit())
             && matches!(mode, FfmpegMode::Cuda | FfmpegMode::Software)
@@ -277,6 +331,12 @@ impl FfmpegDecoder {
         codec: VideoCodec,
         mode: FfmpegMode,
     ) -> std::result::Result<String, String> {
+        if mode == FfmpegMode::Software
+            && let Some(reason) =
+                software_decoder_rejection(codec, &available_software_alternatives(codec))
+        {
+            return Err(reason.to_owned());
+        }
         let format = StreamFormat::video_default(1920, 1080).map_err(|error| error.to_string())?;
         let decoder = Self::open(codec, format, mode).map_err(|error| error.to_string())?;
         Ok(format!(
@@ -398,7 +458,12 @@ impl FfmpegDecoder {
                     map_vulkan_frame_direct(decoded, self.last_timestamp_us, metadata)
                         .ok()
                         .and_then(|frame| frame.vulkan);
-                match map_hardware_frame_to_dmabuf(decoded, self.last_timestamp_us, metadata) {
+                match map_hardware_frame_to_dmabuf(
+                    decoded,
+                    self.last_timestamp_us,
+                    metadata,
+                    self.mode,
+                ) {
                     Ok(mut frame) => {
                         frame.vulkan = direct_vulkan;
                         if !self.zero_copy_active {
@@ -430,6 +495,7 @@ impl FfmpegDecoder {
                     decoded,
                     self.last_timestamp_us,
                     metadata,
+                    self.mode,
                 )?)
             };
             if let Some(output) = output {
@@ -769,6 +835,7 @@ fn map_hardware_frame_to_dmabuf(
     decoded: &frame::Video,
     fallback_timestamp_us: u64,
     metadata: StreamFormat,
+    mode: FfmpegMode,
 ) -> Result<DecodedVideoFrame> {
     let mut mapped = frame::Video::empty();
     mapped.set_format(Pixel::DRM_PRIME);
@@ -780,8 +847,11 @@ fn map_hardware_frame_to_dmabuf(
         )
     };
     if map_result < 0 {
+        // Name the mode that actually failed. A hardcoded "Vulkan Video" label
+        // sent the wrong reader to the wrong code: the VA-API path shares this
+        // export and reported its failure as a Vulkan Video fault.
         return Err(ffmpeg_error(
-            "Vulkan Video frame DMA-BUF export failed".to_owned(),
+            format!("{} frame DMA-BUF export failed", mode.label()),
             map_result,
         ));
     }
@@ -1737,5 +1807,29 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A codec whose decoder opens is not a codec that decodes. FFmpeg's
+    /// built-in `av1` decoder opens happily and then refuses every packet
+    /// without a hardware device, so the probe must not advertise it.
+    #[test]
+    fn software_probe_refuses_the_hardware_only_av1_decoder() {
+        assert_eq!(
+            software_decoder_rejection(VideoCodec::Av1, &[]),
+            Some(
+                "FFmpeg's built-in av1 decoder only fronts hardware acceleration and returns \"Function not implemented\" for software decode; this build carries no software AV1 decoder"
+            )
+        );
+        // A real software AV1 decoder makes the claim honest again.
+        assert_eq!(software_decoder_rejection(VideoCodec::Av1, &["libdav1d"]), None);
+        // H.264 and HEVC have working software decoders in every build.
+        for codec in [VideoCodec::H264, VideoCodec::H265] {
+            assert_eq!(software_decoder_rejection(codec, &[]), None);
+            assert!(
+                FfmpegDecoder::probe(codec, FfmpegMode::Software).is_ok(),
+                "{codec:?} must remain software-decodable"
+            );
+        }
+        assert!(FfmpegDecoder::probe(VideoCodec::Av1, FfmpegMode::Software).is_err());
     }
 }
