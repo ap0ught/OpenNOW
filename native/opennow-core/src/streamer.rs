@@ -508,28 +508,61 @@ impl StreamerService {
                             message.push_str(" Try 8-bit 4:2:0 without HDR in Stream settings.");
                         }
                         let mut rejected = Vec::new();
+                        let mut unsuitable = Vec::new();
                         for backend in capabilities["videoBackends"]
                             .as_array()
                             .into_iter()
                             .flatten()
                         {
+                            let name = backend["backend"].as_str().unwrap_or("unknown");
                             if backend["available"].as_bool() == Some(true) {
+                                // An available backend that cannot serve the
+                                // requested profile is the case that used to
+                                // disappear: `vaapi` reported itself available
+                                // while offering only 10-bit profiles, so a
+                                // session asking for 8bit_420 was told nothing
+                                // about the backend closest to working. Only
+                                // accuse a backend that actually publishes its
+                                // profiles; one that reports none is unknown,
+                                // not unsuitable.
+                                let codecs = backend["codecs"].as_array();
+                                let reports_profiles = codecs.is_some_and(|codecs| {
+                                    codecs.iter().any(|codec| codec["colorQualities"].is_array())
+                                });
+                                let serves = codecs.is_some_and(|codecs| {
+                                    codecs.iter().any(|codec| {
+                                        codec["available"].as_bool() == Some(true)
+                                            && codec["colorQualities"]
+                                                .as_array()
+                                                .is_some_and(|qualities| {
+                                                    qualities.iter().any(|quality| {
+                                                        quality.as_str() == Some(color)
+                                                    })
+                                                })
+                                    })
+                                });
+                                if reports_profiles && !serves {
+                                    unsuitable.push(name.to_owned());
+                                }
                                 continue;
                             }
                             if let Some(reason) = backend["reason"]
                                 .as_str()
                                 .filter(|reason| !reason.is_empty())
                             {
-                                rejected.push(format!(
-                                    "{}: {reason}",
-                                    backend["backend"].as_str().unwrap_or("unknown")
-                                ));
+                                rejected.push(format!("{name}: {reason}"));
                             }
                         }
                         if !rejected.is_empty() {
                             message.push_str(&format!(
                                 " Rejected by the video probe — {}.",
                                 rejected.join("; ")
+                            ));
+                        }
+                        if !unsuitable.is_empty() {
+                            message.push_str(&format!(
+                                " Available without a {color} profile: {}.",
+                                unsuitable.join(", ")
                             ));
                         }
                         message
@@ -2356,6 +2389,55 @@ mod tests {
         assert!(advanced
             .message
             .contains("Try 8-bit 4:2:0 without HDR in Stream settings"));
+    }
+
+    #[test]
+    fn codec_unavailable_message_names_an_available_backend_without_the_requested_profile() {
+        // The regression this covers: `vaapi` reported itself available while
+        // publishing only 10-bit profiles, the session asked for 8bit_420, and
+        // the message listed every rejected backend while saying nothing about
+        // the one that was alive and closest to working.
+        let capabilities = json!({"protocolVersion":STREAMER_PROTOCOL_VERSION,"videoBackends":[
+            {"backend":"vaapi","available":true,"codecs":[
+                {"codec":"h264","available":false,"colorQualities":[]},
+                {"codec":"h265","available":true,"colorQualities":["10bit_420"]},
+                {"codec":"av1","available":false,"colorQualities":[]}]},
+            {"backend":"v4l2","available":false,"reason":"no usable stateful H.264 M2M node under /dev/video*"}
+        ]});
+        let error = StreamerService::embedded_session_settings(
+            &json!({"codec":"auto","colorQuality":"8bit_420"}),
+            &capabilities,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "streamer_codec_unavailable");
+        assert!(
+            error
+                .message
+                .contains("Available without a 8bit_420 profile: vaapi"),
+            "{}",
+            error.message
+        );
+        assert!(error.message.contains("no usable stateful H.264 M2M node"));
+        // It must not be filed under the rejected probe failures.
+        assert!(!error.message.contains("vaapi: no usable"));
+
+        // A backend that publishes no profiles at all is unknown, not
+        // unsuitable, and must not be named.
+        let opaque = json!({"protocolVersion":STREAMER_PROTOCOL_VERSION,"videoBackends":[
+            {"backend":"vulkan","available":true,"codecs":[
+                {"codec":"h264","available":false}, {"codec":"h265","available":false}]}
+        ]});
+        let error = StreamerService::embedded_session_settings(
+            &json!({"codec":"auto","colorQuality":"8bit_420"}),
+            &opaque,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "streamer_codec_unavailable");
+        assert!(
+            !error.message.contains("Available without"),
+            "{}",
+            error.message
+        );
     }
 
     #[test]
