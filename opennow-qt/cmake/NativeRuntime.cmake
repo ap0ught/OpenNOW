@@ -87,6 +87,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         --features linux-ffmpeg-bundled,linux-vaapi)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(OPENNOW_VAAPI REQUIRED libva libva-drm)
+    # The bundled FFmpeg configures with --enable-libdrm, which is what compiles
+    # its DRM PRIME frame export. A host without libdrm's development files would
+    # otherwise fail deep inside the FFmpeg configure step.
+    pkg_check_modules(OPENNOW_LIBDRM REQUIRED libdrm)
     if(OPENNOW_RUST_TARGET MATCHES "^aarch64-.*-linux-"
         OR (NOT OPENNOW_RUST_TARGET AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$"))
         pkg_check_modules(OPENNOW_V4L2_REQUEST REQUIRED libdrm libudev)

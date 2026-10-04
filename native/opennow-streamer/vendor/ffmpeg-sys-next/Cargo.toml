@@ -43,6 +43,12 @@ build = ["static"]
 build-amf = ["build"]
 build-audiotoolbox = ["build"]
 build-drm = ["build"]
+# libdrm is not a decoder backend: it gates FFmpeg's DRM PRIME frame import and
+# export, which is how VA-API and Vulkan Video surfaces reach the presenter as
+# DMA-BUF objects. Without it, CONFIG_LIBDRM is 0 and
+# `vaapi_map_from(AV_PIX_FMT_DRM_PRIME)` silently falls through to a host-memory
+# mapping, which fails with EINVAL at the first decoded frame.
+build-lib-drm = ["build"]
 build-lib-aacplus = ["build"]
 build-lib-ass = ["build"]
 build-lib-avs = ["build"]
