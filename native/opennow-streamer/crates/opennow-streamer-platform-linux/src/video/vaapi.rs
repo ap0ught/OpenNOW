@@ -18,6 +18,17 @@ use crate::{
 
 const MAX_DECODE_RETRIES: usize = 16;
 
+/// Size used for every capability-probe allocation.
+///
+/// These must be a size a real stream uses. Mesa's VCN driver rejects a decode
+/// context below its minimum coded size with `VA_STATUS_ERROR_RESOLUTION_NOT_SUPPORTED`,
+/// so probing with a 16x16 placeholder reports a perfectly working H.264
+/// decoder as unavailable — and the failure reads like a device limit rather
+/// than the probe's own constant. Measured on an RX Vega M (Mesa 26.2, VCN 1.x):
+/// 16x16 and 32x32 fail, 64x64 and above succeed up to 4096x4096.
+const PROBE_WIDTH: u32 = 1280;
+const PROBE_HEIGHT: u32 = 720;
+
 struct VaFrame {
     visible: Resolution,
     coded: Resolution,
@@ -128,7 +139,10 @@ impl VaApiDecoder {
             "no /dev/dri/renderD* or /dev/dri/card* node initialized through VA-API".to_owned()
         })?;
         validate_h264_display(&display)?;
-        let probe_frame = VaFrame::new(Resolution::from((16, 16)), Resolution::from((16, 16)));
+        let probe_frame = VaFrame::new(
+            Resolution::from((PROBE_WIDTH, PROBE_HEIGHT)),
+            Resolution::from((PROBE_WIDTH, PROBE_HEIGHT)),
+        );
         drop(
             probe_frame
                 .to_native_handle(&display)
@@ -250,6 +264,12 @@ fn open_h264_decoder(display: Arc<Display>) -> std::result::Result<H264VaapiDeco
     // reject that context shape (notably nvidia-vaapi-driver). Exercise the
     // exact operation first so an incompatible driver becomes a normal
     // capability failure instead of reaching the dependency's `expect`.
+    //
+    // The pre-validation uses a real stream size, so it can no longer predict
+    // that failure: on a driver with a minimum context size the dependency's
+    // own 16x16 `expect` still panics, and the catch below turns that into an
+    // ordinary error. Callers fall back to FFmpeg's VA-API decoder, which
+    // creates its context at the negotiated size.
     validate_initial_context(&display)?;
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         H264VaapiDecoder::new_vaapi(display, cros_codecs::decoder::BlockingMode::NonBlocking)
@@ -271,7 +291,7 @@ fn validate_initial_context(display: &Arc<Display>) -> std::result::Result<(), S
         .map_err(|error| format!("VA-API cannot create the H.264 decoder config: {error}"))?;
     drop(
         display
-            .create_context::<()>(&config, 16, 16, None, true)
+            .create_context::<()>(&config, PROBE_WIDTH, PROBE_HEIGHT, None, true)
             .map_err(|error| {
                 format!("VA-API cannot create the initial H.264 decoder context: {error}")
             })?,
@@ -352,4 +372,28 @@ fn validate_h264_display(display: &Display) -> std::result::Result<(), String> {
         return Err("VA-API device exposes no H.264 VLD entrypoint".to_owned());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PROBE_HEIGHT, PROBE_WIDTH};
+
+    /// Guards the probe size against regressing to a tiny placeholder.
+    ///
+    /// Measured on an RX Vega M (Mesa 26.2, VCN 1.x): `vaCreateContext`
+    /// succeeds from 64x64 upwards and fails below it with
+    /// `VA_STATUS_ERROR_RESOLUTION_NOT_SUPPORTED`. A smaller probe therefore
+    /// reports a working H.264 decoder as absent, and the message reads like a
+    /// device limit rather than the probe's own constant. The dependency's
+    /// constructor still uses 16x16 and is handled by the caller's fallback to
+    /// FFmpeg's VA-API decoder, not by shrinking this probe.
+    #[test]
+    fn probe_allocations_meet_the_smallest_context_drivers_accept() {
+        const SMALLEST_ACCEPTED: u32 = 64;
+        assert!(PROBE_WIDTH >= SMALLEST_ACCEPTED, "probe width {PROBE_WIDTH}");
+        assert!(
+            PROBE_HEIGHT >= SMALLEST_ACCEPTED,
+            "probe height {PROBE_HEIGHT}"
+        );
+    }
 }

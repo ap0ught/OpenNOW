@@ -57,6 +57,11 @@ pub(crate) fn probe_ffmpeg_software(codec: VideoCodec) -> std::result::Result<St
     FfmpegDecoder::probe(codec, FfmpegMode::Software)
 }
 
+#[cfg(feature = "ffmpeg")]
+pub(crate) fn probe_ffmpeg_vaapi(codec: VideoCodec) -> std::result::Result<String, String> {
+    FfmpegDecoder::probe(codec, FfmpegMode::Vaapi)
+}
+
 #[cfg(not(feature = "ffmpeg"))]
 pub(crate) fn probe_ffmpeg_vulkan(_: VideoCodec) -> std::result::Result<String, String> {
     Err("crate was built without the ffmpeg feature".to_owned())
@@ -69,6 +74,11 @@ pub(crate) fn probe_ffmpeg_cuda(_: VideoCodec) -> std::result::Result<String, St
 
 #[cfg(not(feature = "ffmpeg"))]
 pub(crate) fn probe_ffmpeg_software(_: VideoCodec) -> std::result::Result<String, String> {
+    Err("crate was built without the ffmpeg feature".to_owned())
+}
+
+#[cfg(not(feature = "ffmpeg"))]
+pub(crate) fn probe_ffmpeg_vaapi(_: VideoCodec) -> std::result::Result<String, String> {
     Err("crate was built without the ffmpeg feature".to_owned())
 }
 
