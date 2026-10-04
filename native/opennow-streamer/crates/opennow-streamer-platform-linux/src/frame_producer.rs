@@ -735,6 +735,18 @@ impl LinuxFrameProducer {
                 Ok(imported) => return Ok(PreparedLinuxFrame::DmaBuf(imported)),
                 Err(error) => gpu_error = Some(error),
             }
+        } else if frame.dmabuf.is_some() && !self.dmabuf_import_supported {
+            // Name the missing capability and the way out. "Implicit CPU
+            // readback is disabled" told the user nothing about the fact that
+            // their decode had already succeeded: the frame is a real
+            // DMA-BUF, and the blocker is that Qt's Vulkan device cannot import
+            // one. Measured on an RX Vega M, where the driver omits
+            // VK_EXT_image_drm_format_modifier, so every hardware decoder ends
+            // up here.
+            gpu_error = Some(Error::unavailable(
+                Subsystem::Vulkan,
+                "the decoder produced a DMA-BUF frame but Qt's Vulkan device cannot import one (VK_EXT_image_drm_format_modifier is unavailable); select the software video backend in Stream settings to present this stream with a CPU upload",
+            ));
         }
         // CPU planes are accepted only from an explicitly CPU-backed decoder,
         // never as an automatic substitute for failed native GPU interop.
